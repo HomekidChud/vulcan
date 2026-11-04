@@ -1,0 +1,155 @@
+// examples/tictactoe.vulcan — Tic-Tac-Toe vs an unbeatable minimax AI.
+// You are X. Press 1-9 to place your mark (q quits).
+
+fn at(board: [string], r: i64, c: i64) -> string {
+    return board[r * 3 + c]
+}
+
+fn winner(board: [string]) -> string {
+    // rows, cols, diagonals
+    for i in 0 .. 3 {
+        if at(board, i, 0) == at(board, i, 1) && at(board, i, 1) == at(board, i, 2) {
+            let m = at(board, i, 0)
+            if m != " " { return m }
+        }
+        if at(board, 0, i) == at(board, 1, i) && at(board, 1, i) == at(board, 2, i) {
+            let m = at(board, 0, i)
+            if m != " " { return m }
+        }
+    }
+    if at(board, 0, 0) == at(board, 1, 1) && at(board, 1, 1) == at(board, 2, 2) {
+        let m = at(board, 1, 1)
+        if m != " " { return m }
+    }
+    if at(board, 0, 2) == at(board, 1, 1) && at(board, 1, 1) == at(board, 2, 0) {
+        let m = at(board, 1, 1)
+        if m != " " { return m }
+    }
+    return ""
+}
+
+fn full(board: [string]) -> bool {
+    for i in 0 .. 9 {
+        if board[i] == " " { return false }
+    }
+    return true
+}
+
+fn minimax(board: [string], ai_turn: bool, depth: i64) -> i64 {
+    let w = winner(board)
+    if w == "O" { return 10 - depth }
+    if w == "X" { return depth - 10 }
+    if full(board) { return 0 }
+
+    let best: i64 = 0
+    if ai_turn {
+        best = -100
+        for i in 0 .. 9 {
+            if board[i] == " " {
+                board[i] = "O"
+                let score = minimax(board, false, depth + 1)
+                board[i] = " "
+                if score > best { best = score }
+            }
+        }
+    } else {
+        best = 100
+        for i in 0 .. 9 {
+            if board[i] == " " {
+                board[i] = "X"
+                let score = minimax(board, true, depth + 1)
+                board[i] = " "
+                if score < best { best = score }
+            }
+        }
+    }
+    return best
+}
+
+fn ai_move(board: [string]) -> i64 {
+    let best_score = -100
+    let best_move = -1
+    for i in 0 .. 9 {
+        if board[i] == " " {
+            board[i] = "O"
+            let score = minimax(board, false, 1)
+            board[i] = " "
+            if score > best_score {
+                best_score = score
+                best_move = i
+            }
+        }
+    }
+    return best_move
+}
+
+fn draw(board: [string]) {
+    clear_screen()
+    print("   1 2 3")
+    for r in 0 .. 3 {
+        let row = f"{r * 3 + 1}  {at(board, r, 0)} {at(board, r, 1)} {at(board, r, 2)}"
+        print(row)
+    }
+    print("you are X — press 1-9, q quits")
+}
+
+fn main() {
+    term_raw()
+    defer { term_normal() }
+
+    let board: [string] = [" ", " ", " ", " ", " ", " ", " ", " ", " "]
+    let over = false
+
+    while !over {
+        draw(board)
+        // player move
+        let moved = false
+        while !moved {
+            if key_ready() == 1 {
+                let k = read_key()
+                if k == 'q' {
+                    print("\nbye!")
+                    return
+                }
+                if k >= '1' && k <= '9' {
+                    let idx = (k - '1') as i64
+                    if board[idx] == " " {
+                        board[idx] = "X"
+                        moved = true
+                    } else {
+                        print_at(0, 8, "that cell is taken")
+                    }
+                }
+            } else {
+                sleep_ms(15)
+            }
+        }
+
+        let w = winner(board)
+        if w != "" || full(board) {
+            over = true
+            break
+        }
+
+        // ai move
+        let m = ai_move(board)
+        if m >= 0 {
+            board[m] = "O"
+        }
+
+        w = winner(board)
+        if w != "" || full(board) {
+            over = true
+        }
+    }
+
+    draw(board)
+    let w = winner(board)
+    if w == "X" {
+        print("\nX wins — you beat the unbeatable?!")
+    } elif w == "O" {
+        print("\nO wins — the AI remains undefeated")
+    } else {
+        print("\ndraw — a worthy opponent")
+    }
+}

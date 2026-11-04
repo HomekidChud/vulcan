@@ -13,6 +13,21 @@ fn main() {
 }
 ```
 
+## Vulcan 0.3.0 — what's new
+
+- **`--safe` build mode** — `vulcan run --safe` (or build/bench/test) compiles with AddressSanitizer + UndefinedBehaviorSanitizer: out-of-bounds heap access, use-after-free, and signed integer overflow abort the program at the exact line instead of corrupting memory.
+- **Game/terminal stdlib** — everything you need to build any kind of game:
+  - timing: `ms_now()` (monotonic ms clock), `sleep_ms(n)` (frame caps)
+  - input: `key_ready()`, `read_key()`, `term_raw()` / `term_normal()` (with `defer` cleanup)
+  - output: `print_at(x, y, s)`, `clear_screen()`, `cursor_visible(0)`, `set_color(fg, bg)` (8 ANSI colors, `-1` skips)
+  - screen: `screen_width()`, `screen_height()` (live terminal size)
+  - randomness: `rand_int(lo, hi)`
+- **Three example games** in pure Vulcan, covering three genres:
+  - `examples/snake.vulcan` — arcade (grid, growth, collision)
+  - `examples/pong.vulcan` — real-time physics (ball angles, AI opponent, frame loop)
+  - `examples/tictactoe.vulcan` — turn-based strategy (full minimax AI — it cannot be beaten)
+- **Language**: bare `return` (no semicolon, no value), string `.repeat(n)`, array printing, typed empty arrays
+
 ## Vulcan 0.2.0 — what's new
 
 The 0.2.0 release roughly doubles the language:
@@ -56,6 +71,7 @@ Is Vulcan "securer than Rust"? No. Rust's borrow checker proves memory safety at
 
 What Vulcan does give you:
 
+- **`--safe` sanitizer builds** — `vulcan run --safe app.vulcan` compiles with AddressSanitizer + UndefinedBehaviorSanitizer: out-of-bounds heap access, use-after-free, and integer overflow abort at the exact line with a stack trace. Develop with `--safe`, ship hardened.
 - **Bounds-checked arrays** — every element access goes through a checked `get`/`set`, so indexing bugs abort instead of corrupting memory.
 - **Hardened binaries by default** — every vulcan build compiles with `-fstack-protector-strong` (stack smashing detection), `-D_FORTIFY_SOURCE=2` (fortified libc calls), full PIE/ASLR (`-fPIE -pie`), full RELRO (`-z relro -z now`), and `-Werror=format-security` (format string injection rejected at compile time).
 - **No hidden runtime** — the generated C is readable (`vulcan emit`), so the attack surface is auditable.
@@ -89,11 +105,25 @@ vulcan run examples/fib.vulcan        # compile + execute
 vulcan build examples/fib.vulcan     # emit C + native binary
 vulcan emit examples/fib.vulcan      # show generated C
 vulcan bench examples/fib.vulcan      # time repeated runs
+vulcan run --safe examples/fib.vulcan # sanitizer build (ASan + UBSan)
 vulcan selftest                       # run the test suite
 vulcan init myproj                    # scaffold a new project
 ```
 
 Requires `clang` or `gcc` on your PATH (Vulcan compiles through C; clang is preferred for faster loops).
+
+## Making games
+
+The full game stack is built in — timing (`ms_now`, `sleep_ms`), non-blocking keyboard input (`key_ready`, `read_key`, `term_raw`), drawing (`print_at`, `clear_screen`, `set_color`, `cursor_visible`), screen size (`screen_width`, `screen_height`), and randomness (`rand_int`). See `examples/pong.vulcan` for the canonical game loop:
+
+```vulcan
+term_raw()
+defer { term_normal() }        // terminal state always restored
+cursor_visible(0)
+// per frame: drain keys, update state, draw at print_at(x, y, ...), sleep_ms(70)
+```
+
+Three complete games ship in `examples/`: Snake (arcade), Pong (real-time physics + AI), and Tic-Tac-Toe (unbeatable minimax AI).
 
 ## How it works
 

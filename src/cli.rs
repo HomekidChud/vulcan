@@ -234,6 +234,45 @@ fn main() -> void {
 "#,
         expected: "running 2 test(s)\n  test_add ...\n  test_negatives ...\nall tests passed\n",
     },
+    Case {
+        name: "game stdlib (rand_int, ms_now, bare return)",
+        src: r#"
+fn main() -> void {
+    // rand_int stays in bounds
+    let ok = true
+    for i in 0 .. 50 {
+        let r = rand_int(3, 7)
+        if r < 3 || r > 7 { ok = false }
+    }
+    print("rand bounds:", ok)
+    // ms_now is a monotonic millisecond clock
+    let a = ms_now()
+    let b = ms_now()
+    print("clock sane:", b >= a)
+    // bare `return` (no value, no semicolon)
+    print("before")
+    if a >= 0 {
+        return
+    }
+    print("unreachable")
+}
+"#,
+        expected: "rand bounds: true\nclock sane: true\nbefore\n",
+    },
+    Case {
+        name: "snake-style loop + string repeat",
+        src: r#"
+fn main() -> void {
+    let xs: [string] = []
+    for c in ["a", "b", "c"] {
+        xs.push(c)
+    }
+    print(xs)
+    print(".".repeat(3))
+}
+"#,
+        expected: "[a, b, c]\n...\n",
+    },
 ];
 
 pub fn selftest() {

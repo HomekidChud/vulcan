@@ -322,6 +322,8 @@ impl Parser {
             Tok::KwReturn => {
                 self.next();
                 if self.eat(&Tok::Semi) { return Stmt::Return(None); }
+                // bare `return` before a closing brace (no semicolon, no value)
+                if matches!(self.peek(), Tok::RBrace | Tok::EOF) { return Stmt::Return(None); }
                 let e = self.parse_expr();
                 self.eat(&Tok::Semi);
                 Stmt::Return(Some(e))

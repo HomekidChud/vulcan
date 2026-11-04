@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn usage() {
-    println!("Vulcan 0.2 — a small, fast language that transpiles to C
+    println!("Vulcan 0.3 — a small, fast language that transpiles to C
 
 USAGE (single file):
   vulcan run <file.vulcan>     compile + execute
@@ -20,6 +20,10 @@ USAGE (single file):
   vulcan emit <file.vulcan>   show generated C
   vulcan bench <file.vulcan>  compile, run, time it
   vulcan test <file.vulcan>   run every fn test_*() in the file
+
+add --safe to run/build/bench/test for a sanitizer build
+(AddressSanitizer + UndefinedBehaviorSanitizer: memory errors and
+integer overflow abort at the exact line).
 
 USAGE (project — when a vulcan.toml is present):
   vulcan init <name>          scaffold a new project
@@ -33,7 +37,13 @@ OTHER:
 }
 
 fn main() {
-    let args: Vec<String> = std::env::args().collect();
+    let mut args: Vec<String> = std::env::args().collect();
+    // `--safe` builds with AddressSanitizer + UndefinedBehaviorSanitizer:
+    // memory errors, integer overflow and UB abort the program at the exact line.
+    let safe = match args.iter().position(|a| a == "--safe") {
+        Some(i) => { args.remove(i); true }
+        None => false,
+    };
     if args.len() < 2 {
         usage();
         std::process::exit(1);
@@ -131,12 +141,12 @@ fn main() {
         "emit" => print!("{c_src}"),
         "build" => {
             std::fs::write(&c_path, &c_src).unwrap();
-            compile_c(&c_path, &bin_path);
+            compile_c(&c_path, &bin_path, safe);
             println!("built {stem} (native, -O3)");
         }
         "run" | "test" => {
             std::fs::write(&c_path, &c_src).unwrap();
-            compile_c(&c_path, &bin_path);
+            compile_c(&c_path, &bin_path, safe);
             let status = Command::new(&run_path).status().unwrap();
             if !status.success() {
                 std::process::exit(status.code().unwrap_or(1));
@@ -144,7 +154,7 @@ fn main() {
         }
         "bench" => {
             std::fs::write(&c_path, &c_src).unwrap();
-            compile_c(&c_path, &bin_path);
+            compile_c(&c_path, &bin_path, safe);
             let t0 = std::time::Instant::now();
             let status = Command::new(&run_path).status().unwrap();
             let dt = t0.elapsed();
@@ -154,19 +164,26 @@ fn main() {
     }
 }
 
-fn compile_c(c_path: &str, out: &str) {
+fn compile_c(c_path: &str, out: &str, safe: bool) {
     let t0 = std::time::Instant::now();
     let out_flag = format!("-o{out}");
     let cc = std::env::var("VULCAN_CC").unwrap_or_else(|_| pick_cc());
+    let mut flags: Vec<&str> = vec![
+        "-fno-strict-aliasing", "-Wall", "-Wno-unused-variable", "-Wno-unused-function",
+        // hardening: stack canaries, fortified libc calls, full PIE/ASLR, strict format strings,
+        // and read-only relocations (GOT hardening where the platform supports it)
+        "-fstack-protector-strong", "-D_FORTIFY_SOURCE=2", "-fPIE", "-pie",
+        "-Wformat", "-Werror=format-security", "-Wl,-z,relro", "-Wl,-z,now",
+        c_path, "-lm", &out_flag,
+    ];
+    if safe {
+        // --safe: sanitizer build — memory errors and UB abort at the exact line
+        flags.splice(0..0, ["-O1", "-g", "-fsanitize=address,undefined", "-fno-omit-frame-pointer"]);
+    } else {
+        flags.insert(0, "-O3");
+    }
     let status = Command::new(&cc)
-        .args([
-            "-O3", "-fno-strict-aliasing", "-Wall", "-Wno-unused-variable", "-Wno-unused-function",
-            // hardening: stack canaries, fortified libc calls, full PIE/ASLR, strict format strings,
-            // and read-only relocations (GOT hardening where the platform supports it)
-            "-fstack-protector-strong", "-D_FORTIFY_SOURCE=2", "-fPIE", "-pie",
-            "-Wformat", "-Werror=format-security", "-Wl,-z,relro", "-Wl,-z,now",
-            c_path, "-lm", &out_flag,
-        ])
+        .args(&flags)
         .status()
         .unwrap_or_else(|e| panic!("C compiler `{cc}` failed: {e}"));
     if !status.success() {
