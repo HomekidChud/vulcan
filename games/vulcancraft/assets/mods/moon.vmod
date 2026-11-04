@@ -1,0 +1,3 @@
+# moon — low gravity duel rules, bigger knockback, shorter respawn and a katana.
+rule gravity=9 jump=7.2 speed=4.8 sprint=1.55 knockback=11 respawn=2 kills=7 fall=0 start_time=0.9 daylen=1800
+weapon sword name=Moon_Katana damage=4 reach=3.8 cooldown=0.42 knockback=11 blade=#b8d4ff hilt=#2a2a46

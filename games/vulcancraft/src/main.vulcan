@@ -1,0 +1,251 @@
+// Vulcancraft — a 1v1 voxel duel game written in Vulcan (web3d platform).
+import "util.vulcan"
+import "tex.vulcan"
+import "blocks.vulcan"
+import "mods.vulcan"
+import "world.vulcan"
+import "mesh.vulcan"
+import "game.vulcan"
+import "shaders.vulcan"
+import "player.vulcan"
+import "net.vulcan"
+import "render.vulcan"
+import "ui.vulcan"
+
+fn clear_meshes() {
+    for i in 0 .. GRID * GRID {
+        gfx_mesh_free(i)
+        gfx_mesh_free(2000 + i)
+    }
+    for i in 4000 .. 4010 { gfx_mesh_free(i) }
+}
+
+// rebuild registries + atlas for the selected mod pack and start a fresh world
+fn reload_content(g: Game, seed: i64) {
+    clear_meshes()
+    g.ct = load_content(g.packs[g.pack_i])
+    gfx_texture(256, 256, g.ct.atlas)
+    g.seed = seed
+    g.w = world_new(seed, g.ct)
+    reset_hotbar(g)
+}
+
+fn new_world(g: Game, seed: i64) {
+    clear_meshes()
+    g.seed = seed
+    g.w = world_new(seed, g.ct)
+}
+
+// begin loading a match: kind 2 = practice bot, kind 1 = networked 1v1
+fn start_match(g: Game, kind: i64) {
+    if kind == 2 { reload_content(g, rand_int(1000, 999999)) } else { new_world(g, g.seed) }
+    reset_hotbar(g)
+    g.opp_kind = kind
+    g.kills = 0
+    g.deaths = 0
+    g.winner = 0
+    g.over_t = 0.0
+    g.dead_t = 0.0
+    g.spawn_n = 0
+    g.opp_vis = 0
+    g.ohp = g.ct.rules.health
+    g.time = g.ct.rules.start_time
+    g.part = zeros_f(0)
+    let side = -26
+    if g.role == 1 && kind == 1 { side = 26 }
+    let sp = find_spawn(g.w, g.ct, side, 0)
+    let gy = ground_y(g.w, g.ct, sp[0], sp[1])
+    place_me(g, [sp[0] + 0.5, gy * 1.0, sp[1] + 0.5])
+    g.yaw = 0.0
+    if side > 0 { g.yaw = 1.5708 } else { g.yaw = 0.0 - 1.5708 }
+    g.pitch = 0.0
+    g.last_dmg = g.clock + 3.0
+    g.mode = 4
+    g.load_total = 0
+    g.status = ""
+    g.net_phase = 0
+    if kind == 1 { net_ui(false) }
+    if kind == 2 { bot_respawn(g) }
+    if kind == 2 { g.opp_vis = 0 }
+    g.opp.x = g.me.x
+    g.opp.z = g.me.z
+}
+
+fn zeros_f(n: i64) -> [f64] {
+    let a: [f64] = []
+    for i in 0 .. n { a.push(0.0) }
+    return a
+}
+
+fn to_menu(g: Game, status: string) {
+    if g.opp_kind == 1 || g.net_phase != 0 {
+        net_stop()
+        net_ui(false)
+    }
+    g.net_phase = 0
+    g.opp_kind = 0
+    g.opp_vis = 0
+    g.mode = 0
+    g.status = status
+    gfx_set_lock(false)
+    new_world(g, 20260)
+    g.time = 0.42
+    g.hit_ok = 0
+}
+
+fn menu_camera(g: Game) {
+    let cx = 8.0
+    let cz = 8.0
+    let h = height_at(g.w, 8, 8) * 1.0
+    let a = g.clock * 0.07
+    let r = 38.0
+    let x = cx + cos(a) * r
+    let z = cz + sin(a) * r
+    let y = max(h, g.ct.gen.sea * 1.0) + 17.0
+    gfx_camera(x, y, z, atan2(x - cx, z - cz), -0.3, 72.0)
+}
+
+fn begin_net(g: Game, mode: string) {
+    g.my_id = rand_int(1, 2000000000)
+    g.seed = rand_int(1000, 999999)
+    g.hs_sent = 0
+    g.peer_ok = 0
+    g.net_phase = 1
+    g.send_t = 0.0
+    g.status = ""
+    net_start(mode)
+}
+
+fn menu_frame(g: Game, dt: f64) {
+    g.time += dt * 0.004
+    if g.time > 0.7 { g.time = 0.3 }
+    stream(g, 8.0, 8.0, 7.0)
+    set_sky_uniforms(g)
+    menu_camera(g)
+    if g.net_phase == 1 {
+        let st = net_state()
+        let W = gfx_size_w()
+        let H = gfx_size_h()
+        hud_rect(0.0, 0.0, W, H, 0.0, 0.0, 0.0, 0.45)
+        ctext(W / 2.0, 60.0, 30.0, 1.0, 1.0, 1.0, 1.0, "Setting up 1v1")
+        if st == 1 { ctext(W / 2.0, 108.0, 14.0, 1.0, 0.9, 0.6, 1.0, "Waiting for the opponent...  (Esc to cancel)") }
+        if st == 2 {
+            net_ui(false)
+            ctext(W / 2.0, 108.0, 14.0, 0.7, 1.0, 0.7, 1.0, "Connected. Exchanging match settings...")
+            g.send_t += dt
+            if g.hs_sent == 0 || (g.peer_ok == 0 && g.send_t > 1.0) {
+                send_hello(g)
+                g.send_t = 0.0
+            }
+            if net_poll(g) == 1 { start_match(g, 1) }
+        } elif st == 3 {
+            to_menu(g, "Connection lost.")
+        }
+        if gfx_key_pressed(27) { to_menu(g, "") }
+        if g.status.len() > 0 && g.net_phase == 0 { g.status = g.status }
+        return
+    }
+    let act = draw_menu(g)
+    if act == 1 { start_match(g, 2) }
+    elif act == 2 { begin_net(g, "local") }
+    elif act == 3 { begin_net(g, "host") }
+    elif act == 4 { begin_net(g, "join") }
+    elif act == 5 {
+        reload_content(g, 20260)
+        g.status = ""
+    } elif act == 6 { apply_shader(g, g.sh_i) }
+}
+
+fn play_frame(g: Game, dt: f64) {
+    if gfx_key_pressed(81) { to_menu(g, "") return }
+    if gfx_key_pressed(69) && g.mode == 1 {
+        g.mode = 2
+        gfx_set_lock(false)
+    } elif (gfx_key_pressed(69) || gfx_key_pressed(27)) && g.mode == 2 {
+        g.mode = 1
+        gfx_set_lock(true)
+    }
+    if gfx_key_pressed(114) { g.show_dbg = 1 - g.show_dbg }
+    let moving = sqrt(g.me.vx * g.me.vx + g.me.vz * g.me.vz) > g.ct.rules.speed * 1.2
+    let tk = 0.0
+    if moving { tk = 1.0 }
+    g.fov_k += (tk - g.fov_k) * min(1.0, 6.0 * dt)
+    player_update(g, dt)
+    if g.opp_kind == 2 { bot_update(g, dt) }
+    if g.opp_kind == 1 {
+        net_poll(g)
+        opp_remote_update(g, dt)
+        send_state(g, dt)
+        if net_state() == 3 {
+            to_menu(g, "Opponent disconnected.")
+            return
+        }
+    }
+    update_parts(g, dt)
+    g.time += dt / g.ct.rules.daylen
+    if g.time > 1.0 { g.time -= 1.0 }
+    stream(g, g.me.x, g.me.z, 5.0)
+    render_world(g)
+    draw_hud(g)
+    if g.mode == 2 { draw_palette(g) }
+}
+
+fn load_frame(g: Game, dt: f64) {
+    stream(g, g.me.x, g.me.z, 22.0)
+    let have = meshed_count(g, g.me.x, g.me.z, 3)
+    let frac = have / 29.0
+    set_sky_uniforms(g)
+    gfx_camera(g.me.x, g.me.y + EYE_H, g.me.z, g.yaw, 0.0, 78.0)
+    draw_loading(g, frac, "Generating world")
+    if have >= 29 || g.load_total > 600 {
+        g.mode = 1
+        gfx_set_lock(true)
+        note(g, "Click the game to capture the mouse")
+        if g.opp_kind == 1 { note(g, "Opponent: " + g.opp_name) }
+    }
+    g.load_total += 1
+}
+
+fn frame(g: Game, dt: f64) {
+    gfx_chrome(g.mode == 0)
+    g.clock += dt
+    g.fps_n += 1.0
+    g.fps_t += dt
+    if g.fps_t >= 0.5 {
+        g.fps = g.fps_n / g.fps_t
+        g.fps_n = 0.0
+        g.fps_t = 0.0
+    }
+    let i = 0
+    while i < g.notes.len() {
+        g.note_t[i] -= dt
+        if g.note_t[i] <= 0.0 {
+            g.notes.remove(i)
+            g.note_t.remove(i)
+        } else { i += 1 }
+    }
+    if gfx_key_pressed(117) && g.shaders.len() > 0 { apply_shader(g, g.sh_i + 1) }
+    if g.mode == 0 { menu_frame(g, dt) }
+    elif g.mode == 4 { load_frame(g, dt) }
+    else { play_frame(g, dt) }
+}
+
+fn pick_default_shader(g: Game) -> i64 {
+    for i in 0 .. g.shaders.len() {
+        if g.shaders[i].name == "Lumina" { return i }
+    }
+    return 0
+}
+
+fn main() {
+    let g = new_game()
+    gfx_open("Vulcancraft")
+    gfx_texture(256, 256, g.ct.atlas)
+    g.name = "Player" + f"{rand_int(10, 99)}"
+    apply_shader(g, pick_default_shader(g))
+    g.time = 0.42
+    loop {
+        let dt = gfx_frame()
+        frame(g, dt)
+    }
+}

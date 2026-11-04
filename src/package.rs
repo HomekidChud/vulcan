@@ -3,12 +3,13 @@
 //  - desktop: Electron project wrapping the web bundle (macOS/Windows/Linux)
 //  - mobile:  Capacitor project wrapping the web bundle (iOS/Android)
 //  - linux/windows/macos: native C cross-build scripts
-pub fn package(entry: &str, platform: &str) {
+pub fn package(entry: &str, platform: &str, assets: Option<&str>) {
     let program = crate::modules::load_program(std::path::Path::new(entry));
     let js = crate::codegen_js::generate_js(&program);
     let stem = entry.trim_end_matches(".vulcan");
     let (dir, files): (String, Vec<(String, String)>) = match platform {
         "web" => web_bundle(stem, &js),
+        "web3d" => web3d_bundle(stem, &js, assets),
         "desktop" => desktop_bundle(stem, &js),
         "mobile" => mobile_bundle(stem, &js),
         "linux" | "windows" | "macos" => {
@@ -20,7 +21,7 @@ pub fn package(entry: &str, platform: &str) {
             std::process::exit(1);
         }
         _ => {
-            eprintln!("vulcan: unknown platform `{platform}` (web, desktop, mobile, linux, windows, macos)");
+            eprintln!("vulcan: unknown platform `{platform}` (web, web3d, desktop, mobile, linux, windows, macos)");
             std::process::exit(1);
         }
     };
@@ -53,6 +54,44 @@ fn web_bundle(stem: &str, js: &str) -> (String, Vec<(String, String)>) {
         .replace("__WORKER_JSON__", &json_escape(&worker_src));
     let dir = format!("package-{}-web", file_stem(stem));
     (dir, vec![("index.html".into(), html)])
+}
+
+// web3d: WebGL2 game bundle. One self-contained index.html: the compiled program,
+// the host runtime (renderer, input, audio, 1v1 networking) and an embedded assets
+// folder (mods, modpacks, shader packs) readable through file_read/file_list.
+fn web3d_bundle(stem: &str, js: &str, assets: Option<&str>) -> (String, Vec<(String, String)>) {
+    let mut map: Vec<(String, String)> = Vec::new();
+    if let Some(root) = assets {
+        collect_assets(std::path::Path::new(root), std::path::Path::new(root), &mut map);
+    }
+    map.sort();
+    let mut json = String::from("{");
+    for (i, (k, v)) in map.iter().enumerate() {
+        if i > 0 { json.push(','); }
+        json.push_str(&format!("\"{}\":\"{}\"", json_escape(k), json_escape(v)));
+    }
+    json.push('}');
+    let json = json.replace("</", "<\\/");
+    let host = include_str!("../runtime/web3d_host.js").replace("</script", "<\\/script");
+    let prog = js.replace("</script", "<\\/script");
+    let html = include_str!("../runtime/web3d.html")
+        .replace("__TITLE__", &file_stem(stem))
+        .replace("__ASSETS_JSON__", &json)
+        .replace("__HOST_JS__", &host)
+        .replace("__PROGRAM_JS__", &prog);
+    (format!("package-{}-web3d", file_stem(stem)), vec![("index.html".into(), html)])
+}
+
+fn collect_assets(root: &std::path::Path, dir: &std::path::Path, out: &mut Vec<(String, String)>) {
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    for e in rd.flatten() {
+        let p = e.path();
+        if p.is_dir() { collect_assets(root, &p, out); continue; }
+        if let Ok(text) = std::fs::read_to_string(&p) {
+            let rel = p.strip_prefix(root).unwrap().to_string_lossy().replace('\\', "/");
+            out.push((rel, text));
+        }
+    }
 }
 
 fn desktop_bundle(stem: &str, js: &str) -> (String, Vec<(String, String)>) {

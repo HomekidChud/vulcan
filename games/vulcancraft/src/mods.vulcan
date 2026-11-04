@@ -1,0 +1,260 @@
+// mods.vulcan — .vmod / .modpack loading. A mod pack is an ordered list of mods;
+// later mods override earlier ones (blocks by key, rules by name, biomes by name).
+
+struct Rules {
+    gravity: f64, jump: f64, speed: f64, sprint: f64, reach: f64,
+    damage: f64, health: f64, kills: i64, knockback: f64, fly: i64,
+    daylen: f64, respawn: f64, start_time: f64, swim: f64, fall: f64, mine: f64
+}
+
+struct Gen {
+    sea: i64, cave: f64, cave_lava: i64,
+    b_name: [string],
+    b_top: [i64], b_fill: [i64], b_log: [i64], b_leaf: [i64], b_tfreq: [f64],
+    b_plant: [i64], b_pfreq: [f64],
+    ore_blk: [i64], ore_min: [i64], ore_max: [i64], ore_count: [i64], ore_size: [i64]
+}
+
+fn rules_new() -> Rules {
+    return Rules {
+        gravity: 27.0, jump: 8.8, speed: 4.4, sprint: 1.45, reach: 5.2,
+        damage: 4.0, health: 20.0, kills: 5, knockback: 7.5, fly: 0,
+        daylen: 900.0, respawn: 3.0, start_time: 0.28, swim: 0.55, fall: 1.0, mine: 1.0
+    }
+}
+
+fn gen_new() -> Gen {
+    let g = Gen {
+        sea: 22, cave: 0.055, cave_lava: -1,
+        b_name: ["plains", "forest", "desert", "snow", "mountains", "beach"],
+        b_top: [], b_fill: [], b_log: [], b_leaf: [], b_tfreq: [], b_plant: [], b_pfreq: [],
+        ore_blk: [], ore_min: [], ore_max: [], ore_count: [], ore_size: []
+    }
+    for i in 0 .. 6 {
+        g.b_top.push(3)
+        g.b_fill.push(2)
+        g.b_log.push(0)
+        g.b_leaf.push(0)
+        g.b_tfreq.push(0.0)
+        g.b_plant.push(0)
+        g.b_pfreq.push(0.0)
+    }
+    return g
+}
+
+fn biome_index(g: Gen, name: string) -> i64 {
+    for i in 0 .. g.b_name.len() {
+        if g.b_name[i] == name { return i }
+    }
+    return -1
+}
+
+fn mod_path(name: string) -> string {
+    if file_exists("mods/" + name + ".vmod") { return "mods/" + name + ".vmod" }
+    if file_exists("user/" + name + ".vmod") { return "user/" + name + ".vmod" }
+    return ""
+}
+
+// resolve a block key to an id (or 0 if unknown)
+fn bid(r: Reg, key: string) -> i64 {
+    if key.len() == 0 { return 0 }
+    let i = find_block(r, key)
+    if i < 0 { return 0 }
+    return i
+}
+
+fn apply_block_line(r: Reg, p: [string], mod_name: string) {
+    // block <id> <key> k=v ...
+    if p.len() < 3 { return }
+    let id = to_int(p[1])
+    let key = p[2]
+    if id <= 0 || id >= MAXB {
+        r.errors.push(f"{mod_name}: block id {id} out of range (1..255)")
+        return
+    }
+    if r.key[id].len() > 0 && r.key[id] != key {
+        r.errors.push(f"{mod_name}: block id {id} for '{key}' replaces '{r.key[id]}'")
+    }
+    let base = kvc(p, "base", 0x808080)
+    let acc = kvc(p, "accent", 0x606060)
+    let tex = kv(p, "tex", "solid")
+    let top = kv(p, "top", tex)
+    let bot = kv(p, "bottom", tex)
+    let tb = kvc(p, "top_base", base)
+    let ta = kvc(p, "top_accent", acc)
+    let bb = kvc(p, "bottom_base", base)
+    let ba = kvc(p, "bottom_accent", acc)
+    let seed = id * 13 + 5
+    r.key[id] = key
+    r.name[id] = unscore(kv(p, "name", key))
+    r.kind[id] = kind_code(kv(p, "kind", "opaque"))
+    r.t_side[id] = tile_id(r, tex, base, acc, seed)
+    r.t_top[id] = tile_id(r, top, tb, ta, seed + 1)
+    r.t_bot[id] = tile_id(r, bot, bb, ba, seed + 2)
+    r.hard[id] = kvf(p, "hardness", 1.0)
+    r.light[id] = kvi(p, "light", 0)
+    r.dmg[id] = kvf(p, "damage", 0.0)
+    r.color[id] = base
+    r.color_top[id] = tb
+    if id >= r.n { r.n = id + 1 }
+}
+
+fn apply_override(r: Reg, p: [string]) {
+    if p.len() < 2 { return }
+    let id = find_block(r, p[1])
+    if id < 0 { return }
+    r.hard[id] = kvf(p, "hardness", r.hard[id])
+    r.light[id] = kvi(p, "light", r.light[id])
+    r.dmg[id] = kvf(p, "damage", r.dmg[id])
+}
+
+fn apply_rule(rl: Rules, p: [string]) {
+    rl.gravity = kvf(p, "gravity", rl.gravity)
+    rl.jump = kvf(p, "jump", rl.jump)
+    rl.speed = kvf(p, "speed", rl.speed)
+    rl.sprint = kvf(p, "sprint", rl.sprint)
+    rl.reach = kvf(p, "reach", rl.reach)
+    rl.damage = kvf(p, "damage", rl.damage)
+    rl.health = kvf(p, "health", rl.health)
+    rl.kills = kvi(p, "kills", rl.kills)
+    rl.knockback = kvf(p, "knockback", rl.knockback)
+    rl.fly = kvi(p, "fly", rl.fly)
+    rl.daylen = kvf(p, "daylen", rl.daylen)
+    rl.respawn = kvf(p, "respawn", rl.respawn)
+    rl.start_time = kvf(p, "start_time", rl.start_time)
+    rl.swim = kvf(p, "swim", rl.swim)
+    rl.fall = kvf(p, "fall", rl.fall)
+    rl.mine = kvf(p, "mine", rl.mine)
+}
+
+fn apply_biome(r: Reg, g: Gen, p: [string]) {
+    if p.len() < 2 { return }
+    let bi = biome_index(g, p[1])
+    if bi < 0 { return }
+    if kv(p, "top", "").len() > 0 { g.b_top[bi] = bid(r, kv(p, "top", "")) }
+    if kv(p, "filler", "").len() > 0 { g.b_fill[bi] = bid(r, kv(p, "filler", "")) }
+    let tree = kv(p, "tree", "")
+    if tree.len() > 0 {
+        let lp = tree.split(",")
+        if lp.len() == 2 {
+            g.b_log[bi] = bid(r, lp[0])
+            g.b_leaf[bi] = bid(r, lp[1])
+        }
+    }
+    g.b_tfreq[bi] = kvf(p, "tree_freq", g.b_tfreq[bi])
+    if kv(p, "plant", "").len() > 0 { g.b_plant[bi] = bid(r, kv(p, "plant", "")) }
+    g.b_pfreq[bi] = kvf(p, "plant_freq", g.b_pfreq[bi])
+}
+
+fn apply_ore(r: Reg, g: Gen, p: [string]) {
+    if p.len() < 2 { return }
+    let id = find_block(r, p[1])
+    if id < 0 { return }
+    g.ore_blk.push(id)
+    g.ore_min.push(kvi(p, "min", 1))
+    g.ore_max.push(kvi(p, "max", 40))
+    g.ore_count.push(kvi(p, "count", 4))
+    g.ore_size.push(kvi(p, "size", 5))
+}
+
+fn apply_weapon(r: Reg, rl: Rules, p: [string]) {
+    if p.len() < 2 { return }
+    let wi = find_weapon(r, p[1])
+    if wi < 0 {
+        r.w_key.push(p[1])
+        r.w_name.push(unscore(kv(p, "name", p[1])))
+        r.w_dmg.push(kvf(p, "damage", rl.damage))
+        r.w_reach.push(kvf(p, "reach", 3.4))
+        r.w_cd.push(kvf(p, "cooldown", 0.5))
+        r.w_kb.push(kvf(p, "knockback", rl.knockback))
+        r.w_c1.push(kvc(p, "blade", 0xd0d8e0))
+        r.w_c2.push(kvc(p, "hilt", 0x6b4a2b))
+    } else {
+        r.w_name[wi] = unscore(kv(p, "name", r.w_name[wi]))
+        r.w_dmg[wi] = kvf(p, "damage", r.w_dmg[wi])
+        r.w_reach[wi] = kvf(p, "reach", r.w_reach[wi])
+        r.w_cd[wi] = kvf(p, "cooldown", r.w_cd[wi])
+        r.w_kb[wi] = kvf(p, "knockback", r.w_kb[wi])
+        r.w_c1[wi] = kvc(p, "blade", r.w_c1[wi])
+        r.w_c2[wi] = kvc(p, "hilt", r.w_c2[wi])
+    }
+}
+
+fn load_mod(r: Reg, rl: Rules, g: Gen, name: string) -> bool {
+    let path = mod_path(name)
+    if path.len() == 0 {
+        r.errors.push(f"mod '{name}' not found (looked in mods/ and user/)")
+        return false
+    }
+    let text = file_read(path)
+    r.sig = r.sig + "|" + name
+    for line in text_lines(text) {
+        r.sig = r.sig + ";" + line
+        let p = words(line)
+        let cmd = p[0]
+        if cmd == "block" {
+            apply_block_line(r, p, name)
+        } elif cmd == "override" {
+            apply_override(r, p)
+        } elif cmd == "rule" {
+            apply_rule(rl, p)
+        } elif cmd == "biome" {
+            apply_biome(r, g, p)
+        } elif cmd == "ore" {
+            apply_ore(r, g, p)
+        } elif cmd == "weapon" {
+            apply_weapon(r, rl, p)
+        } elif cmd == "sea" {
+            g.sea = kvi(p, "level", g.sea)
+        } elif cmd == "cave" {
+            g.cave = kvf(p, "width", g.cave)
+            if kv(p, "lava", "").len() > 0 { g.cave_lava = bid(r, kv(p, "lava", "")) }
+        }
+    }
+    r.mods.push(name)
+    return true
+}
+
+struct Pack { file: string, name: string, desc: string, mods: [string] }
+
+fn read_pack(file: string) -> Pack {
+    let pk = Pack { file: file, name: file, desc: "", mods: [] }
+    for line in text_lines(file_read(file)) {
+        let p = words(line)
+        if p[0] == "modpack" && p.len() > 1 { pk.name = unscore(p[1]) }
+        elif p[0] == "desc" { pk.desc = line.substring(5, line.len()) }
+        elif p[0] == "mod" && p.len() > 1 { pk.mods.push(p[1]) }
+    }
+    return pk
+}
+
+fn list_packs() -> [Pack] {
+    let out: [Pack] = []
+    for f in file_list("modpacks/") {
+        if f.ends_with(".modpack") { out.push(read_pack(f)) }
+    }
+    for f in file_list("user/") {
+        if f.ends_with(".modpack") { out.push(read_pack(f)) }
+    }
+    // the default pack goes first
+    let sorted: [Pack] = []
+    for p in out { if p.name == "Classic" { sorted.push(p) } }
+    for p in out { if p.name != "Classic" { sorted.push(p) } }
+    return sorted
+}
+
+struct Content { reg: Reg, rules: Rules, gen: Gen, atlas: [i64], hash: i64, pack: string }
+
+// build all registries for a mod pack ("core" always loads first)
+fn load_content(pk: Pack) -> Content {
+    let r = reg_new()
+    let rl = rules_new()
+    let g = gen_new()
+    load_mod(r, rl, g, "core")
+    for m in pk.mods {
+        if m != "core" { load_mod(r, rl, g, m) }
+    }
+    r.sig = r.sig + f"|{rl.gravity},{rl.jump},{rl.speed},{rl.damage},{rl.health},{rl.kills}"
+    let atlas = build_atlas(r)
+    return Content { reg: r, rules: rl, gen: g, atlas: atlas, hash: str_hash(r.sig, 7), pack: pk.name }
+}

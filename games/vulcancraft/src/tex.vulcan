@@ -1,0 +1,157 @@
+// tex.vulcan — procedural 16x16 block textures, generated at load time from the
+// pattern/colour pairs declared by mods. No image files needed.
+
+struct Tile { pat: string, base: i64, acc: i64, seed: i64 }
+
+fn atlas_new() -> [i64] {
+    let a: [i64] = []
+    for i in 0 .. 262144 { a.push(0) }
+    return a
+}
+
+fn put_px(a: [i64], tx: i64, ty: i64, x: i64, y: i64, c: i64, alpha: i64) {
+    let idx = ((ty * 16 + y) * 256 + tx * 16 + x) * 4
+    a[idx] = col_r(c)
+    a[idx + 1] = col_g(c)
+    a[idx + 2] = col_b(c)
+    a[idx + 3] = alpha
+}
+
+fn paint_tile(a: [i64], ti: i64, t: Tile) {
+    let tx = ti % 16
+    let ty = ti / 16
+    let s = t.seed
+    let B = t.base
+    let A = t.acc
+    for y in 0 .. 16 {
+        for x in 0 .. 16 {
+            let n = rnd(x, y, s, 1)
+            let cn = noise2(x * 0.42 + s, y * 0.42, s)
+            let c = B
+            let al = 255
+            if t.pat == "solid" {
+                c = scale_col(B, 0.94 + n * 0.12)
+            } elif t.pat == "noise" {
+                c = scale_col(mix_col(B, A, clampf((cn - 0.35) * 2.4, 0.0, 1.0)), 0.9 + n * 0.18)
+            } elif t.pat == "speckle" {
+                c = scale_col(mix_col(B, scale_col(B, 0.8), clampf((cn - 0.35) * 2.4, 0.0, 1.0)), 0.92 + n * 0.14)
+                for k in 0 .. 6 {
+                    let cx = 2 + (rnd(k, 0, 0, s + 9) * 12.0) as i64
+                    let cy = 2 + (rnd(k, 1, 0, s + 9) * 12.0) as i64
+                    let dx = abs(x - cx)
+                    let dy = abs(y - cy)
+                    if dx <= 1 && dy <= 1 && rnd(x, y, k, s + 4) > 0.22 {
+                        c = scale_col(A, 0.82 + n * 0.3)
+                    }
+                }
+            } elif t.pat == "bricks" {
+                let row = y / 4
+                let off = (row % 2) * 4
+                let mort = (y % 4 == 3) || ((x + off) % 8 == 7)
+                if mort {
+                    c = scale_col(A, 0.85 + n * 0.1)
+                } else {
+                    let bid = row * 7 + (x + off) / 8
+                    c = scale_col(B, 0.86 + rnd(bid, 3, 0, s) * 0.26 + n * 0.06)
+                }
+            } elif t.pat == "planks" {
+                c = scale_col(B, 0.9 + noise2(x * 0.12, y * 1.1, s) * 0.2 + n * 0.04)
+                if y % 4 == 3 { c = scale_col(c, 0.72) }
+                let row = y / 4
+                if x == (row * 5 + 3) % 16 { c = scale_col(c, 0.8) }
+            } elif t.pat == "logside" {
+                let k = 0.78 + noise2(x * 1.4, y * 0.1, s) * 0.45
+                c = scale_col(mix_col(B, A, clampf(1.0 - k, 0.0, 1.0)), k + n * 0.06)
+            } elif t.pat == "logtop" {
+                let d = max(abs(x * 2 - 15), abs(y * 2 - 15)) / 2
+                if d >= 7 {
+                    c = scale_col(A, 0.9 + n * 0.12)
+                } else {
+                    let ring = d % 3
+                    if ring == 0 { c = scale_col(B, 0.78 + n * 0.1) } else { c = scale_col(B, 1.0 + n * 0.1) }
+                }
+            } elif t.pat == "grass_top" {
+                c = scale_col(mix_col(B, A, clampf((cn - 0.3) * 2.2, 0.0, 1.0)), 0.9 + n * 0.2)
+            } elif t.pat == "grass_side" {
+                // base = dirt colour, accent = grass colour
+                let edge = 3 + (rnd(x, 0, 0, s) * 3.0) as i64
+                if y < edge {
+                    c = scale_col(A, 0.88 + n * 0.22)
+                } else {
+                    c = scale_col(mix_col(B, scale_col(B, 0.78), clampf((cn - 0.35) * 2.4, 0.0, 1.0)), 0.9 + n * 0.16)
+                }
+            } elif t.pat == "snow_side" {
+                let edge = 4 + (rnd(x, 0, 0, s) * 3.0) as i64
+                if y < edge { c = scale_col(A, 0.94 + n * 0.1) } else { c = scale_col(B, 0.9 + n * 0.16) }
+            } elif t.pat == "leaves" {
+                c = scale_col(mix_col(B, A, clampf((cn - 0.3) * 2.2, 0.0, 1.0)), 0.78 + n * 0.4)
+                if rnd(x, y, 5, s) < 0.2 { al = 0 }
+            } elif t.pat == "glass" {
+                al = 38
+                c = B
+                if x == 0 || y == 0 || x == 15 || y == 15 { al = 230 }
+                let d = (x + y) % 9
+                if d >= 3 && d <= 4 && x > 1 && y > 1 && x < 14 && y < 14 { al = 120 c = A }
+            } elif t.pat == "water" {
+                c = scale_col(B, 0.88 + noise2(x * 0.5, y * 0.5, s) * 0.3)
+                al = 200
+            } elif t.pat == "sand" {
+                c = scale_col(B, 0.93 + n * 0.1 + (cn - 0.5) * 0.12)
+            } elif t.pat == "lava" {
+                let k = clampf((cn - 0.28) * 2.6, 0.0, 1.0)
+                c = scale_col(mix_col(B, A, k), 0.85 + n * 0.3)
+            } elif t.pat == "glow" {
+                let cell = noise2(x * 0.27, y * 0.27, s)
+                let k = (cell * 4.0) as i64
+                c = scale_col(mix_col(B, A, k / 3.0), 0.9 + n * 0.2)
+                if x % 8 == 0 || y % 8 == 0 { c = scale_col(c, 0.82) }
+            } elif t.pat == "crystal" {
+                let cell = noise2(x * 0.3 + 4.0, y * 0.3, s)
+                let k = ((cell * 5.0) as i64) % 4
+                c = scale_col(mix_col(B, A, k / 3.0), 0.82 + (x + y) * 0.015)
+                if (x + y) % 6 == 0 { c = scale_col(c, 1.25) }
+            } elif t.pat == "checker" {
+                if ((x / 4) + (y / 4)) % 2 == 0 { c = scale_col(B, 0.95 + n * 0.08) } else { c = scale_col(A, 0.95 + n * 0.08) }
+            } elif t.pat == "stripes" {
+                if (x / 2) % 2 == 0 { c = scale_col(B, 0.95 + n * 0.08) } else { c = scale_col(A, 0.95 + n * 0.08) }
+            } elif t.pat == "cactus" {
+                c = scale_col(B, 0.85 + n * 0.1)
+                if x % 4 == 0 { c = scale_col(B, 0.65) }
+                if x % 4 == 2 && y % 4 == 1 { c = A }
+            } elif t.pat == "plant" {
+                // tall grass tuft
+                al = 0
+                let hgt = 4 + (rnd(x, 0, 0, s) * 9.0) as i64
+                if rnd(x, 1, 0, s) > 0.3 && y >= 16 - hgt {
+                    al = 255
+                    c = scale_col(B, 0.7 + (y - (16 - hgt)) * 0.04 + n * 0.2)
+                }
+            } elif t.pat == "flower" {
+                al = 0
+                if (x == 7 || x == 8) && y >= 7 { al = 255 c = scale_col(B, 0.8 + n * 0.2) }
+                if y >= 9 && y <= 11 && (x == 5 || x == 10) { al = 255 c = scale_col(B, 0.9) }
+                let dx = abs(x * 2 - 15)
+                let dy = abs(y * 2 - 8)
+                if dx <= 5 && dy <= 5 {
+                    al = 255
+                    c = A
+                    if dx <= 1 && dy <= 1 { c = 0xffe066 }
+                }
+            } elif t.pat == "crack" {
+                c = 0x000000
+                al = 0
+                let v = noise2(x * 0.55 + 3.0, y * 0.55, 77)
+                if v < (s + 1) * 0.05 { al = 210 }
+            } elif t.pat == "outline" {
+                al = 0
+                c = 0x0a0a0a
+                if x == 0 || x == 15 || y == 0 || y == 15 { al = 235 }
+            } elif t.pat == "flat" {
+                c = B
+            } else {
+                c = scale_col(B, 0.94 + n * 0.12)
+            }
+            put_px(a, tx, ty, x, y, c, al)
+        }
+    }
+}

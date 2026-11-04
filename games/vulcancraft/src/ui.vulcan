@@ -1,0 +1,269 @@
+// ui.vulcan — HUD, menu, block palette (all drawn with hud_rect / hud_text).
+
+fn sw_() -> f64 { return gfx_size_w() }
+fn sh_() -> f64 { return gfx_size_h() }
+
+fn ctext(cx: f64, y: f64, size: f64, r: f64, gg: f64, b: f64, a: f64, s: string) {
+    hud_text(cx - hud_text_w(size, s) / 2.0, y, size, r, gg, b, a, s)
+}
+
+fn hit_rect(x: f64, y: f64, w: f64, h: f64) -> bool {
+    let mx = gfx_mouse_x()
+    let my = gfx_mouse_y()
+    return mx >= x && mx <= x + w && my >= y && my <= y + h
+}
+
+fn button(x: f64, y: f64, w: f64, h: f64, label: string) -> bool {
+    let over = hit_rect(x, y, w, h)
+    let a = 0.62
+    if over { a = 0.88 }
+    hud_rect(x, y, w, h, 0.05, 0.06, 0.1, a)
+    let bc = 0.28
+    if over { bc = 0.75 }
+    hud_rect(x, y, w, 2.0, bc, bc * 1.1, bc * 1.5, 1.0)
+    hud_rect(x, y + h - 2.0, w, 2.0, bc * 0.5, bc * 0.55, bc * 0.75, 1.0)
+    ctext(x + w / 2.0, y + h / 2.0 - 8.0, 16.0, 0.95, 0.97, 1.0, 1.0, label)
+    return over && gfx_click(0) > 0
+}
+
+fn rgb_of(c: i64) -> [f64] {
+    return [col_r(c) / 255.0, col_g(c) / 255.0, col_b(c) / 255.0]
+}
+
+// hotbar-style icon for a block id or weapon
+fn draw_icon(g: Game, id: i64, x: f64, y: f64, s: f64) {
+    let rg = g.ct.reg
+    if id >= 1000 {
+        let wi = id - 1000
+        let c = rgb_of(rg.w_c1[wi])
+        let h = rgb_of(rg.w_c2[wi])
+        hud_rect(x + s * 0.44, y + s * 0.08, s * 0.14, s * 0.56, c[0], c[1], c[2], 1.0)
+        hud_rect(x + s * 0.3, y + s * 0.62, s * 0.42, s * 0.1, h[0], h[1], h[2], 1.0)
+        hud_rect(x + s * 0.45, y + s * 0.72, s * 0.12, s * 0.2, h[0] * 0.8, h[1] * 0.8, h[2] * 0.8, 1.0)
+        return
+    }
+    let t = rgb_of(rg.color_top[id])
+    let c = rgb_of(rg.color[id])
+    let a = 1.0
+    if rg.kind[id] == 3 { a = 0.55 }
+    if rg.kind[id] == 5 {
+        hud_rect(x + s * 0.44, y + s * 0.3, s * 0.12, s * 0.5, c[0], c[1], c[2], 1.0)
+        hud_rect(x + s * 0.3, y + s * 0.12, s * 0.4, s * 0.28, t[0], t[1], t[2], 1.0)
+        return
+    }
+    hud_rect(x + s * 0.12, y + s * 0.12, s * 0.76, s * 0.76, c[0] * 0.8, c[1] * 0.8, c[2] * 0.8, a)
+    hud_rect(x + s * 0.12, y + s * 0.12, s * 0.76, s * 0.3, t[0], t[1], t[2], a)
+    hud_rect(x + s * 0.12, y + s * 0.42, s * 0.76, s * 0.06, 0.0, 0.0, 0.0, 0.18)
+}
+
+fn item_name(g: Game, id: i64) -> string {
+    if id >= 1000 { return g.ct.reg.w_name[id - 1000] }
+    return g.ct.reg.name[id]
+}
+
+fn draw_hud(g: Game) {
+    let W = sw_()
+    let H = sh_()
+    let rl = g.ct.rules
+    // crosshair
+    if gfx_locked() && g.dead_t <= 0.0 {
+        hud_rect(W / 2.0 - 1.0, H / 2.0 - 9.0, 2.0, 18.0, 1.0, 1.0, 1.0, 0.75)
+        hud_rect(W / 2.0 - 9.0, H / 2.0 - 1.0, 18.0, 2.0, 1.0, 1.0, 1.0, 0.75)
+    }
+    // damage vignette
+    if g.hurt_t > 0.0 {
+        let a = min(0.5, g.hurt_t)
+        hud_rect(0.0, 0.0, W, 40.0, 0.8, 0.0, 0.0, a)
+        hud_rect(0.0, H - 40.0, W, 40.0, 0.8, 0.0, 0.0, a)
+        hud_rect(0.0, 0.0, 40.0, H, 0.8, 0.0, 0.0, a)
+        hud_rect(W - 40.0, 0.0, 40.0, H, 0.8, 0.0, 0.0, a)
+    }
+    // hotbar
+    let s = 54.0
+    let gap = 4.0
+    let x0 = W / 2.0 - (9.0 * (s + gap) - gap) / 2.0
+    let y0 = H - s - 14.0
+    for i in 0 .. 9 {
+        let x = x0 + i * (s + gap)
+        let sel = i == g.sel
+        hud_rect(x - 2.0, y0 - 2.0, s + 4.0, s + 4.0, 0.0, 0.0, 0.0, 0.55)
+        if sel { hud_rect(x - 3.0, y0 - 3.0, s + 6.0, s + 6.0, 1.0, 1.0, 1.0, 0.95) }
+        hud_rect(x, y0, s, s, 0.12, 0.13, 0.17, 0.85)
+        draw_icon(g, g.hot[i], x, y0, s)
+        hud_text(x + 4.0, y0 + 3.0, 10.0, 1.0, 1.0, 1.0, 0.6, f"{i + 1}")
+    }
+    ctext(W / 2.0, y0 - 24.0, 13.0, 1.0, 1.0, 1.0, 0.85, item_name(g, g.hot[g.sel]))
+    // health
+    let hearts = 10
+    let per = rl.health / hearts
+    for i in 0 .. hearts {
+        let x = x0 + i * 24.0
+        let y = y0 - 52.0
+        let fill = clampf((g.hp - i * per) / per, 0.0, 1.0)
+        hud_rect(x, y, 20.0, 18.0, 0.0, 0.0, 0.0, 0.55)
+        hud_rect(x + 2.0, y + 2.0, 16.0, 14.0, 0.25, 0.04, 0.05, 0.9)
+        if fill > 0.0 { hud_rect(x + 2.0, y + 2.0, 16.0 * fill, 14.0, 0.9, 0.12, 0.16, 1.0) }
+    }
+    // score
+    let who = "Bot"
+    if g.opp_kind == 1 { who = g.opp_name }
+    hud_rect(W / 2.0 - 150.0, 10.0, 300.0, 38.0, 0.0, 0.0, 0.0, 0.5)
+    ctext(W / 2.0, 20.0, 18.0, 1.0, 1.0, 1.0, 1.0, f"{g.name} {g.kills}  -  {g.deaths} {who}")
+    ctext(W / 2.0, 52.0, 11.0, 0.8, 0.85, 1.0, 0.7, f"First to {rl.kills} kills")
+    // opponent name tag
+    if g.opp_vis == 1 && g.mode == 1 {
+        let p = gfx_project(g.opp.x, g.opp.y + 2.3, g.opp.z)
+        if p[2] > 0.0 {
+            ctext(p[0], p[1], 14.0, 1.0, 1.0, 1.0, 0.95, who)
+            let bw = 70.0
+            hud_rect(p[0] - bw / 2.0, p[1] + 20.0, bw, 6.0, 0.0, 0.0, 0.0, 0.6)
+            hud_rect(p[0] - bw / 2.0 + 1.0, p[1] + 21.0, (bw - 2.0) * clampf(g.ohp / rl.health, 0.0, 1.0), 4.0, 0.9, 0.2, 0.2, 1.0)
+        }
+    }
+    // notifications
+    let ny = 62.0
+    for i in 0 .. g.notes.len() {
+        let a = min(1.0, g.note_t[i])
+        hud_text(14.0, ny, 13.0, 1.0, 0.95, 0.7, a, g.notes[i])
+        ny += 20.0
+    }
+    // death / round banners
+    if g.over_t > 0.0 {
+        let msg = "VICTORY"
+        if g.winner == 2 { msg = "DEFEAT" }
+        hud_rect(0.0, H / 2.0 - 70.0, W, 140.0, 0.0, 0.0, 0.0, 0.6)
+        if g.winner == 1 { ctext(W / 2.0, H / 2.0 - 40.0, 52.0, 1.0, 0.85, 0.3, 1.0, msg) } else { ctext(W / 2.0, H / 2.0 - 40.0, 52.0, 0.95, 0.3, 0.3, 1.0, msg) }
+        ctext(W / 2.0, H / 2.0 + 24.0, 16.0, 1.0, 1.0, 1.0, 0.9, f"{g.kills} - {g.deaths}   next round in {floori(g.over_t) + 1}")
+    } elif g.dead_t > 0.0 {
+        hud_rect(0.0, 0.0, W, H, 0.4, 0.0, 0.0, 0.35)
+        ctext(W / 2.0, H / 2.0 - 30.0, 40.0, 1.0, 0.9, 0.9, 1.0, "You died")
+        ctext(W / 2.0, H / 2.0 + 20.0, 16.0, 1.0, 1.0, 1.0, 0.9, f"Respawning in {floori(g.dead_t) + 1}")
+    }
+    if g.show_dbg == 1 {
+        let b = g.me
+        hud_rect(8.0, H - 146.0, 520.0, 136.0, 0.0, 0.0, 0.0, 0.5)
+        hud_text(14.0, H - 140.0, 12.0, 0.9, 1.0, 0.9, 1.0, f"{floori(g.fps)} fps   {gfx_stats()}")
+        hud_text(14.0, H - 122.0, 12.0, 0.9, 1.0, 0.9, 1.0, f"xyz {fmt1(b.x)} {fmt1(b.y)} {fmt1(b.z)}   seed {g.seed}")
+        hud_text(14.0, H - 104.0, 12.0, 0.9, 1.0, 0.9, 1.0, f"pack {g.ct.pack} ({g.ct.reg.n - 1} blocks)  shader {g.shaders[g.sh_i].name}")
+        hud_text(14.0, H - 86.0, 12.0, 0.9, 1.0, 0.9, 1.0, gfx_info())
+        hud_text(14.0, H - 68.0, 12.0, 0.9, 1.0, 0.9, 1.0, f"opp {fmt1(g.opp.x)} {fmt1(g.opp.y)} {fmt1(g.opp.z)} hp {fmt1(g.ohp)} vis {g.opp_vis}")
+        hud_text(14.0, H - 50.0, 12.0, 0.9, 1.0, 0.9, 1.0, f"time {fmt1(g.time * 24.0)}h   render {g.rd} chunks   net {net_state()}")
+    }
+    // pause overlay
+    if g.mode == 1 && !gfx_locked() && g.dead_t <= 0.0 {
+        hud_rect(0.0, 0.0, W, H, 0.0, 0.0, 0.0, 0.5)
+        ctext(W / 2.0, H / 2.0 - 70.0, 36.0, 1.0, 1.0, 1.0, 1.0, "Paused")
+        ctext(W / 2.0, H / 2.0 - 12.0, 16.0, 0.9, 0.95, 1.0, 1.0, "Click to resume")
+        ctext(W / 2.0, H / 2.0 + 26.0, 13.0, 0.75, 0.8, 0.9, 1.0, "Q main menu    F6 shader    F3 debug    E blocks")
+        ctext(W / 2.0, H / 2.0 + 50.0, 13.0, 0.75, 0.8, 0.9, 1.0, "WASD move  Space jump  Shift sprint  LMB hit/mine  RMB place  MMB pick")
+    }
+}
+
+// block palette: click a block to put it in the selected hotbar slot
+fn draw_palette(g: Game) -> i64 {
+    let rg = g.ct.reg
+    let W = sw_()
+    let H = sh_()
+    hud_rect(0.0, 0.0, W, H, 0.0, 0.0, 0.0, 0.62)
+    ctext(W / 2.0, 28.0, 26.0, 1.0, 1.0, 1.0, 1.0, "Blocks")
+    ctext(W / 2.0, 62.0, 13.0, 0.8, 0.85, 1.0, 1.0, f"Click an item to put it in hotbar slot {g.sel + 1}.  E or Esc to close.")
+    let cell = 56.0
+    let cols = floori((W - 80.0) / (cell + 8.0))
+    if cols > 14 { cols = 14 }
+    if cols < 4 { cols = 4 }
+    let x0 = W / 2.0 - (cols * (cell + 8.0) - 8.0) / 2.0
+    let y0 = 100.0
+    let n = 0
+    let hov = -1
+    let items: [i64] = []
+    for w in 0 .. rg.w_key.len() { items.push(1000 + w) }
+    for id in 1 .. rg.n { if rg.kind[id] != 0 { items.push(id) } }
+    for it in items {
+        let cx = n % cols
+        let cy = n / cols
+        let x = x0 + cx * (cell + 8.0)
+        let y = y0 + cy * (cell + 8.0)
+        let over = hit_rect(x, y, cell, cell)
+        if over { hud_rect(x - 3.0, y - 3.0, cell + 6.0, cell + 6.0, 1.0, 1.0, 1.0, 0.9) }
+        hud_rect(x, y, cell, cell, 0.12, 0.13, 0.18, 0.95)
+        draw_icon(g, it, x, y, cell)
+        if over {
+            hov = it
+            if gfx_click(0) > 0 { g.hot[g.sel] = it snd(7, 0.6) }
+        }
+        n += 1
+    }
+    if hov != -1 { ctext(W / 2.0, H - 50.0, 18.0, 1.0, 0.95, 0.7, 1.0, item_name(g, hov)) }
+    return 0
+}
+
+fn draw_loading(g: Game, frac: f64, msg: string) {
+    let W = sw_()
+    let H = sh_()
+    hud_rect(0.0, 0.0, W, H, 0.02, 0.03, 0.05, 1.0)
+    ctext(W / 2.0, H / 2.0 - 40.0, 28.0, 1.0, 1.0, 1.0, 1.0, msg)
+    hud_rect(W / 2.0 - 200.0, H / 2.0 + 10.0, 400.0, 14.0, 0.15, 0.17, 0.22, 1.0)
+    hud_rect(W / 2.0 - 198.0, H / 2.0 + 12.0, 396.0 * clampf(frac, 0.0, 1.0), 10.0, 0.35, 0.7, 1.0, 1.0)
+}
+
+// main menu; returns an action: 0 none, 1 practice, 2 local, 3 host, 4 join, 5 pack changed, 6 shader changed, 7 distance changed
+fn clip_text(t: string, n: i64) -> string {
+    if t.len() <= n { return t }
+    return t.substring(0, n - 3) + "..."
+}
+
+fn draw_menu(g: Game) -> i64 {
+    let W = sw_()
+    let H = sh_()
+    let act = 0
+    let cx = W / 2.0
+    let cmp = H < 620.0
+    let s = 1.0
+    if cmp { s = 0.72 }
+    let top = max(46.0, H / 2.0 - 245.0)
+    hud_rect(cx - 270.0, top - 8.0, 540.0, 498.0 * s, 0.0, 0.0, 0.0, 0.38)
+    ctext(cx, top + 6.0, 48.0, 1.0, 0.82, 0.35, 1.0, "VULCANCRAFT")
+    ctext(cx, top + 58.0, 13.0, 0.85, 0.9, 1.0, 1.0, "1v1 voxel duels with mod packs and shader packs")
+    let y = top + 78.0 + 8.0 * s
+    if button(cx - 220.0, y, 440.0, 44.0 * s, "Practice vs Bot") { act = 1 }
+    y += 50.0 * s
+    if button(cx - 220.0, y, 440.0, 44.0 * s, "1v1 on this device (open a 2nd tab)") { act = 2 }
+    y += 50.0 * s
+    if button(cx - 220.0, y, 215.0, 44.0 * s, "Host online 1v1") { act = 3 }
+    if button(cx + 5.0, y, 215.0, 44.0 * s, "Join online 1v1") { act = 4 }
+    y += 60.0 * s
+    // mod pack selector
+    let pk = g.packs[g.pack_i]
+    ctext(cx, y, 12.0, 0.7, 0.8, 1.0, 1.0, "MOD PACK")
+    y += 16.0 * s
+    if button(cx - 220.0, y, 44.0, 38.0 * s, "<") { g.pack_i = fmod(g.pack_i + g.packs.len() - 1, g.packs.len()) act = 5 }
+    if button(cx + 176.0, y, 44.0, 38.0 * s, ">") { g.pack_i = fmod(g.pack_i + 1, g.packs.len()) act = 5 }
+    ctext(cx, y + 11.0 * s, 16.0, 1.0, 1.0, 1.0, 1.0, pk.name)
+    y += 42.0 * s
+    let ml = ""
+    for m in pk.mods { if m != "core" { ml = ml + m + "  " } }
+    ctext(cx, y, 11.0, 0.7, 0.75, 0.85, 1.0, clip_text(pk.desc, 78))
+    if !cmp { ctext(cx, y + 16.0, 11.0, 0.55, 0.7, 0.55, 1.0, "mods: core  " + ml) }
+    y += 38.0 * s
+    // shader selector
+    ctext(cx, y, 12.0, 0.7, 0.8, 1.0, 1.0, "SHADER PACK")
+    y += 18.0 * s
+    if g.shaders.len() > 0 {
+        let sp = g.shaders[g.sh_i]
+        if button(cx - 220.0, y, 44.0, 38.0 * s, "<") { g.sh_i = fmod(g.sh_i + g.shaders.len() - 1, g.shaders.len()) act = 6 }
+        if button(cx + 176.0, y, 44.0, 38.0 * s, ">") { g.sh_i = fmod(g.sh_i + 1, g.shaders.len()) act = 6 }
+        ctext(cx, y + 11.0 * s, 16.0, 1.0, 1.0, 1.0, 1.0, sp.name)
+        y += 42.0 * s
+        ctext(cx, y, 11.0, 0.7, 0.75, 0.85, 1.0, clip_text(sp.desc, 78))
+        y += 26.0 * s
+    }
+    ctext(cx, y, 12.0, 0.7, 0.8, 1.0, 1.0, f"RENDER DISTANCE  {g.rd}")
+    y += 18.0 * s
+    if button(cx - 220.0, y, 44.0, 34.0 * s, "-") { g.rd = max(3, g.rd - 1) act = 7 }
+    if button(cx + 176.0, y, 44.0, 34.0 * s, "+") { g.rd = min(10, g.rd + 1) act = 7 }
+    hud_rect(cx - 170.0, y + 14.0, 340.0, 6.0, 0.2, 0.22, 0.3, 1.0)
+    hud_rect(cx - 170.0, y + 14.0, 340.0 * (g.rd - 3) / 7.0, 6.0, 0.4, 0.7, 1.0, 1.0)
+    if g.status.len() > 0 { ctext(cx, top + 506.0 * s, 13.0, 1.0, 0.82, 0.4, 1.0, g.status) }
+    if !cmp { ctext(cx, H - 20.0, 11.0, 0.8, 0.85, 0.95, 0.8, "Add your own .vmod mods, .modpack lists and .vshader packs with the Import button (top right).") }
+    return act
+}

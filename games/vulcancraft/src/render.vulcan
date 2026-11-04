@@ -1,0 +1,203 @@
+// render.vulcan — day/night uniforms, camera, entity/overlay meshes.
+
+fn sstep(a: f64, b: f64, x: f64) -> f64 {
+    let t = clampf((x - a) / (b - a), 0.0, 1.0)
+    return t * t * (3.0 - 2.0 * t)
+}
+
+fn mixv(a: f64, b: f64, t: f64) -> f64 { return a + (b - a) * t }
+
+fn set_sky_uniforms(g: Game) {
+    let a = (g.time - 0.25) * TAU
+    let sx = cos(a)
+    let sy = sin(a)
+    let sz = 0.35
+    let day = sstep(-0.12, 0.22, sy)
+    let dx = sx
+    let dy = sy
+    let dz = sz
+    if sy < 0.0 { dx = 0.0 - sx dy = 0.0 - sy dz = 0.0 - sz }
+    let l = sqrt(dx * dx + dy * dy + dz * dz)
+    gfx_uniform("uSunDir", [dx / l, dy / l, dz / l])
+    // sun colour: orange near the horizon, white at noon; moon is dim and blue
+    let h = clampf(sy * 3.0, 0.0, 1.0)
+    let sr = mixv(1.0, 1.0, h) * 2.6
+    let sg = mixv(0.5, 0.93, h) * 2.6
+    let sb = mixv(0.25, 0.82, h) * 2.6
+    let w = sstep(0.0, 0.12, sy)
+    let mr = 0.22
+    let mg = 0.3
+    let mb = 0.55
+    gfx_uniform("uSunColor", [mixv(mr, sr, w), mixv(mg, sg, w), mixv(mb, sb, w)])
+    let set = exp(0.0 - sy * sy * 18.0) * 0.8
+    let tr = mixv(0.01, 0.2, day)
+    let tg = mixv(0.02, 0.42, day)
+    let tb = mixv(0.06, 0.88, day)
+    let hr = mixv(0.04, 0.68, day) + set * 0.35 * day
+    let hg = mixv(0.06, 0.82, day) + set * 0.12 * day
+    let hb = mixv(0.12, 0.98, day) - set * 0.2 * day
+    gfx_uniform("uSkyTop", [tr, tg, tb])
+    gfx_uniform("uSkyHorizon", [hr, hg, hb])
+    gfx_uniform("uAmbient", [mixv(0.05, 0.62, day), mixv(0.07, 0.72, day), mixv(0.14, 0.92, day)])
+    gfx_uniform("uFog", [1.5 / (g.rd * 16.0)])
+    gfx_uniform("uDay", [day])
+}
+
+// sky light (0..1) at a world position for entity shading
+fn sky_at(g: Game, x: f64, y: f64, z: f64) -> f64 {
+    let cx = fdiv(floori(x), 16)
+    let cz = fdiv(floori(z), 16)
+    let c = chunk_at(g.w, cx, cz)
+    if c.state == 0 { return 1.0 }
+    let top = c.hm[(floori(z) - cz * 16) * 16 + (floori(x) - cx * 16)]
+    if y > top { return 1.0 }
+    return max(0.1, 1.0 - (top - y) * 0.13)
+}
+
+fn weapon_tile(wi: i64) -> i64 { return TILE_BLADE + clampi(wi, 0, 3) }
+
+// the held item, in camera space (+x right, +y up, -z forward); pitch tilts it with the view
+fn build_hand(g: Game, v: [f64], sky: f64) {
+    let h = g.hot[g.sel]
+    let sw = clampf(g.swing, 0.0, 1.0)
+    let arc = sin(sw * 3.1416)
+    let ox = 0.34 - arc * 0.12
+    let oy = -0.3 - arc * 0.16
+    let oz = -0.7 - arc * 0.2
+    let bobx = sin(g.bob) * 0.012
+    let boby = abs(cos(g.bob)) * 0.012
+    ox += bobx
+    oy += boby
+    let rg = g.ct.reg
+    if h >= 1000 {
+        let wi = h - 1000
+        let bt = weapon_tile(wi)
+        box_mesh(v, ox, oy + 0.1, oz, 0.014, 0.13, 0.03, bt, sky, 0.0, 0.0, 0.0, 0.0, g.pitch - arc * 0.9)
+        box_mesh(v, ox, oy - 0.03, oz, 0.045, 0.011, 0.02, TILE_ENT + 7, sky, 0.0, 0.0, 0.0, 0.0, g.pitch - arc * 0.9)
+        box_mesh(v, ox, oy - 0.085, oz, 0.013, 0.045, 0.013, TILE_ENT + 7, sky, 0.0, 0.0, 0.0, 0.0, g.pitch - arc * 0.9)
+    } elif h > 0 {
+        cube_mesh(v, ox - 0.09, oy - 0.09, oz - 0.09, ox + 0.09, oy + 0.09, oz + 0.09, rg.t_top[h], rg.t_side[h], rg.t_bot[h], sky, 0.0, 6.0)
+        // rotate the block about the eye by the camera pitch
+        let cs = cos(g.pitch)
+        let sn = sin(g.pitch)
+        let n = v.len() / 12
+        let start = n - 36
+        for i in start .. n {
+            let o = i * 12
+            let y = v[o + 1]
+            let z = v[o + 2]
+            v[o + 1] = y * cs - z * sn
+            v[o + 2] = y * sn + z * cs
+            let ny = v[o + 4]
+            let nz = v[o + 5]
+            v[o + 4] = ny * cs - nz * sn
+            v[o + 5] = ny * sn + nz * cs
+        }
+    }
+}
+
+// blocky humanoid for the opponent; feet at origin, facing -z
+fn build_opponent(g: Game, v: [f64]) {
+    let b = g.opp
+    let sky = sky_at(g, b.x, b.y + 1.0, b.z)
+    let spd = sqrt(b.vx * b.vx + b.vz * b.vz)
+    let ph = g.clock * 9.0
+    let sw = sin(ph) * min(spd / 4.0, 1.0) * 0.8
+    let skin = TILE_ENT
+    let shirt = TILE_ENT + 2
+    let pants = TILE_ENT + 3
+    let arm = clampf(g.opp_swing, 0.0, 1.0)
+    let hit = sin(arm * 3.1416) * 1.7
+    box_mesh(v, -0.125, 0.375, 0.0, 0.125, 0.375, 0.125, pants, sky, 0.0, 0.0, 0.75, 0.0, sw)
+    box_mesh(v, 0.125, 0.375, 0.0, 0.125, 0.375, 0.125, pants, sky, 0.0, 0.0, 0.75, 0.0, 0.0 - sw)
+    box_mesh(v, 0.0, 1.125, 0.0, 0.25, 0.375, 0.125, shirt, sky, 0.0, 0.0, 0.0, 0.0, 0.0)
+    box_mesh(v, -0.375, 1.125, 0.0, 0.125, 0.375, 0.125, skin, sky, 0.0, 0.0, 1.5, 0.0, 0.0 - sw)
+    box_mesh(v, 0.375, 1.125, 0.0, 0.125, 0.375, 0.125, skin, sky, 0.0, 0.0, 1.5, 0.0, sw - hit)
+    // head follows pitch
+    let hp = g.opitch * 0.8
+    box_mesh(v, 0.0, 1.75, 0.0, 0.25, 0.25, 0.25, skin, sky, 0.0, 0.0, 1.5, 0.0, hp)
+    box_mesh(v, -0.1, 1.78, -0.255, 0.04, 0.045, 0.01, TILE_ENT + 5, sky, 0.0, 0.0, 1.5, 0.0, hp)
+    box_mesh(v, 0.1, 1.78, -0.255, 0.04, 0.045, 0.01, TILE_ENT + 5, sky, 0.0, 0.0, 1.5, 0.0, hp)
+    box_mesh(v, 0.0, 1.97, 0.0, 0.26, 0.03, 0.26, TILE_ENT + 3, sky, 0.0, 0.0, 1.5, 0.0, hp)
+    let it = g.opp_item
+    if it >= 1000 {
+        let r = sw - hit
+        box_mesh(v, 0.375, 0.62, -0.5, 0.02, 0.2, 0.04, weapon_tile(it - 1000), sky, 0.0, 0.0, 1.5, 0.0, r)
+    }
+}
+
+fn build_particles(g: Game, v: [f64]) {
+    let n = g.part.len() / 9
+    let rx = cos(g.yaw)
+    let rz = 0.0 - sin(g.yaw)
+    for i in 0 .. n {
+        let o = i * 9
+        let t = g.part[o + 7] as i64
+        quad_bb(v, g.part[o], g.part[o + 1], g.part[o + 2], g.part[o + 8], rx, 0.0, rz, 0.0, 1.0, 0.0, tile_u0(t) + 0.02, tile_v0(t) + 0.02, 0.02, 1.0, 0.0)
+    }
+}
+
+fn build_overlay(g: Game, v: [f64]) {
+    if g.hit_ok == 0 || g.mode != 1 { return }
+    let e = 0.004
+    let x = g.hx * 1.0
+    let y = g.hy * 1.0
+    let z = g.hz * 1.0
+    cube_mesh(v, x - e, y - e, z - e, x + 1.0 + e, y + 1.0 + e, z + 1.0 + e, TILE_OUTLINE, TILE_OUTLINE, TILE_OUTLINE, 1.0, 0.0, 7.0)
+    if g.mine_t > 0.0 && g.mine_need > 0.0 {
+        let st = clampi(floori(g.mine_t / g.mine_need * 10.0), 0, 9)
+        let e2 = 0.006
+        cube_mesh(v, x - e2, y - e2, z - e2, x + 1.0 + e2, y + 1.0 + e2, z + 1.0 + e2, TILE_CRACK + st, TILE_CRACK + st, TILE_CRACK + st, 1.0, 0.0, 7.0)
+    }
+}
+
+fn eye_pos(g: Game) -> [f64] {
+    let b = g.me
+    let bobv = 0.0
+    let bobh = 0.0
+    if b.ground == 1 {
+        bobv = abs(sin(g.bob)) * 0.045
+        bobh = cos(g.bob) * 0.02
+    }
+    let dy = 0.0
+    if g.dead_t > 0.0 { dy = -1.1 }
+    let sx = 0.0
+    let sy = 0.0
+    if g.shake > 0.0 {
+        sx = (rnd(floori(g.clock * 90.0), 1, 2, 3) - 0.5) * g.shake * 0.12
+        sy = (rnd(floori(g.clock * 90.0), 4, 5, 6) - 0.5) * g.shake * 0.12
+    }
+    return [b.x + sx + cos(g.yaw) * bobh, b.y + EYE_H + dy + bobv + sy, b.z - sin(g.yaw) * bobh]
+}
+
+fn render_world(g: Game) {
+    set_sky_uniforms(g)
+    let e = eye_pos(g)
+    let fov = 78.0 + g.fov_k * 8.0
+    let roll = 0.0
+    gfx_camera(e[0], e[1], e[2], g.yaw, g.pitch, fov)
+    // opponent
+    if g.opp_vis == 1 && g.mode == 1 {
+        let ov: [f64] = []
+        build_opponent(g, ov)
+        gfx_mesh_set(4000, 0, ov)
+        gfx_mesh_at(4000, g.opp.x, g.opp.y, g.opp.z)
+        gfx_mesh_yaw(4000, g.oyaw)
+    } else { gfx_mesh_free(4000) }
+    let pv2: [f64] = []
+    build_overlay(g, pv2)
+    gfx_mesh_set(4001, 1, pv2)
+    gfx_mesh_at(4001, 0.0, 0.0, 0.0)
+    let pa: [f64] = []
+    build_particles(g, pa)
+    gfx_mesh_set(4002, 0, pa)
+    gfx_mesh_at(4002, 0.0, 0.0, 0.0)
+    // held item
+    if g.mode == 1 && g.dead_t <= 0.0 {
+        let hv: [f64] = []
+        build_hand(g, hv, sky_at(g, g.me.x, g.me.y + 1.0, g.me.z))
+        gfx_mesh_set(4003, 0, hv)
+        gfx_mesh_at(4003, e[0], e[1], e[2])
+        gfx_mesh_yaw(4003, g.yaw)
+    } else { gfx_mesh_free(4003) }
+}

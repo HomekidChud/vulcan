@@ -1102,6 +1102,18 @@ impl PyGen {
                 let (c, t) = self.gen_expr(&args[0]); let c = self.cast(&c, &t, &Ty::I64);
                 (format!("(__cursor_visible({c}), None)[1]"), Ty::Void)
             }
+            "atan2" => {
+                if args.len() != 2 { panic!("vulcan: atan2(y, x) takes 2 args"); }
+                let (y, yt) = self.gen_expr(&args[0]); let y = self.cast(&y, &yt, &Ty::F64);
+                let (x, xt) = self.gen_expr(&args[1]); let x = self.cast(&x, &xt, &Ty::F64);
+                (format!("math.atan2({y}, {x})"), Ty::F64)
+            }
+            "tan" | "exp" | "log" | "asin" | "acos" | "atan" => {
+                if args.len() != 1 { panic!("vulcan: {callee} takes 1 arg"); }
+                let (c, t) = self.gen_expr(&args[0]);
+                let c = self.cast(&c, &t, &Ty::F64);
+                (format!("math.{callee}({c})"), Ty::F64)
+            }
             "sqrt" | "floor" | "ceil" | "sin" | "cos" | "pow" => {
                 let (c, t) = self.gen_expr(&args[0]);
                 let c = self.cast(&c, &t, &Ty::F64);
@@ -1141,7 +1153,7 @@ impl PyGen {
             }
             _ => {
                 let (ptys, ret) = self.fns.get(callee).cloned()
-                    .unwrap_or_else(|| panic!("vulcan: call to unknown function `{callee}`"));
+                    .unwrap_or_else(|| panic!("{}", unknown_fn_msg(callee)));
                 if ptys.len() != args.len() {
                     panic!("vulcan: `{callee}` takes {} arg(s), got {}", ptys.len(), args.len());
                 }
@@ -1176,4 +1188,13 @@ fn escape_fstr(s: &str) -> String {
         }
     }
     esc
+}
+
+fn unknown_fn_msg(callee: &str) -> String {
+    let host = ["gfx_", "hud_", "net_", "snd", "file_list", "hash3", "host_store"];
+    if host.iter().any(|h| callee.starts_with(h)) {
+        format!("vulcan: `{callee}` is a web3d builtin; it only exists on the JS backend (`vulcan package <file> --platform web3d`)")
+    } else {
+        format!("vulcan: call to unknown function `{callee}`")
+    }
 }

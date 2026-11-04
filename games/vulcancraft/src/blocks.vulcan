@@ -1,0 +1,119 @@
+// blocks.vulcan — block registry. Everything here is data-driven: the base game is
+// itself just a mod ("core") loaded through the same path as any user mod pack.
+
+struct Reg {
+    n: i64,
+    key: [string],
+    name: [string],
+    kind: [i64],          // 0 air, 1 opaque, 2 cutout (leaves), 3 glass, 4 liquid, 5 plant
+    t_top: [i64],
+    t_side: [i64],
+    t_bot: [i64],
+    hard: [f64],
+    light: [i64],
+    dmg: [f64],
+    color: [i64],
+    color_top: [i64],
+    tiles: [Tile],
+    w_key: [string],
+    w_name: [string],
+    w_dmg: [f64],
+    w_reach: [f64],
+    w_cd: [f64],
+    w_kb: [f64],
+    w_c1: [i64],
+    w_c2: [i64],
+    mods: [string],
+    sig: string,
+    errors: [string]
+}
+
+const MAXB = 256
+const TILE_CRACK = 224
+const TILE_OUTLINE = 234
+const TILE_ENT = 240
+const TILE_BLADE = 235
+
+fn reg_new() -> Reg {
+    let r = Reg {
+        n: 1,
+        key: [], name: [], kind: [], t_top: [], t_side: [], t_bot: [],
+        hard: [], light: [], dmg: [], color: [], color_top: [], tiles: [],
+        w_key: [], w_name: [], w_dmg: [], w_reach: [], w_cd: [], w_kb: [], w_c1: [], w_c2: [],
+        mods: [], sig: "", errors: []
+    }
+    for i in 0 .. MAXB {
+        r.key.push("")
+        r.name.push("")
+        r.kind.push(0)
+        r.t_top.push(0)
+        r.t_side.push(0)
+        r.t_bot.push(0)
+        r.hard.push(1.0)
+        r.light.push(0)
+        r.dmg.push(0.0)
+        r.color.push(0x808080)
+        r.color_top.push(0x808080)
+    }
+    r.key[0] = "air"
+    r.name[0] = "Air"
+    return r
+}
+
+fn kind_code(s: string) -> i64 {
+    if s == "air" { return 0 }
+    if s == "cutout" { return 2 }
+    if s == "glass" { return 3 }
+    if s == "liquid" { return 4 }
+    if s == "plant" { return 5 }
+    return 1
+}
+
+fn find_block(r: Reg, key: string) -> i64 {
+    for i in 1 .. MAXB {
+        if r.key[i] == key { return i }
+    }
+    return -1
+}
+
+fn find_weapon(r: Reg, key: string) -> i64 {
+    for i in 0 .. r.w_key.len() {
+        if r.w_key[i] == key { return i }
+    }
+    return -1
+}
+
+fn tile_id(r: Reg, pat: string, base: i64, acc: i64, seed: i64) -> i64 {
+    for i in 0 .. r.tiles.len() {
+        let t = r.tiles[i]
+        if t.pat == pat && t.base == base && t.acc == acc { return i }
+    }
+    if r.tiles.len() >= TILE_CRACK {
+        return 0
+    }
+    r.tiles.push(Tile { pat: pat, base: base, acc: acc, seed: seed })
+    return r.tiles.len() - 1
+}
+
+// build the 256x256 RGBA atlas: block tiles, crack stages, selection outline, entity colours
+fn build_atlas(r: Reg) -> [i64] {
+    let a = atlas_new()
+    for i in 0 .. r.tiles.len() { paint_tile(a, i, r.tiles[i]) }
+    for k in 0 .. 10 {
+        paint_tile(a, TILE_CRACK + k, Tile { pat: "crack", base: 0, acc: 0, seed: k })
+    }
+    paint_tile(a, TILE_OUTLINE, Tile { pat: "outline", base: 0, acc: 0, seed: 0 })
+    let ent = [0xe0b090, 0x3a6fd8, 0xd84a3a, 0x2a2f55, 0xf2f2f2, 0x444444, 0xc8a070, 0x9a6a3a, 0xffd040, 0x40d080, 0xb060ff, 0x303030, 0xffffff, 0x80c0ff, 0xff8030, 0x703020]
+    for i in 0 .. 16 {
+        paint_tile(a, TILE_ENT + i, Tile { pat: "flat", base: ent[i], acc: 0, seed: i })
+    }
+    for w in 0 .. min(4, r.w_key.len()) {
+        paint_tile(a, 235 + w, Tile { pat: "flat", base: r.w_c1[w], acc: 0, seed: w })
+    }
+    return a
+}
+
+// UV rectangle of a tile in the atlas (tiny inset avoids bleeding between tiles)
+fn tile_u0(t: i64) -> f64 { return (t % 16) / 16.0 + 0.0008 }
+fn tile_v0(t: i64) -> f64 { return (t / 16) / 16.0 + 0.0008 }
+const TILE_UV = 0.0615

@@ -1,0 +1,131 @@
+// net.vulcan — 1v1 message protocol (host supplies transport via net_*):
+//   h|id|seed|hash|pack|name   handshake (lowest id is the authority for seed/time)
+//   p|x|y|z|yaw|pitch|item|hp  position (fast, lossy channel)
+//   b|x|y|z|id                 block edit        a|dmg|dx|dz|kb   attack
+//   s                          swing animation   d                I died (you scored)
+//   t|time                     day-time sync
+
+fn send_hello(g: Game) {
+    net_send(f"h|{g.my_id}|{g.seed}|{g.ct.hash}|{g.ct.pack}|{g.name}")
+    g.hs_sent = 1
+}
+
+fn send_state(g: Game, dt: f64) {
+    if g.opp_kind != 1 || g.mode != 1 { return }
+    g.send_t += dt
+    if g.send_t >= 0.05 {
+        g.send_t = 0.0
+        let m = g.me
+        net_send(f"p|{m.x}|{m.y}|{m.z}|{g.yaw}|{g.pitch}|{g.hot[g.sel]}|{g.hp}")
+    }
+    g.tsync += dt
+    if g.tsync > 4.0 && g.role == 0 {
+        g.tsync = 0.0
+        net_send(f"t|{g.time}")
+    }
+}
+
+// returns 1 when a valid handshake from the peer arrived (caller starts the match)
+fn handle_msg(g: Game, m: string) -> i64 {
+    if m.len() == 0 { return 0 }
+    let c = m[0]
+    if c == 112 {          // p
+        if g.mode != 1 { return 0 }
+        let p = m.split("|")
+        if p.len() < 8 { return 0 }
+        g.tx = to_float(p[1])
+        g.ty = to_float(p[2])
+        g.tz = to_float(p[3])
+        g.oyaw = to_float(p[4])
+        g.opitch = to_float(p[5])
+        g.opp_item = to_int(p[6])
+        g.ohp = to_float(p[7])
+        if g.opp_vis == 0 || abs(g.tx - g.opp.x) > 8.0 || abs(g.tz - g.opp.z) > 8.0 {
+            g.opp.x = g.tx
+            g.opp.y = g.ty
+            g.opp.z = g.tz
+        }
+        if g.ohp > 0.0 { g.opp_vis = 1 } else { g.opp_vis = 0 }
+        return 0
+    }
+    if c == 104 {          // h
+        let p = m.split("|")
+        if p.len() < 6 { return 0 }
+        let first = g.peer_ok == 0
+        g.peer_id = to_int(p[1])
+        if to_int(p[3]) != g.ct.hash {
+            g.status = f"Mod pack mismatch: opponent uses '{p[4]}'. Both players must pick the same pack."
+            net_stop()
+            net_ui(false)
+            g.net_phase = 0
+            return 0
+        }
+        g.opp_name = p[5]
+        if g.peer_id < g.my_id {
+            g.seed = to_int(p[2])
+            g.role = 1
+        } else { g.role = 0 }
+        g.peer_ok = 1
+        if first { send_hello(g) }
+        return 1
+    }
+    if c == 98 {           // b
+        let p = m.split("|")
+        if p.len() < 5 { return 0 }
+        let x = to_int(p[1])
+        let y = to_int(p[2])
+        let z = to_int(p[3])
+        let id = to_int(p[4])
+        let old = get_block(g.w, x, y, z)
+        if g.mode == 1 && apply_edit(g, x, y, z, id) {
+            if id == 0 { burst_block(g, x, y, z, old, 10) }
+        }
+        return 0
+    }
+    if c == 97 {           // a
+        let p = m.split("|")
+        if p.len() < 5 { return 0 }
+        damage_me(g, to_float(p[1]), to_float(p[2]), to_float(p[3]), to_float(p[4]))
+        return 0
+    }
+    if c == 115 { g.opp_swing = 1.0 return 0 }
+    if c == 100 {          // d
+        g.kills += 1
+        g.ohp = 0.0
+        g.opp_vis = 0
+        note(g, f"You scored ({g.kills})")
+        snd(6, 0.5)
+        check_win(g)
+        return 0
+    }
+    if c == 116 {          // t
+        let p = m.split("|")
+        if p.len() > 1 && g.role == 1 { g.time = to_float(p[1]) }
+        return 0
+    }
+    return 0
+}
+
+fn net_poll(g: Game) -> i64 {
+    let started = 0
+    let n = 0
+    while n < 64 {
+        let m = net_recv()
+        if m.len() == 0 { break }
+        n += 1
+        if handle_msg(g, m) == 1 { started = 1 }
+    }
+    return started
+}
+
+// smooth the remote player's motion between network updates
+fn opp_remote_update(g: Game, dt: f64) {
+    if g.opp_kind != 1 { return }
+    let f = min(1.0, 16.0 * dt)
+    g.opp.vx = (g.tx - g.opp.x) / max(dt, 0.001)
+    g.opp.vz = (g.tz - g.opp.z) / max(dt, 0.001)
+    g.opp.x += (g.tx - g.opp.x) * f
+    g.opp.y += (g.ty - g.opp.y) * f
+    g.opp.z += (g.tz - g.opp.z) * f
+    if g.opp_swing > 0.0 { g.opp_swing -= dt * 4.0 }
+}

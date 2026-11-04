@@ -1,0 +1,11 @@
+# colors — eight dyed wool blocks plus checker and stripe building blocks.
+block 60 wool_white name=White_Wool tex=noise base=#ececec accent=#d8d8d8 hardness=0.2
+block 61 wool_red name=Red_Wool tex=noise base=#c43030 accent=#a82424 hardness=0.2
+block 62 wool_orange name=Orange_Wool tex=noise base=#e8832a accent=#cf6f1c hardness=0.2
+block 63 wool_yellow name=Yellow_Wool tex=noise base=#f2d93a accent=#d9c02c hardness=0.2
+block 64 wool_green name=Green_Wool tex=noise base=#4ba52c accent=#3d8a22 hardness=0.2
+block 65 wool_blue name=Blue_Wool tex=noise base=#2f5fd0 accent=#264ea8 hardness=0.2
+block 66 wool_purple name=Purple_Wool tex=noise base=#8a3ccf accent=#7230ac hardness=0.2
+block 67 wool_black name=Black_Wool tex=noise base=#26262a accent=#18181b hardness=0.2
+block 68 checker_bw name=Checker_Floor tex=checker base=#f0f0f0 accent=#1c1c20 hardness=0.6
+block 69 hazard name=Hazard_Stripes tex=stripes base=#f2d93a accent=#1c1c20 hardness=0.6

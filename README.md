@@ -13,6 +13,19 @@ fn main() {
 }
 ```
 
+## Vulcan 0.6.0 — what's new
+
+- **A 3D web platform**: `vulcan package game.vulcan --platform web3d [--assets dir]` emits a single `index.html` with a WebGL2 host runtime (shadow pass, sky pass, opaque and transparent layers, user-defined post-processing chain), keyboard/mouse/pointer-lock input, a 2D HUD layer, sound, a persistent virtual filesystem and WebRTC/BroadcastChannel networking. The program itself is compiled to JavaScript. `--assets` embeds a folder of files that the program reads with `file_read` / `file_list`.
+- **Host builtins** (web3d only, JS backend only; the C and Python backends now report a clear error): `gfx_open`, `gfx_frame` (suspends until the next animation frame and returns the frame time), `gfx_shader`, `gfx_mesh_set` / `gfx_mesh_free` / `gfx_mesh_at` / `gfx_mesh_yaw`, `gfx_camera`, `gfx_uniform`, `gfx_texture`, `gfx_project`, `gfx_key` / `gfx_key_pressed`, `gfx_mouse_*`, `gfx_click`, `gfx_wheel`, `gfx_set_lock`, `gfx_chrome`, `hud_rect` / `hud_text` / `hud_text_w`, `net_start` / `net_send` / `net_recv` / `net_state` / `net_ui` / `net_stop`, `snd`, `file_list`, `host_store`.
+- **Async frame functions**: any function that (transitively) calls `gfx_frame()` becomes `async` in the generated JS, and its callers `await` it automatically. Write the game loop as plain `loop { dt = gfx_frame() ... }`.
+- **Compiler fixes**: int32 fast paths for bit operators, `hash3`, extra math builtins (`atan2`, `tan`, `exp`, `log`, `asin`, `acos`, `atan`, `round`, `sign`, `trunc`), and empty `[]` literals now take their type from the surrounding struct field, argument or assignment.
+- **Vulcancraft**: a full 1v1 voxel game written in Vulcan lives in `games/vulcancraft/` with mod packs and shader packs (see its README).
+
+```bash
+vulcan package games/vulcancraft/src/main.vulcan --platform web3d --assets games/vulcancraft/assets
+# open package-main-web3d/index.html in any WebGL2 browser
+```
+
 ## Vulcan 0.5.0 — what's new
 
 - **Package once, run anywhere**: `vulcan package app.vulcan --platform <web|desktop|mobile|linux|windows|macos>` emits a ready-to-ship bundle for that target (see Packaging below).
@@ -111,6 +124,7 @@ vulcan test                 # runs every test_* function
 
 ```bash
 vulcan package examples/pong.vulcan --platform web       # single index.html: ANSI terminal emulator + web-worker runtime
+vulcan package game.vulcan --platform web3d --assets assets   # single index.html: WebGL2 host, shaders, input, HUD, networking
 vulcan package examples/pong.vulcan --platform desktop   # Electron scaffold (npm install; packages .dmg/.exe/AppImage)
 vulcan package examples/pong.vulcan --platform mobile    # Capacitor scaffold (npx cap add ios / android)
 vulcan package examples/pong.vulcan --platform linux     # embedded C source + ./build.sh (cc -O3 + hardening)

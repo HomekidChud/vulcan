@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>__TITLE__</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; font-family: ui-monospace, Menlo, Consolas, monospace; }
+  canvas { position: fixed; left: 0; top: 0; display: block; }
+  #hud { pointer-events: none; }
+  #bar { position: fixed; right: 10px; top: 10px; z-index: 5; display: flex; gap: 8px; align-items: center; font-size: 12px; color: #cfd6e4; }
+  body.locked #bar { display: none; }
+  #bar button { background: rgba(20,24,34,.8); color: #e7ecf7; border: 1px solid #3a4258; border-radius: 6px; padding: 6px 10px; cursor: pointer; font: inherit; }
+  #bar button:hover { background: rgba(50,60,90,.9); }
+  #netpanel { display: none; position: fixed; left: 50%; top: 50%; transform: translate(-50%,-50%); z-index: 10; width: min(560px, 92vw);
+    background: rgba(14,17,26,.96); border: 1px solid #3a4258; border-radius: 10px; padding: 16px 18px; color: #dfe5f2; font-size: 13px; }
+  #netpanel h3 { margin: 0 0 8px; font-size: 16px; }
+  #netpanel label { display: block; margin: 10px 0 4px; color: #9aa5bd; }
+  #netpanel textarea { width: 100%; height: 70px; box-sizing: border-box; background: #0a0c12; color: #bfe3ff; border: 1px solid #2b3347; border-radius: 6px; font: 11px ui-monospace, monospace; resize: none; }
+  #netpanel button { margin-top: 10px; background: #2f6bff; color: #fff; border: 0; border-radius: 6px; padding: 8px 16px; cursor: pointer; font: inherit; }
+  #netpanel .row { display: flex; gap: 8px; }
+  #vc-msg { margin: 6px 0; color: #ffd27a; min-height: 1.4em; }
+  #err { display: none; position: fixed; left: 10px; bottom: 10px; right: 10px; z-index: 20; background: rgba(120,20,20,.92); color: #fff; padding: 10px 14px; border-radius: 8px; font: 12px ui-monospace, monospace; white-space: pre-wrap; max-height: 40vh; overflow: auto; }
+</style>
+</head>
+<body>
+<canvas id="gl"></canvas>
+<canvas id="hud"></canvas>
+<div id="bar"><span id="importmsg"></span>
+  <button id="importbtn" title="Import .vmod mods, .modpack lists or .vshader shader packs">Import mods / shader packs</button>
+  <button id="clearbtn">Clear imports</button>
+  <input id="importfile" type="file" multiple accept=".vmod,.vshader,.modpack,.txt" style="display:none">
+</div>
+<div id="netpanel">
+  <h3 id="vc-title">1v1</h3>
+  <div id="vc-msg"></div>
+  <label id="vc-in-l">Code</label><textarea id="vc-in" spellcheck="false"></textarea>
+  <label id="vc-out-l">Your code</label>
+  <div class="row"><textarea id="vc-out" readonly spellcheck="false"></textarea></div>
+  <div class="row"><button id="vc-go">Connect</button><button id="vc-copy" onclick="navigator.clipboard.writeText(document.getElementById('vc-out').value)">Copy my code</button></div>
+</div>
+<div id="err"></div>
+<script>window.__VULCAN_ASSETS__ = __ASSETS_JSON__;</script>
+<script>
+__HOST_JS__
+</script>
+<script>
+(function () {
+__PROGRAM_JS__
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,581 @@
+// player.vulcan — physics, raycasting, mining/placing, combat, respawn and the practice bot.
+
+const HALF_W = 0.3
+const BODY_H = 1.8
+const EYE_H = 1.62
+
+fn solid_kind(k: i64) -> bool { return k == 1 || k == 2 || k == 3 }
+
+fn body_hits(g: Game, x: f64, y: f64, z: f64) -> bool {
+    let rg = g.ct.reg
+    let x0 = floori(x - HALF_W)
+    let x1 = floori(x + HALF_W - 0.0001)
+    let z0 = floori(z - HALF_W)
+    let z1 = floori(z + HALF_W - 0.0001)
+    let y0 = floori(y)
+    let y1 = floori(y + BODY_H - 0.0001)
+    for yy in y0 ..= y1 {
+        for bz in z0 ..= z1 {
+            for bx in x0 ..= x1 {
+                if solid_kind(rg.kind[get_block(g.w, bx, yy, bz)]) { return true }
+            }
+        }
+    }
+    return false
+}
+
+fn move_body(g: Game, b: Body, dt: f64) {
+    let m = max(abs(b.vx), max(abs(b.vy), abs(b.vz))) * dt
+    let n = floori(m / 0.35) + 1
+    if n > 12 { n = 12 }
+    let sdt = dt / n
+    b.ground = 0
+    for i in 0 .. n {
+        let nx = b.x + b.vx * sdt
+        if body_hits(g, nx, b.y, b.z) { b.vx = 0.0 } else { b.x = nx }
+        let nz = b.z + b.vz * sdt
+        if body_hits(g, b.x, b.y, nz) { b.vz = 0.0 } else { b.z = nz }
+        let ny = b.y + b.vy * sdt
+        if body_hits(g, b.x, ny, b.z) {
+            if b.vy < 0.0 {
+                b.ground = 1
+                b.fall_v = b.vy
+            }
+            b.vy = 0.0
+        } else { b.y = ny }
+    }
+    if b.y < -30.0 { b.y = 60.0 b.vy = 0.0 }
+}
+
+// liquid / contact-damage state of the block cells the body occupies
+fn body_media(g: Game, b: Body) -> f64 {
+    let rg = g.ct.reg
+    let id = get_block(g.w, floori(b.x), floori(b.y + 0.5), floori(b.z))
+    let id2 = get_block(g.w, floori(b.x), floori(b.y + 0.1), floori(b.z))
+    b.wet = 0
+    b.lava = 0
+    let d = 0.0
+    if rg.kind[id] == 4 { b.wet = 1 }
+    if rg.dmg[id] > d { d = rg.dmg[id] }
+    if rg.dmg[id2] > d { d = rg.dmg[id2] }
+    if d > 0.0 && rg.kind[id] == 4 { b.lava = 1 }
+    return d
+}
+
+fn held_weapon(g: Game) -> i64 {
+    let h = g.hot[g.sel]
+    if h >= 1000 { return h - 1000 }
+    return -1
+}
+
+// ---------------------------------------------------------------- raycast
+fn raycast(g: Game, ox: f64, oy: f64, oz: f64, dx: f64, dy: f64, dz: f64, maxd: f64) {
+    let rg = g.ct.reg
+    g.hit_ok = 0
+    let x = floori(ox)
+    let y = floori(oy)
+    let z = floori(oz)
+    let sx = 1
+    let sy = 1
+    let sz = 1
+    if dx < 0.0 { sx = -1 }
+    if dy < 0.0 { sy = -1 }
+    if dz < 0.0 { sz = -1 }
+    let tdx = 1000000000000.0
+    let tdy = 1000000000000.0
+    let tdz = 1000000000000.0
+    if abs(dx) > 0.000000001 { tdx = abs(1.0 / dx) }
+    if abs(dy) > 0.000000001 { tdy = abs(1.0 / dy) }
+    if abs(dz) > 0.000000001 { tdz = abs(1.0 / dz) }
+    let tx = 1000000000000.0
+    let ty = 1000000000000.0
+    let tz = 1000000000000.0
+    if abs(dx) > 0.000000001 { if sx > 0 { tx = (x + 1.0 - ox) * tdx } else { tx = (ox - x) * tdx } }
+    if abs(dy) > 0.000000001 { if sy > 0 { ty = (y + 1.0 - oy) * tdy } else { ty = (oy - y) * tdy } }
+    if abs(dz) > 0.000000001 { if sz > 0 { tz = (z + 1.0 - oz) * tdz } else { tz = (oz - z) * tdz } }
+    let nx = 0
+    let ny = 0
+    let nz = 0
+    let t = 0.0
+    while t <= maxd {
+        let id = get_block(g.w, x, y, z)
+        let k = rg.kind[id]
+        if id != 0 && k != 4 {
+            g.hit_ok = 1
+            g.hx = x
+            g.hy = y
+            g.hz = z
+            g.hnx = nx
+            g.hny = ny
+            g.hnz = nz
+            g.hit_d = t
+            return
+        }
+        if tx < ty && tx < tz {
+            x += sx
+            t = tx
+            tx += tdx
+            nx = 0 - sx
+            ny = 0
+            nz = 0
+        } elif ty < tz {
+            y += sy
+            t = ty
+            ty += tdy
+            nx = 0
+            ny = 0 - sy
+            nz = 0
+        } else {
+            z += sz
+            t = tz
+            tz += tdz
+            nx = 0
+            ny = 0
+            nz = 0 - sz
+        }
+    }
+}
+
+// ray vs the opponent's bounding box; returns distance or -1
+fn ray_opp(g: Game, ox: f64, oy: f64, oz: f64, dx: f64, dy: f64, dz: f64) -> f64 {
+    let b = g.opp
+    let lo = [b.x - 0.35, b.y, b.z - 0.35]
+    let hi = [b.x + 0.35, b.y + 1.8, b.z + 0.35]
+    let o = [ox, oy, oz]
+    let d = [dx, dy, dz]
+    let t0 = 0.0
+    let t1 = 1000000000.0
+    for i in 0 .. 3 {
+        if abs(d[i]) < 0.000000001 {
+            if o[i] < lo[i] || o[i] > hi[i] { return -1.0 }
+        } else {
+            let a = (lo[i] - o[i]) / d[i]
+            let c = (hi[i] - o[i]) / d[i]
+            if a > c {
+                let tmp = a
+                a = c
+                c = tmp
+            }
+            if a > t0 { t0 = a }
+            if c < t1 { t1 = c }
+            if t0 > t1 { return -1.0 }
+        }
+    }
+    return t0
+}
+
+fn look_dir(g: Game) -> [f64] {
+    let cp = cos(g.pitch)
+    return [0.0 - sin(g.yaw) * cp, sin(g.pitch), 0.0 - cos(g.yaw) * cp]
+}
+
+// ---------------------------------------------------------------- spawning
+fn pick_spawn(g: Game) -> [f64] {
+    let w = g.w
+    let best = [0.0, 0.0, 0.0]
+    let bestd = -1.0
+    for i in 0 .. 6 {
+        let a = rnd(g.spawn_n, i, 11, g.seed) * TAU
+        let d = 16.0 + rnd(g.spawn_n, i, 12, g.seed) * 16.0
+        let p = find_spawn(w, g.ct, (cos(a) * d) as i64, (sin(a) * d) as i64)
+        let gy = ground_y(w, g.ct, p[0], p[1])
+        let dd = 1.0
+        if g.opp_vis == 1 {
+            let ex = p[0] - g.opp.x
+            let ez = p[1] - g.opp.z
+            dd = sqrt(ex * ex + ez * ez)
+        } else { dd = 100.0 - i }
+        if dd > bestd {
+            bestd = dd
+            best = [p[0] + 0.5, gy * 1.0, p[1] + 0.5]
+        }
+    }
+    g.spawn_n += 1
+    return best
+}
+
+fn place_me(g: Game, p: [f64]) {
+    g.me.x = p[0]
+    g.me.y = p[1]
+    g.me.z = p[2]
+    g.me.vx = 0.0
+    g.me.vy = 0.0
+    g.me.vz = 0.0
+    g.hp = g.ct.rules.health
+    g.dead_t = 0.0
+    g.last_dmg = g.clock + 2.0
+}
+
+fn respawn_me(g: Game) {
+    place_me(g, pick_spawn(g))
+    g.yaw = rnd(g.spawn_n, 3, 4, g.seed) * TAU
+    g.pitch = 0.0
+}
+
+// ---------------------------------------------------------------- combat
+fn check_win(g: Game) {
+    let K = g.ct.rules.kills
+    if g.over_t > 0.0 { return }
+    if g.kills >= K {
+        g.winner = 1
+        g.over_t = 6.0
+        snd(6, 0.6)
+    } elif g.deaths >= K {
+        g.winner = 2
+        g.over_t = 6.0
+    }
+}
+
+fn die_me(g: Game) {
+    g.dead_t = g.ct.rules.respawn
+    g.deaths += 1
+    g.hp = 0.0
+    snd(5, 0.8)
+    if g.opp_kind == 1 { net_send("d") }
+    check_win(g)
+}
+
+fn damage_me(g: Game, amount: f64, kx: f64, kz: f64, kb: f64) {
+    if g.dead_t > 0.0 || g.over_t > 0.0 || g.mode == 0 { return }
+    if g.clock < g.last_dmg { return }
+    g.hp -= amount
+    g.me.vx += kx * kb
+    g.me.vz += kz * kb
+    if g.me.vy < 4.5 { g.me.vy = 4.5 }
+    g.hurt_t = 0.5
+    g.shake = 0.35
+    snd(3, 0.9)
+    if g.hp <= 0.0 { die_me(g) }
+}
+
+fn attack(g: Game) {
+    let rl = g.ct.rules
+    let rg = g.ct.reg
+    let wi = held_weapon(g)
+    let dmg = 1.0
+    let reach = 2.8
+    let cd = 0.5
+    let kb = 3.0
+    if wi >= 0 {
+        dmg = rg.w_dmg[wi]
+        reach = rg.w_reach[wi]
+        cd = rg.w_cd[wi]
+        kb = rg.w_kb[wi]
+    }
+    g.atk_cd = cd
+    g.swing = 1.0
+    snd(2, 0.5)
+    if g.opp_kind == 1 { net_send("s") }
+    if g.opp_vis == 0 || g.ohp <= 0.0 { return }
+    let ex = g.me.x
+    let ey = g.me.y + EYE_H
+    let ez = g.me.z
+    let d = look_dir(g)
+    let t = ray_opp(g, ex, ey, ez, d[0], d[1], d[2])
+    if t < 0.0 || t > reach { return }
+    raycast(g, ex, ey, ez, d[0], d[1], d[2], t)
+    if g.hit_ok == 1 && g.hit_d < t { return }
+    let kx = d[0]
+    let kz = d[2]
+    let l = sqrt(kx * kx + kz * kz) + 0.0001
+    kx = kx / l
+    kz = kz / l
+    spawn_part(g, g.opp.x, g.opp.y + 1.2, g.opp.z, 0.0, 2.0, 0.0, 0.4, TILE_ENT + 2, 0.18)
+    for i in 0 .. 8 {
+        spawn_part(g, g.opp.x, g.opp.y + 1.1, g.opp.z, (rnd(i, 1, 2, 3) - 0.5) * 4.0, rnd(i, 4, 5, 6) * 3.0, (rnd(i, 7, 8, 9) - 0.5) * 4.0, 0.5, TILE_ENT + 2, 0.12)
+    }
+    if g.opp_kind == 1 {
+        net_send(f"a|{dmg}|{kx}|{kz}|{kb}")
+    } elif g.opp_kind == 2 {
+        g.ohp -= dmg
+        g.opp.vx += kx * kb
+        g.opp.vz += kz * kb
+        g.opp.vy = 4.5
+        if g.ohp <= 0.0 {
+            g.kills += 1
+            g.bot_t = 3.0
+            snd(6, 0.5)
+            check_win(g)
+        }
+    }
+}
+
+// ---------------------------------------------------------------- block edits
+fn apply_edit(g: Game, x: i64, y: i64, z: i64, id: i64) -> bool {
+    return set_block(g.w, g.ct, x, y, z, id)
+}
+
+fn try_place(g: Game) {
+    let rg = g.ct.reg
+    let h = g.hot[g.sel]
+    if h >= 1000 || g.hit_ok == 0 { return }
+    let x = g.hx + g.hnx
+    let y = g.hy + g.hny
+    let z = g.hz + g.hnz
+    let hid = get_block(g.w, g.hx, g.hy, g.hz)
+    if rg.kind[hid] == 5 {
+        x = g.hx
+        y = g.hy
+        z = g.hz
+    }
+    let cur = rg.kind[get_block(g.w, x, y, z)]
+    if cur != 0 && cur != 4 && cur != 5 { return }
+    // do not trap yourself or the opponent
+    let bs = [g.me, g.opp]
+    for i in 0 .. 2 {
+        if i == 1 && g.opp_vis == 0 { continue }
+        let b = bs[i]
+        if x + 1.0 > b.x - HALF_W && x < b.x + HALF_W && z + 1.0 > b.z - HALF_W && z < b.z + HALF_W && y + 1.0 > b.y && y < b.y + BODY_H && solid_kind(rg.kind[h]) { return }
+    }
+    if apply_edit(g, x, y, z, h) {
+        snd(1, 0.7)
+        g.swing = 0.6
+        if g.opp_kind == 1 { net_send(f"b|{x}|{y}|{z}|{h}") }
+    }
+}
+
+fn try_break(g: Game) {
+    let rg = g.ct.reg
+    let id = get_block(g.w, g.mx, g.my, g.mz)
+    burst_block(g, g.mx, g.my, g.mz, id, 14)
+    if apply_edit(g, g.mx, g.my, g.mz, 0) {
+        snd(0, 0.8)
+        g.mine_t = 0.0
+        if g.opp_kind == 1 { net_send(f"b|{g.mx}|{g.my}|{g.mz}|0") }
+        // unsupported plants above pop off
+        let above = get_block(g.w, g.mx, g.my + 1, g.mz)
+        if rg.kind[above] == 5 {
+            apply_edit(g, g.mx, g.my + 1, g.mz, 0)
+            if g.opp_kind == 1 { net_send(f"b|{g.mx}|{g.my + 1}|{g.mz}|0") }
+        }
+    }
+}
+
+// ---------------------------------------------------------------- per-frame player update
+fn player_update(g: Game, dt: f64) {
+    let rl = g.ct.rules
+    let rg = g.ct.reg
+    let b = g.me
+    let playing = g.mode == 1
+    let alive = g.dead_t <= 0.0 && g.over_t <= 0.0
+    if g.atk_cd > 0.0 { g.atk_cd -= dt }
+    if g.swing > 0.0 { g.swing -= dt * 4.0 }
+    if g.hurt_t > 0.0 { g.hurt_t -= dt }
+    if g.shake > 0.0 { g.shake -= dt }
+    let fwd = 0.0
+    let side = 0.0
+    let jump = false
+    let sprint = false
+    let down = false
+    if playing && alive && gfx_locked() {
+        g.yaw -= gfx_mouse_dx() * g.sens
+        g.pitch -= gfx_mouse_dy() * g.sens
+        g.pitch = clampf(g.pitch, -1.55, 1.55)
+        if gfx_key(87) { fwd += 1.0 }
+        if gfx_key(83) { fwd -= 1.0 }
+        if gfx_key(68) { side += 1.0 }
+        if gfx_key(65) { side -= 1.0 }
+        jump = gfx_key(32)
+        sprint = gfx_key(16) || gfx_key(17)
+        down = gfx_key(16) || gfx_key(67)
+    } else {
+        let a = gfx_mouse_dx()
+        let c = gfx_mouse_dy()
+    }
+    let sp = rl.speed
+    if sprint && fwd > 0.0 { sp = sp * rl.sprint }
+    if b.wet == 1 { sp = sp * rl.swim }
+    let l = sqrt(fwd * fwd + side * side)
+    if l > 1.0 { fwd = fwd / l side = side / l }
+    let sy = sin(g.yaw)
+    let cy = cos(g.yaw)
+    let twx = (0.0 - sy * fwd + cy * side) * sp
+    let twz = (0.0 - cy * fwd - sy * side) * sp
+    let k = 4.0
+    if b.ground == 1 { k = 14.0 }
+    if b.wet == 1 { k = 6.0 }
+    if rl.fly == 1 { k = 10.0 }
+    let f = min(1.0, k * dt)
+    b.vx += (twx - b.vx) * f
+    b.vz += (twz - b.vz) * f
+    if rl.fly == 1 {
+        let ty = 0.0
+        if jump { ty = sp * 1.2 }
+        if down { ty = 0.0 - sp * 1.2 }
+        b.vy += (ty - b.vy) * min(1.0, 8.0 * dt)
+    } elif b.wet == 1 {
+        b.vy -= rl.gravity * 0.25 * dt
+        b.vy = b.vy * (1.0 - 2.5 * dt)
+        if jump { b.vy += 22.0 * dt if b.vy > 3.8 { b.vy = 3.8 } }
+    } else {
+        b.vy -= rl.gravity * dt
+        if b.vy < -55.0 { b.vy = -55.0 }
+        if jump && b.ground == 1 {
+            b.vy = rl.jump
+            b.ground = 0
+        }
+    }
+    let was_ground = b.ground
+    b.fall_v = 0.0
+    move_body(g, b, dt)
+    // landing damage
+    if b.ground == 1 && b.fall_v < -15.0 && rl.fly == 0 && b.wet == 0 && rl.fall > 0.0 {
+        let dmg = (0.0 - b.fall_v - 15.0) * 0.8 * rl.fall
+        if dmg >= 1.0 && alive {
+            g.hp -= dmg
+            g.hurt_t = 0.5
+            g.shake = 0.3
+            snd(3, 0.8)
+            if g.hp <= 0.0 { die_me(g) }
+        }
+    }
+    let cd = body_media(g, b)
+    if cd > 0.0 && alive && g.mode != 0 {
+        g.hp -= cd * dt
+        g.hurt_t = 0.2
+        if g.hp <= 0.0 { die_me(g) }
+    }
+    // footsteps / bobbing
+    let spd = sqrt(b.vx * b.vx + b.vz * b.vz)
+    if b.ground == 1 && spd > 1.0 {
+        g.bob += spd * dt * 1.7
+        g.step_t += spd * dt
+        if g.step_t > 2.2 {
+            g.step_t = 0.0
+            snd(4, 0.35)
+        }
+    }
+    // regeneration
+    if alive && g.hp < rl.health && g.clock > g.last_dmg + 6.0 { g.hp = min(rl.health, g.hp + dt * 0.8) }
+    // respawn timer
+    if g.dead_t > 0.0 {
+        g.dead_t -= dt
+        if g.dead_t <= 0.0 && g.over_t <= 0.0 { respawn_me(g) }
+    }
+    if g.over_t > 0.0 {
+        g.over_t -= dt
+        if g.over_t <= 0.0 { new_round(g) }
+    }
+    // targeting
+    let d = look_dir(g)
+    let ex = b.x
+    let ey = b.y + EYE_H
+    let ez = b.z
+    raycast(g, ex, ey, ez, d[0], d[1], d[2], rl.reach)
+    if !(playing && alive && gfx_locked()) {
+        g.mine_t = 0.0
+        return
+    }
+    // hotbar selection
+    for i in 0 .. 9 {
+        if gfx_key_pressed(49 + i) { g.sel = i }
+    }
+    let wh = gfx_wheel()
+    if wh != 0 { g.sel = fmod(g.sel + wh, 9) }
+    // attack on click
+    let clicks = gfx_click(0)
+    if clicks > 0 && g.atk_cd <= 0.0 { attack(g) }
+    // mining while held
+    if gfx_mouse_held(0) && g.hit_ok == 1 {
+        let id = get_block(g.w, g.hx, g.hy, g.hz)
+        if g.hx != g.mx || g.hy != g.my || g.hz != g.mz || g.mine_t < 0.0 {
+            g.mx = g.hx
+            g.my = g.hy
+            g.mz = g.hz
+            g.mine_t = 0.0
+        }
+        if rg.hard[id] >= 0.0 {
+            g.mine_need = rg.hard[id] * 0.6 / rl.mine + 0.05
+            g.mine_t += dt
+            if rnd(floori(g.clock * 60.0), g.hx, g.hz, 5) < 0.12 { burst_block(g, g.hx, g.hy, g.hz, id, 1) }
+            if g.mine_t >= g.mine_need { try_break(g) }
+            if g.swing < 0.3 { g.swing = 0.7 }
+        }
+    } else {
+        g.mine_t = 0.0
+    }
+    if gfx_click(1) > 0 { try_place(g) }
+    if gfx_click(2) > 0 && g.hit_ok == 1 {
+        let id = get_block(g.w, g.hx, g.hy, g.hz)
+        if id > 0 { g.hot[g.sel] = id }
+    }
+}
+
+fn new_round(g: Game) {
+    g.kills = 0
+    g.deaths = 0
+    g.winner = 0
+    g.over_t = 0.0
+    g.ohp = g.ct.rules.health
+    if g.opp_kind == 2 { bot_respawn(g) }
+    respawn_me(g)
+    note(g, "New round")
+}
+
+// ---------------------------------------------------------------- practice bot
+fn bot_respawn(g: Game) {
+    let p = pick_spawn(g)
+    g.opp.x = p[0]
+    g.opp.y = p[1]
+    g.opp.z = p[2]
+    g.opp.vx = 0.0
+    g.opp.vy = 0.0
+    g.opp.vz = 0.0
+    g.ohp = g.ct.rules.health
+    g.opp_vis = 1
+    g.bot_t = 0.0
+}
+
+fn bot_update(g: Game, dt: f64) {
+    let rl = g.ct.rules
+    let b = g.opp
+    if g.bot_t > 0.0 {
+        g.opp_vis = 0
+        g.bot_t -= dt
+        if g.bot_t <= 0.0 { bot_respawn(g) }
+        return
+    }
+    if g.opp_vis == 0 { bot_respawn(g) }
+    if g.bot_cd > 0.0 { g.bot_cd -= dt }
+    if g.opp_swing > 0.0 { g.opp_swing -= dt * 4.0 }
+    let dx = g.me.x - b.x
+    let dz = g.me.z - b.z
+    let dist = sqrt(dx * dx + dz * dz) + 0.0001
+    g.oyaw = atan2(0.0 - dx, 0.0 - dz)
+    let dead = g.dead_t > 0.0 || g.over_t > 0.0
+    let sp = 3.6
+    let tvx = 0.0
+    let tvz = 0.0
+    if !dead && dist > 1.6 {
+        tvx = dx / dist * sp
+        tvz = dz / dist * sp
+    }
+    let k = 6.0
+    if b.ground == 1 { k = 12.0 }
+    b.vx += (tvx - b.vx) * min(1.0, k * dt)
+    b.vz += (tvz - b.vz) * min(1.0, k * dt)
+    b.vy -= rl.gravity * dt
+    if b.vy < -55.0 { b.vy = -55.0 }
+    // jump when blocked or the player is above
+    if b.ground == 1 && !dead {
+        let ax = b.x + dx / dist * 0.55
+        let az = b.z + dz / dist * 0.55
+        if body_hits(g, ax, b.y + 0.05, az) || (g.me.y > b.y + 1.2 && dist < 3.0) { b.vy = rl.jump }
+    }
+    if body_media(g, b) > 0.0 { g.ohp -= dt * 4.0 }
+    b.fall_v = 0.0
+    move_body(g, b, dt)
+    if b.wet == 1 { b.vy = 3.0 }
+    if g.ohp <= 0.0 && g.bot_t <= 0.0 {
+        g.kills += 1
+        g.bot_t = 3.0
+        check_win(g)
+    }
+    // strike
+    if !dead && dist < 2.4 && abs(g.me.y - b.y) < 1.8 && g.bot_cd <= 0.0 {
+        g.bot_cd = 0.9
+        g.opp_swing = 1.0
+        damage_me(g, rl.damage * 0.75, dx / dist, dz / dist, rl.knockback * 0.8)
+    }
+    g.opp_item = 1000
+}

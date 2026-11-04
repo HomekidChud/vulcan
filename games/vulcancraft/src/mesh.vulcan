@@ -1,0 +1,398 @@
+// mesh.vulcan — chunk meshing with smooth skylight, flood-filled block light and
+// per-vertex ambient occlusion. Vertex layout (12 floats): pos3 normal3 uv2 light3(sky,block,ao) mat1.
+//   mat: 0 solid, 1 water, 2 plant (sways), 3 leaves (sways), 4 emissive, 5 glass, 6 entity, 7 overlay
+
+
+fn pv(v: [f64], x: f64, y: f64, z: f64, nx: f64, ny: f64, nz: f64, u: f64, tv: f64, sky: f64, bl: f64, ao: f64, mat: f64) {
+    v.push(x)
+    v.push(y)
+    v.push(z)
+    v.push(nx)
+    v.push(ny)
+    v.push(nz)
+    v.push(u)
+    v.push(tv)
+    v.push(sky)
+    v.push(bl)
+    v.push(ao)
+    v.push(mat)
+}
+
+fn pidx(x: i64, y: i64, z: i64) -> i64 { return (y + 1) * 324 + (z + 1) * 18 + (x + 1) }
+
+// fill padded (18 x 66 x 18) block / skylight / blocklight arrays around a chunk
+fn mesh_prepare(w: World, ct: Content, c: Chunk) {
+    let rg = ct.reg
+    let refs: [Chunk] = []
+    for dz in -1 ..= 1 {
+        for dx in -1 ..= 1 { refs.push(chunk_at(w, c.cx + dx, c.cz + dz)) }
+    }
+    let any_em = false
+    for r in refs { if r.state > 0 && r.em.len() > 0 { any_em = true } }
+    for pz in 0 .. 18 {
+        for px in 0 .. 18 {
+            let rx = 1
+            let lx = px - 1
+            if px == 0 { rx = 0 lx = 15 }
+            if px == 17 { rx = 2 lx = 0 }
+            let rz = 1
+            let lz = pz - 1
+            if pz == 0 { rz = 0 lz = 15 }
+            if pz == 17 { rz = 2 lz = 0 }
+            let r = refs[rz * 3 + rx]
+            let base = (pz) * 18 + px
+            if r.state == 0 {
+                for y in 0 .. 64 {
+                    let ii = (y + 1) * 324 + base
+                    w.pb[ii] = 1
+                    w.ps[ii] = 0
+                    w.pl[ii] = 0
+                }
+            } else {
+                let top = r.hm[lz * 16 + lx]
+                for y in 0 .. 64 {
+                    let ii = (y + 1) * 324 + base
+                    w.pb[ii] = r.b[y * 256 + lz * 16 + lx]
+                    if y > top { w.ps[ii] = 15 } else { w.ps[ii] = max(0, 15 - (top - y) * 2) }
+                    w.pl[ii] = 0
+                }
+            }
+            w.pb[base] = w.i_bed
+            w.ps[base] = 0
+            w.pl[base] = 0
+            let ti = 65 * 324 + base
+            w.pb[ti] = 0
+            w.ps[ti] = 15
+            w.pl[ti] = 0
+        }
+    }
+    if any_em { flood_light(w, ct, c, refs) }
+}
+
+// block-light BFS over the 3x3 chunk neighbourhood (48 x 64 x 48 box)
+fn flood_light(w: World, ct: Content, c: Chunk, refs: [Chunk]) {
+    let rg = ct.reg
+    if w.lb_used > 0 {
+        for i in 0 .. 147456 { w.lb[i] = 0 }
+    }
+    w.lb_used = 1
+    let qh = 0
+    let qt = 0
+    for rz in 0 .. 3 {
+        for rx in 0 .. 3 {
+            let r = refs[rz * 3 + rx]
+            if r.state == 0 { continue }
+            for e in r.em {
+                let ex = e % 16
+                let ez = (e / 16) % 16
+                let ey = e / 256
+                let id = r.b[e]
+                let L = rg.light[id]
+                let bi = ey * 2304 + (rz * 16 + ez) * 48 + rx * 16 + ex
+                if w.lb[bi] < L {
+                    w.lb[bi] = L
+                    w.q[qt] = bi
+                    qt += 1
+                }
+            }
+        }
+    }
+    while qh < qt {
+        let bi = w.q[qh]
+        qh += 1
+        let L = w.lb[bi]
+        if L <= 1 { continue }
+        let ey = bi / 2304
+        let rem = bi % 2304
+        let ez = rem / 48
+        let ex = rem % 48
+        for d in 0 .. 6 {
+            let nx = ex
+            let ny = ey
+            let nz = ez
+            if d == 0 { nx += 1 } elif d == 1 { nx -= 1 } elif d == 2 { ny += 1 } elif d == 3 { ny -= 1 } elif d == 4 { nz += 1 } else { nz -= 1 }
+            if nx < 0 || nx > 47 || nz < 0 || nz > 47 || ny < 0 || ny > 63 { continue }
+            let ni = ny * 2304 + nz * 48 + nx
+            if w.lb[ni] >= L - 1 { continue }
+            let rr = refs[(nz / 16) * 3 + (nx / 16)]
+            if rr.state == 0 { continue }
+            let nid = rr.b[ny * 256 + (nz % 16) * 16 + (nx % 16)]
+            if rg.kind[nid] == 1 { continue }
+            w.lb[ni] = L - 1
+            w.q[qt] = ni
+            qt += 1
+        }
+    }
+    // copy the centre region (padded 18x18) out of the box
+    for y in 0 .. 64 {
+        for pz in 0 .. 18 {
+            for px in 0 .. 18 {
+                w.pl[(y + 1) * 324 + pz * 18 + px] = w.lb[y * 2304 + (pz + 15) * 48 + (px + 15)]
+            }
+        }
+    }
+}
+
+fn mat_of(rg: Reg, id: i64, k: i64) -> f64 {
+    if k == 4 {
+        if rg.light[id] > 0 { return 4.0 }
+        return 1.0
+    }
+    if k == 2 { return 3.0 }
+    if k == 5 { return 8.0 }
+    if k == 3 { return 5.0 }
+    if rg.light[id] > 0 { return 4.0 }
+    return 0.0
+}
+
+fn mesh_chunk(w: World, ct: Content, c: Chunk) {
+    mesh_prepare(w, ct, c)
+    let rg = ct.reg
+    let vs: [f64] = []
+    let vt: [f64] = []
+    let ox = [1, 0, 0, 0, 0, 0]
+    let oy = [0, 0, 1, 0, 0, 0]
+    let oz = [0, 0, 0, 0, 1, 0]
+    let ax = [0, 0, 0, 1, 1, 0]
+    let ay = [1, 0, 0, 0, 0, 1]
+    let az = [0, 1, 1, 0, 0, 0]
+    let qx = [0, 0, 1, 0, 0, 1]
+    let qy = [0, 1, 0, 0, 1, 0]
+    let qz = [1, 0, 0, 1, 0, 0]
+    let nxs = [1.0, -1.0, 0.0, 0.0, 0.0, 0.0]
+    let nys = [0.0, 0.0, 1.0, -1.0, 0.0, 0.0]
+    let nzs = [0.0, 0.0, 0.0, 0.0, 1.0, -1.0]
+    let sa = [-1, 1, 1, -1]
+    let sb = [-1, -1, 1, 1]
+    let cu = [0, 1, 1, 0]
+    let cv = [0, 0, 1, 1]
+    let qao = [0.0, 0.0, 0.0, 0.0]
+    let qsk = [0.0, 0.0, 0.0, 0.0]
+    let qbl = [0.0, 0.0, 0.0, 0.0]
+    for y in 0 .. 64 {
+        for lz in 0 .. 16 {
+            for lx in 0 .. 16 {
+                let pi = pidx(lx, y, lz)
+                let id = w.pb[pi]
+                if id == 0 { continue }
+                let k = rg.kind[id]
+                let mat = mat_of(rg, id, k)
+                if k == 5 {
+                    // crossed quads
+                    let sky = w.ps[pi] / 15.0
+                    let bl = w.pl[pi] / 15.0
+                    let t = rg.t_side[id]
+                    let u0 = tile_u0(t)
+                    let v0 = tile_v0(t)
+                    for q in 0 .. 2 {
+                        let x0 = lx + 0.1
+                        let x1 = lx + 0.9
+                        let z0 = lz + 0.1
+                        let z1 = lz + 0.9
+                        let za = z0
+                        let zb = z1
+                        if q == 1 { za = z1 zb = z0 }
+                        // front
+                        pv(vs, x0, y, za, 0.0, 1.0, 0.0, u0, v0 + TILE_UV, sky, bl, 1.0, mat)
+                        pv(vs, x1, y, zb, 0.0, 1.0, 0.0, u0 + TILE_UV, v0 + TILE_UV, sky, bl, 1.0, mat)
+                        pv(vs, x1, y + 1.0, zb, 0.0, 1.0, 0.0, u0 + TILE_UV, v0, sky, bl, 1.0, 2.0)
+                        pv(vs, x0, y, za, 0.0, 1.0, 0.0, u0, v0 + TILE_UV, sky, bl, 1.0, mat)
+                        pv(vs, x1, y + 1.0, zb, 0.0, 1.0, 0.0, u0 + TILE_UV, v0, sky, bl, 1.0, 2.0)
+                        pv(vs, x0, y + 1.0, za, 0.0, 1.0, 0.0, u0, v0, sky, bl, 1.0, 2.0)
+                        // back
+                        pv(vs, x1, y, zb, 0.0, 1.0, 0.0, u0 + TILE_UV, v0 + TILE_UV, sky, bl, 1.0, mat)
+                        pv(vs, x0, y, za, 0.0, 1.0, 0.0, u0, v0 + TILE_UV, sky, bl, 1.0, mat)
+                        pv(vs, x0, y + 1.0, za, 0.0, 1.0, 0.0, u0, v0, sky, bl, 1.0, 2.0)
+                        pv(vs, x1, y, zb, 0.0, 1.0, 0.0, u0 + TILE_UV, v0 + TILE_UV, sky, bl, 1.0, mat)
+                        pv(vs, x0, y + 1.0, za, 0.0, 1.0, 0.0, u0, v0, sky, bl, 1.0, 2.0)
+                        pv(vs, x1, y + 1.0, zb, 0.0, 1.0, 0.0, u0 + TILE_UV, v0, sky, bl, 1.0, 2.0)
+                    }
+                    continue
+                }
+                let hh = 1.0
+                if k == 4 && w.pb[pi + 324] != id { hh = 0.875 }
+                for d in 0 .. 6 {
+                    let ni = pi + w.dn[d]
+                    let nid = w.pb[ni]
+                    let nk = rg.kind[nid]
+                    let vis = false
+                    if k == 1 { vis = nk != 1 }
+                    elif k == 2 { vis = nk != 1 && nid != id }
+                    elif k == 3 { vis = nk != 1 && nid != id }
+                    elif k == 4 { vis = nk != 1 && nid != id }
+                    if !vis { continue }
+                    let da = w.da[d]
+                    let db = w.db[d]
+                    // per-corner smooth light + AO
+                    for q in 0 .. 4 {
+                        let i1 = ni + sa[q] * da
+                        let i2 = ni + sb[q] * db
+                        let i3 = ni + sa[q] * da + sb[q] * db
+                        let o1 = 0
+                        let o2 = 0
+                        let o3 = 0
+                        if rg.kind[w.pb[i1]] == 1 { o1 = 1 }
+                        if rg.kind[w.pb[i2]] == 1 { o2 = 1 }
+                        if rg.kind[w.pb[i3]] == 1 { o3 = 1 }
+                        let ao = 3
+                        if o1 == 1 && o2 == 1 { ao = 0 } else { ao = 3 - (o1 + o2 + o3) }
+                        let s = w.ps[ni]
+                        let b = w.pl[ni]
+                        let cnt = 1
+                        if o1 == 0 { s += w.ps[i1] b += w.pl[i1] cnt += 1 }
+                        if o2 == 0 { s += w.ps[i2] b += w.pl[i2] cnt += 1 }
+                        if o3 == 0 && !(o1 == 1 && o2 == 1) { s += w.ps[i3] b += w.pl[i3] cnt += 1 }
+                        qsk[q] = s / (cnt * 15.0)
+                        qbl[q] = b / (cnt * 15.0)
+                        qao[q] = 0.45 + ao * 0.1833
+                    }
+                    let tile = rg.t_side[id]
+                    if d == 2 { tile = rg.t_top[id] }
+                    elif d == 3 { tile = rg.t_bot[id] }
+                    let u0 = tile_u0(tile)
+                    let v0 = tile_v0(tile)
+                    let tgt = vs
+                    if k >= 3 && k != 5 { tgt = vt }
+                    // quad corners
+                    let px: [f64] = [0.0, 0.0, 0.0, 0.0]
+                    let py: [f64] = [0.0, 0.0, 0.0, 0.0]
+                    let pz: [f64] = [0.0, 0.0, 0.0, 0.0]
+                    let tu: [f64] = [0.0, 0.0, 0.0, 0.0]
+                    let tvv: [f64] = [0.0, 0.0, 0.0, 0.0]
+                    for q in 0 .. 4 {
+                        let ai = cu[q]
+                        let bi = cv[q]
+                        let xx = ox[d] + ai * ax[d] + bi * qx[d]
+                        let yy = oy[d] + ai * ay[d] + bi * qy[d]
+                        let zz = oz[d] + ai * az[d] + bi * qz[d]
+                        px[q] = lx + xx
+                        if yy == 1 { py[q] = y + hh } else { py[q] = y + yy }
+                        pz[q] = lz + zz
+                        let uu = 0.0
+                        let vv = 0.0
+                        if d == 0 { uu = bi vv = 1 - ai }
+                        elif d == 1 { uu = ai vv = 1 - bi }
+                        elif d == 2 { uu = bi vv = ai }
+                        elif d == 3 { uu = ai vv = bi }
+                        elif d == 4 { uu = ai vv = 1 - bi }
+                        else { uu = bi vv = 1 - ai }
+                        tu[q] = u0 + uu * TILE_UV
+                        tvv[q] = v0 + vv * TILE_UV
+                    }
+                    let flip = qao[0] + qao[2] < qao[1] + qao[3]
+                    for t in 0 .. 6 {
+                        let q = 0
+                        if flip {
+                            if t == 0 { q = 1 } elif t == 1 { q = 2 } elif t == 2 { q = 3 } elif t == 3 { q = 1 } elif t == 4 { q = 3 } else { q = 0 }
+                        } else {
+                            if t == 0 { q = 0 } elif t == 1 { q = 1 } elif t == 2 { q = 2 } elif t == 3 { q = 0 } elif t == 4 { q = 2 } else { q = 3 }
+                        }
+                        pv(tgt, px[q], py[q], pz[q], nxs[d], nys[d], nzs[d], tu[q], tvv[q], qsk[q], qbl[q], qao[q], mat)
+                    }
+                }
+            }
+        }
+    }
+    w.vs = vs
+    w.vt = vt
+}
+
+// ---------------------------------------------------------------- entity helpers
+// axis-aligned box (optionally rotated about an X pivot for limb swing); all six faces
+fn box_mesh(v: [f64], cx: f64, cy: f64, cz: f64, hx: f64, hy: f64, hz: f64, tile: i64, sky: f64, blk: f64, px: f64, py: f64, pz: f64, rot: f64) {
+    let u = tile_u0(tile) + 0.02
+    let t = tile_v0(tile) + 0.02
+    let cs = cos(rot)
+    let sn = sin(rot)
+    let xs = [-1.0, 1.0, 1.0, -1.0, -1.0, 1.0, 1.0, -1.0]
+    let ys = [-1.0, -1.0, 1.0, 1.0, -1.0, -1.0, 1.0, 1.0]
+    let zs = [-1.0, -1.0, -1.0, -1.0, 1.0, 1.0, 1.0, 1.0]
+    let cxs: [f64] = []
+    let cys: [f64] = []
+    let czs: [f64] = []
+    for i in 0 .. 8 {
+        let x = cx + xs[i] * hx
+        let y = cy + ys[i] * hy - py
+        let z = cz + zs[i] * hz - pz
+        // rotate around X axis through the pivot
+        let ry = y * cs - z * sn
+        let rz = y * sn + z * cs
+        cxs.push(x)
+        cys.push(ry + py)
+        czs.push(rz + pz)
+    }
+    // faces as corner index quads (CCW from outside)
+    let faces = [1, 2, 6, 5,  4, 7, 3, 0,  3, 7, 6, 2,  0, 1, 5, 4,  5, 6, 7, 4,  0, 3, 2, 1]
+    let nrm = [1.0, 0.0, 0.0,  -1.0, 0.0, 0.0,  0.0, 1.0, 0.0,  0.0, -1.0, 0.0,  0.0, 0.0, 1.0,  0.0, 0.0, -1.0]
+    let shade = [0.8, 0.8, 1.0, 0.5, 0.88, 0.88]
+    for f in 0 .. 6 {
+        let a = faces[f * 4]
+        let b = faces[f * 4 + 1]
+        let c = faces[f * 4 + 2]
+        let d = faces[f * 4 + 3]
+        let ao = shade[f]
+        let nx = nrm[f * 3]
+        let ny = nrm[f * 3 + 1] * cs - nrm[f * 3 + 2] * sn
+        let nz = nrm[f * 3 + 1] * sn + nrm[f * 3 + 2] * cs
+        pv(v, cxs[a], cys[a], czs[a], nx, ny, nz, u, t, sky, blk, ao, 6.0)
+        pv(v, cxs[b], cys[b], czs[b], nx, ny, nz, u + 0.04, t, sky, blk, ao, 6.0)
+        pv(v, cxs[c], cys[c], czs[c], nx, ny, nz, u + 0.04, t + 0.04, sky, blk, ao, 6.0)
+        pv(v, cxs[a], cys[a], czs[a], nx, ny, nz, u, t, sky, blk, ao, 6.0)
+        pv(v, cxs[c], cys[c], czs[c], nx, ny, nz, u + 0.04, t + 0.04, sky, blk, ao, 6.0)
+        pv(v, cxs[d], cys[d], czs[d], nx, ny, nz, u, t + 0.04, sky, blk, ao, 6.0)
+    }
+}
+
+// axis-aligned cube with the given tile on all faces, mat selectable (overlay / held block)
+fn cube_mesh(v: [f64], x0: f64, y0: f64, z0: f64, x1: f64, y1: f64, z1: f64, t_top: i64, t_side: i64, t_bot: i64, sky: f64, blk: f64, mat: f64) {
+    let xs = [x0, x1, x1, x0, x0, x1, x1, x0]
+    let ys = [y0, y0, y1, y1, y0, y0, y1, y1]
+    let zs = [z0, z0, z0, z0, z1, z1, z1, z1]
+    let faces = [1, 2, 6, 5,  4, 7, 3, 0,  3, 7, 6, 2,  0, 1, 5, 4,  5, 6, 7, 4,  0, 3, 2, 1]
+    let nrm = [1.0, 0.0, 0.0,  -1.0, 0.0, 0.0,  0.0, 1.0, 0.0,  0.0, -1.0, 0.0,  0.0, 0.0, 1.0,  0.0, 0.0, -1.0]
+    let shade = [0.8, 0.8, 1.0, 0.5, 0.88, 0.88]
+    for f in 0 .. 6 {
+        let tile = t_side
+        if f == 2 { tile = t_top } elif f == 3 { tile = t_bot }
+        let u = tile_u0(tile)
+        let t = tile_v0(tile)
+        let a = faces[f * 4]
+        let b = faces[f * 4 + 1]
+        let c = faces[f * 4 + 2]
+        let d = faces[f * 4 + 3]
+        let ao = shade[f]
+        if mat == 7.0 { ao = 1.0 }
+        let nx = nrm[f * 3]
+        let ny = nrm[f * 3 + 1]
+        let nz = nrm[f * 3 + 2]
+        pv(v, xs[a], ys[a], zs[a], nx, ny, nz, u, t + TILE_UV, sky, blk, ao, mat)
+        pv(v, xs[b], ys[b], zs[b], nx, ny, nz, u + TILE_UV, t + TILE_UV, sky, blk, ao, mat)
+        pv(v, xs[c], ys[c], zs[c], nx, ny, nz, u + TILE_UV, t, sky, blk, ao, mat)
+        pv(v, xs[a], ys[a], zs[a], nx, ny, nz, u, t + TILE_UV, sky, blk, ao, mat)
+        pv(v, xs[c], ys[c], zs[c], nx, ny, nz, u + TILE_UV, t, sky, blk, ao, mat)
+        pv(v, xs[d], ys[d], zs[d], nx, ny, nz, u, t, sky, blk, ao, mat)
+    }
+}
+
+// camera-facing billboard quad (particles); right/up are unit vectors
+fn quad_bb(v: [f64], x: f64, y: f64, z: f64, sz: f64, rx: f64, ry: f64, rz: f64, ux: f64, uy: f64, uz: f64, u0: f64, v0: f64, du: f64, sky: f64, blk: f64) {
+    let h = sz * 0.5
+    let x0 = x - rx * h - ux * h
+    let y0 = y - ry * h - uy * h
+    let z0 = z - rz * h - uz * h
+    let x1 = x + rx * h - ux * h
+    let y1 = y + ry * h - uy * h
+    let z1 = z + rz * h - uz * h
+    let x2 = x + rx * h + ux * h
+    let y2 = y + ry * h + uy * h
+    let z2 = z + rz * h + uz * h
+    let x3 = x - rx * h + ux * h
+    let y3 = y - ry * h + uy * h
+    let z3 = z - rz * h + uz * h
+    pv(v, x0, y0, z0, 0.0, 1.0, 0.0, u0, v0 + du, sky, blk, 1.0, 6.0)
+    pv(v, x1, y1, z1, 0.0, 1.0, 0.0, u0 + du, v0 + du, sky, blk, 1.0, 6.0)
+    pv(v, x2, y2, z2, 0.0, 1.0, 0.0, u0 + du, v0, sky, blk, 1.0, 6.0)
+    pv(v, x0, y0, z0, 0.0, 1.0, 0.0, u0, v0 + du, sky, blk, 1.0, 6.0)
+    pv(v, x2, y2, z2, 0.0, 1.0, 0.0, u0 + du, v0, sky, blk, 1.0, 6.0)
+    pv(v, x3, y3, z3, 0.0, 1.0, 0.0, u0, v0, sky, blk, 1.0, 6.0)
+}

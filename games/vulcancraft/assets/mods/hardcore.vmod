@@ -1,0 +1,3 @@
+# hardcore — one-hit-ish combat: low health, strong swords, long reach, first to 3 kills.
+rule health=10 damage=5 kills=3 respawn=4 fall=1
+weapon sword name=Heavy_Blade damage=5 reach=3.6 cooldown=0.7 knockback=9 blade=#c8c8d0 hilt=#4a3020

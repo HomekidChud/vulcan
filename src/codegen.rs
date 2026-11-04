@@ -1327,6 +1327,18 @@ impl Codegen {
                 (format!("(vcursor_visible({c}), (void)0)"), Ty::Void)
             }
             "term_normal" => ("(term_normal(), (void)0)".into(), Ty::Void),
+            "atan2" => {
+                if args.len() != 2 { panic!("vulcan: atan2(y, x) takes 2 args"); }
+                let (y, yt) = self.gen_expr(&args[0]); let y = self.cast(&y, &yt, &Ty::F64);
+                let (x, xt) = self.gen_expr(&args[1]); let x = self.cast(&x, &xt, &Ty::F64);
+                (format!("atan2({y}, {x})"), Ty::F64)
+            }
+            "tan" | "exp" | "log" | "asin" | "acos" | "atan" | "round" | "trunc" => {
+                if args.len() != 1 { panic!("vulcan: {callee} takes 1 arg"); }
+                let (c, t) = self.gen_expr(&args[0]);
+                let c = self.cast(&c, &t, &Ty::F64);
+                (format!("{callee}({c})"), Ty::F64)
+            }
             "sqrt" | "floor" | "ceil" | "sin" | "cos" | "pow" => {
                 let (c, t) = self.gen_expr(&args[0]);
                 let c = self.cast(&c, &t, &Ty::F64);
@@ -1375,7 +1387,7 @@ impl Codegen {
                 (tmp, Ty::Str)
             }
             _ => {
-                let (ptys, ret) = self.fns.get(callee).unwrap_or_else(|| panic!("vulcan: call to unknown function `{callee}`")).clone();
+                let (ptys, ret) = self.fns.get(callee).unwrap_or_else(|| panic!("{}", unknown_fn_msg(callee))).clone();
                 if args.len() != ptys.len() {
                     panic!("vulcan: {callee} expects {} args, got {}", ptys.len(), args.len());
                 }
@@ -1387,5 +1399,14 @@ impl Codegen {
                 (format!("{}({})", safe_c_name(callee), cs.join(", ")), ret)
             }
         }
+    }
+}
+
+fn unknown_fn_msg(callee: &str) -> String {
+    let host = ["gfx_", "hud_", "net_", "snd", "file_list", "hash3", "host_store"];
+    if host.iter().any(|h| callee.starts_with(h)) {
+        format!("vulcan: `{callee}` is a web3d builtin; it only exists on the JS backend (`vulcan package <file> --platform web3d`)")
+    } else {
+        format!("vulcan: call to unknown function `{callee}`")
     }
 }

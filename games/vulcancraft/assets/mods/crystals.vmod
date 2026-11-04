@@ -1,0 +1,12 @@
+# crystals — glowing gem ores and decorative crystal blocks. Adds ores to the cave layer.
+block 40 amethyst_ore name=Amethyst_Ore tex=speckle base=#8a8a8e accent=#b45cff hardness=2.0 light=4
+block 41 emerald_ore name=Emerald_Ore tex=speckle base=#8a8a8e accent=#3cf08a hardness=2.0 light=3
+block 42 ruby_ore name=Ruby_Ore tex=speckle base=#8a8a8e accent=#ff3c4c hardness=2.0 light=3
+block 43 amethyst_block name=Amethyst_Block tex=crystal base=#6a2cc4 accent=#d59cff hardness=1.6 light=7
+block 44 emerald_block name=Emerald_Block tex=crystal base=#14a357 accent=#8dffc0 hardness=1.6 light=7
+block 45 ruby_block name=Ruby_Block tex=crystal base=#b0182c accent=#ff8a98 hardness=1.6 light=7
+block 46 sea_lantern name=Sea_Lantern tex=glow base=#7fd6d0 accent=#ffffff light=15 hardness=0.4
+
+ore amethyst_ore min=2 max=30 count=6 size=4
+ore emerald_ore min=2 max=24 count=4 size=3
+ore ruby_ore min=2 max=18 count=3 size=3

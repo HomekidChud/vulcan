@@ -1,0 +1,290 @@
+// game.vulcan — shared game state, chunk streaming, particles and notifications.
+
+struct Body {
+    x: f64, y: f64, z: f64,
+    vx: f64, vy: f64, vz: f64,
+    ground: i64, wet: i64, lava: i64, fall_v: f64
+}
+
+struct ShaderPack { file: string, name: string, desc: string }
+
+struct Game {
+    ct: Content, w: World, packs: [Pack], pack_i: i64,
+    mode: i64,            // 0 menu, 1 playing, 2 block palette, 3 paused
+    menu_sel: i64, menu_t: f64, status: string,
+    me: Body, yaw: f64, pitch: f64, hp: f64, sel: i64, hot: [i64],
+    opp: Body, oyaw: f64, opitch: f64, ohp: f64, opp_kind: i64, opp_item: i64, opp_swing: f64,
+    opp_name: string, opp_vis: i64, tx: f64, ty: f64, tz: f64, bot_cd: f64, bot_jump: f64, bot_t: f64,
+    name: string, my_id: i64, seed: i64, kills: i64, deaths: i64, over_t: f64, winner: i64,
+    dead_t: f64, spawn_n: i64, atk_cd: f64, swing: f64, bob: f64, hurt_t: f64, fov_k: f64,
+    hit_ok: i64, hx: i64, hy: i64, hz: i64, hnx: i64, hny: i64, hnz: i64, hit_d: f64,
+    mx: i64, my: i64, mz: i64, mine_t: f64, mine_need: f64,
+    time: f64, clock: f64, tsync: f64, send_t: f64,
+    shaders: [ShaderPack], sh_i: i64, sh_err: string,
+    part: [f64], notes: [string], note_t: [f64],
+    rd: i64, order: [i64], show_dbg: i64, fps: f64, fps_n: f64, fps_t: f64,
+    net_phase: i64, hs_sent: i64, peer_ok: i64, load_total: i64, scale: f64,
+    role: i64, peer_id: i64, pal_page: i64, sens: f64, step_t: f64, ready: i64, last_dmg: f64, shake: f64
+}
+
+fn body_new() -> Body {
+    return Body { x: 0.0, y: 40.0, z: 0.0, vx: 0.0, vy: 0.0, vz: 0.0, ground: 0, wet: 0, lava: 0, fall_v: 0.0 }
+}
+
+// chunk offsets sorted by distance (squared) up to radius 11
+fn chunk_order() -> [i64] {
+    let ds: [i64] = []
+    let out: [i64] = []
+    let R = 11
+    for dz in -R ..= R {
+        for dx in -R ..= R { ds.push((dx * dx + dz * dz) * 4096 + (dx + 32) * 64 + (dz + 32)) }
+    }
+    // insertion sort (small list, done once)
+    for i in 1 .. ds.len() {
+        let v = ds[i]
+        let j = i - 1
+        while j >= 0 && ds[j] > v {
+            ds[j + 1] = ds[j]
+            j -= 1
+        }
+        ds[j + 1] = v
+    }
+    for v in ds {
+        let r = v % 4096
+        out.push(r / 64 - 32)
+        out.push(r % 64 - 32)
+    }
+    return out
+}
+
+fn list_shaders() -> [ShaderPack] {
+    let out: [ShaderPack] = []
+    let files: [string] = []
+    for f in file_list("shaders/") { if f.ends_with(".vshader") { files.push(f) } }
+    for f in file_list("user/") { if f.ends_with(".vshader") { files.push(f) } }
+    for f in files {
+        let sp = ShaderPack { file: f, name: f, desc: "" }
+        for line in text_lines(file_read(f)) {
+            if line.starts_with("@name") { sp.name = line.substring(5, line.len()).trim() }
+            elif line.starts_with("@desc") { sp.desc = line.substring(5, line.len()).trim() }
+            elif line.starts_with("@common") { break }
+            elif line.starts_with("@scene") { break }
+        }
+        out.push(sp)
+    }
+    return out
+}
+
+fn new_game() -> Game {
+    let packs = list_packs()
+    let ct = load_content(packs[0])
+    let g = Game {
+        ct: ct, w: world_new(1, ct), packs: packs, pack_i: 0,
+        mode: 0, menu_sel: 0, menu_t: 0.0, status: "",
+        me: body_new(), yaw: 0.0, pitch: 0.0, hp: 20.0, sel: 0, hot: [],
+        opp: body_new(), oyaw: 0.0, opitch: 0.0, ohp: 20.0, opp_kind: 0, opp_item: 0, opp_swing: 0.0,
+        opp_name: "Opponent", opp_vis: 0, tx: 0.0, ty: 0.0, tz: 0.0, bot_cd: 0.0, bot_jump: 0.0, bot_t: 0.0,
+        name: "Player", my_id: 0, seed: 1, kills: 0, deaths: 0, over_t: 0.0, winner: 0,
+        dead_t: 0.0, spawn_n: 0, atk_cd: 0.0, swing: 0.0, bob: 0.0, hurt_t: 0.0, fov_k: 0.0,
+        hit_ok: 0, hx: 0, hy: 0, hz: 0, hnx: 0, hny: 0, hnz: 0, hit_d: 0.0,
+        mx: 0, my: 0, mz: 0, mine_t: 0.0, mine_need: 1.0,
+        time: 0.3, clock: 0.0, tsync: 0.0, send_t: 0.0,
+        shaders: list_shaders(), sh_i: 0, sh_err: "",
+        part: [], notes: [], note_t: [],
+        rd: 6, order: chunk_order(), show_dbg: 0, fps: 60.0, fps_n: 0.0, fps_t: 0.0,
+        net_phase: 0, hs_sent: 0, peer_ok: 0, load_total: 0, scale: 1.0,
+        role: 0, peer_id: 0, pal_page: 0, sens: 0.0024, step_t: 0.0, ready: 0, last_dmg: 0.0, shake: 0.0
+    }
+    return g
+}
+
+fn note(g: Game, s: string) {
+    g.notes.push(s)
+    g.note_t.push(4.0)
+    if g.notes.len() > 5 {
+        g.notes.remove(0)
+        g.note_t.remove(0)
+    }
+}
+
+// set the default hotbar for the active content: sword + eight building blocks
+fn reset_hotbar(g: Game) {
+    let rg = g.ct.reg
+    let hh: [i64] = []
+    g.hot = hh
+    g.hot.push(1000)
+    let want = ["cobblestone", "planks", "glass", "bricks", "glowstone", "obsidian", "sand", "ice"]
+    let used = 0
+    for k in want {
+        let id = find_block(rg, k)
+        if id > 0 { g.hot.push(id) used += 1 }
+    }
+    let nxt = 1
+    while g.hot.len() < 9 && nxt < rg.n {
+        let dup = false
+        for h in g.hot { if h == nxt { dup = true } }
+        if !dup && rg.kind[nxt] != 4 && rg.kind[nxt] != 5 { g.hot.push(nxt) }
+        nxt += 1
+    }
+    while g.hot.len() < 9 { g.hot.push(1) }
+    g.sel = 0
+}
+
+// ---------------------------------------------------------------- particles
+// stride 9: x y z vx vy vz life tile size
+fn spawn_part(g: Game, x: f64, y: f64, z: f64, vx: f64, vy: f64, vz: f64, life: f64, tile: i64, size: f64) {
+    if g.part.len() > 9 * 700 { return }
+    g.part.push(x)
+    g.part.push(y)
+    g.part.push(z)
+    g.part.push(vx)
+    g.part.push(vy)
+    g.part.push(vz)
+    g.part.push(life)
+    g.part.push(tile * 1.0)
+    g.part.push(size)
+}
+
+fn burst_block(g: Game, x: i64, y: i64, z: i64, id: i64, n: i64) {
+    let rg = g.ct.reg
+    let t = rg.t_side[id]
+    let k = g.clock * 13.0
+    for i in 0 .. n {
+        let r1 = rnd(i, x + y, z, 77 + (k as i64))
+        let r2 = rnd(i, y, x + z, 78 + (k as i64))
+        let r3 = rnd(z, i, x - y, 79 + (k as i64))
+        spawn_part(g, x + r1, y + r2, z + r3, (r1 - 0.5) * 4.0, r2 * 4.0 + 1.0, (r3 - 0.5) * 4.0, 0.6 + r1 * 0.5, t, 0.16)
+    }
+}
+
+fn update_parts(g: Game, dt: f64) {
+    let rg = g.ct.reg
+    let n = g.part.len() / 9
+    let out: [f64] = []
+    for i in 0 .. n {
+        let o = i * 9
+        let life = g.part[o + 6] - dt
+        if life <= 0.0 { continue }
+        let vy = g.part[o + 4] - 22.0 * dt
+        let x = g.part[o] + g.part[o + 3] * dt
+        let y = g.part[o + 1] + vy * dt
+        let z = g.part[o + 2] + g.part[o + 5] * dt
+        let vx = g.part[o + 3]
+        let vz = g.part[o + 5]
+        if rg.kind[get_block(g.w, floori(x), floori(y), floori(z))] == 1 {
+            y = g.part[o + 1]
+            vy = 0.0 - vy * 0.2
+            vx = vx * 0.6
+            vz = vz * 0.6
+            x = g.part[o]
+            z = g.part[o + 2]
+        }
+        out.push(x)
+        out.push(y)
+        out.push(z)
+        out.push(vx)
+        out.push(vy)
+        out.push(vz)
+        out.push(life)
+        out.push(g.part[o + 7])
+        out.push(g.part[o + 8])
+    }
+    g.part = out
+}
+
+// ---------------------------------------------------------------- chunk streaming
+fn upload_chunk(g: Game, c: Chunk) {
+    mesh_chunk(g.w, g.ct, c)
+    let ox = c.cx * 16.0
+    let oz = c.cz * 16.0
+    gfx_mesh_set(c.slot, 0, g.w.vs)
+    gfx_mesh_at(c.slot, ox, 0.0, oz)
+    gfx_mesh_set(2000 + c.slot, 1, g.w.vt)
+    gfx_mesh_at(2000 + c.slot, ox, 0.0, oz)
+    c.dirty = 0
+    c.has_m = 1
+}
+
+fn neighbours_ready(w: World, cx: i64, cz: i64) -> bool {
+    for dz in -1 ..= 1 {
+        for dx in -1 ..= 1 {
+            if !chunk_loaded(w, cx + dx, cz + dz) { return false }
+        }
+    }
+    return true
+}
+
+// generate + mesh chunks around (px, pz) within a millisecond budget; returns jobs done
+fn stream(g: Game, px: f64, pz: f64, budget: f64) -> i64 {
+    let w = g.w
+    let pcx = fdiv(floori(px), 16)
+    let pcz = fdiv(floori(pz), 16)
+    let t0 = ms_now()
+    let jobs = 0
+    let R = g.rd
+    let n = g.order.len() / 2
+    let guard = 0
+    while guard < 4 {
+        guard += 1
+        let did = false
+        // 1) remesh edited chunks immediately (they are close to the player)
+        for i in 0 .. n {
+            let dx = g.order[i * 2]
+            let dz = g.order[i * 2 + 1]
+            if dx * dx + dz * dz > (R + 1) * (R + 1) { break }
+            let cx = pcx + dx
+            let cz = pcz + dz
+            let c = chunk_at(w, cx, cz)
+            if c.state > 0 && c.dirty == 1 && c.has_m == 1 && neighbours_ready(w, cx, cz) {
+                upload_chunk(g, c)
+                jobs += 1
+                did = true
+                break
+            }
+        }
+        if did { if ms_now() - t0 > budget { return jobs } continue }
+        // 2) load missing chunks, then mesh fresh ones, nearest first
+        for i in 0 .. n {
+            let dx = g.order[i * 2]
+            let dz = g.order[i * 2 + 1]
+            let d2 = dx * dx + dz * dz
+            if d2 > (R + 2) * (R + 2) { break }
+            let cx = pcx + dx
+            let cz = pcz + dz
+            let c = chunk_at(w, cx, cz)
+            if c.state == 0 {
+                load_chunk(w, g.ct, cx, cz)
+                jobs += 1
+                did = true
+                break
+            }
+            if d2 <= R * R && c.dirty == 1 && neighbours_ready(w, cx, cz) {
+                upload_chunk(g, c)
+                jobs += 1
+                did = true
+                break
+            }
+        }
+        if !did { return jobs }
+        if ms_now() - t0 > budget { return jobs }
+        guard = 0
+        if jobs > 400 { return jobs }
+    }
+    return jobs
+}
+
+// number of chunks inside the mesh radius that are meshed (for the loading bar)
+fn meshed_count(g: Game, px: f64, pz: f64, radius: i64) -> i64 {
+    let pcx = fdiv(floori(px), 16)
+    let pcz = fdiv(floori(pz), 16)
+    let n = 0
+    for dz in -radius ..= radius {
+        for dx in -radius ..= radius {
+            if dx * dx + dz * dz <= radius * radius {
+                let c = chunk_at(g.w, pcx + dx, pcz + dz)
+                if c.state > 0 && c.has_m == 1 { n += 1 }
+            }
+        }
+    }
+    return n
+}

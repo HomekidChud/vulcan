@@ -1,0 +1,50 @@
+# core — the base game. It is an ordinary mod: every block, rule, biome and ore below
+# is defined with the same commands any mod pack can use or override.
+# block <id> <key> name= kind= tex= top= bottom= base= accent= top_base= top_accent= bottom_base= bottom_accent= hardness= light= damage=
+
+block 1 stone name=Stone tex=noise base=#8a8a8e accent=#6e6e74 hardness=0.9
+block 2 dirt name=Dirt tex=noise base=#86603f accent=#6a4a2f hardness=0.3
+block 3 grass name=Grass_Block tex=grass_side base=#86603f accent=#5fa334 top=grass_top top_base=#58a02e top_accent=#3f8523 bottom=noise bottom_base=#86603f bottom_accent=#6a4a2f hardness=0.35
+block 4 sand name=Sand tex=sand base=#dccd8e hardness=0.3
+block 5 water name=Water kind=liquid tex=water base=#2f6fd6 hardness=0
+block 6 log name=Oak_Log tex=logside base=#6a4f2d accent=#3f2d18 top=logtop top_base=#b8935a top_accent=#5a4224 bottom=logtop bottom_base=#b8935a bottom_accent=#5a4224 hardness=0.7
+block 7 leaves name=Oak_Leaves kind=cutout tex=leaves base=#2f7a28 accent=#4aa13a hardness=0.1
+block 8 bedrock name=Bedrock tex=noise base=#3a3a3e accent=#232326 hardness=-1
+block 9 snow name=Snow tex=snow_side base=#86603f accent=#f4f8ff top=solid top_base=#f4f8ff bottom=noise bottom_base=#86603f bottom_accent=#6a4a2f hardness=0.3
+block 10 cobblestone name=Cobblestone tex=bricks base=#808086 accent=#55555a hardness=1.1
+block 11 planks name=Planks tex=planks base=#b08850 hardness=0.6
+block 12 glass name=Glass kind=glass tex=glass base=#c8e6f5 accent=#ffffff hardness=0.2
+block 13 gravel name=Gravel tex=noise base=#8c8785 accent=#6c6866 hardness=0.4
+block 14 sandstone name=Sandstone tex=noise base=#d4c27c accent=#bba85f hardness=0.7
+block 15 bricks name=Bricks tex=bricks base=#a14e3c accent=#cfc9bd hardness=1.0
+block 16 coal_ore name=Coal_Ore tex=speckle base=#8a8a8e accent=#222226 hardness=1.4
+block 17 iron_ore name=Iron_Ore tex=speckle base=#8a8a8e accent=#d8a77f hardness=1.5
+block 18 gold_ore name=Gold_Ore tex=speckle base=#8a8a8e accent=#ffd23c hardness=1.6
+block 19 diamond_ore name=Diamond_Ore tex=speckle base=#8a8a8e accent=#4cf0e8 hardness=1.8
+block 20 lava name=Lava kind=liquid tex=lava base=#d5440c accent=#ffd23c light=14 damage=6 hardness=0
+block 21 glowstone name=Glowstone tex=glow base=#c9922f accent=#ffe9a0 light=15 hardness=0.4
+block 22 tall_grass name=Tall_Grass kind=plant tex=plant base=#5aa02c hardness=0.05
+block 23 poppy name=Poppy kind=plant tex=flower base=#3f8523 accent=#e0301e hardness=0.05
+block 24 dandelion name=Dandelion kind=plant tex=flower base=#3f8523 accent=#f3d220 hardness=0.05
+block 25 ice name=Ice kind=glass tex=glass base=#a8d4ff accent=#ffffff hardness=0.3
+block 26 obsidian name=Obsidian tex=crystal base=#14101f accent=#3d2a66 hardness=5.0
+block 27 cactus name=Cactus tex=cactus base=#2f7d32 accent=#e8f0b0 top=cactus top_base=#3f8f3a hardness=0.4
+
+rule gravity=27 jump=8.8 speed=4.4 sprint=1.45 reach=5.2 damage=4 health=20 kills=5 knockback=7.5 fly=0 daylen=900 respawn=3 start_time=0.28
+
+weapon sword name=Iron_Sword damage=4 reach=3.4 cooldown=0.5 knockback=7.5 blade=#d6dde6 hilt=#6b4a2b
+
+biome plains top=grass filler=dirt tree=log,leaves tree_freq=0.002 plant=tall_grass plant_freq=0.14
+biome forest top=grass filler=dirt tree=log,leaves tree_freq=0.022 plant=tall_grass plant_freq=0.08
+biome desert top=sand filler=sandstone plant=cactus plant_freq=0.004
+biome snow top=snow filler=dirt tree=log,leaves tree_freq=0.006
+biome mountains top=stone filler=stone
+biome beach top=sand filler=sand
+
+ore coal_ore min=4 max=52 count=14 size=7
+ore iron_ore min=3 max=38 count=9 size=5
+ore gold_ore min=3 max=20 count=3 size=4
+ore diamond_ore min=2 max=12 count=1 size=3
+ore gravel min=8 max=50 count=4 size=9
+ore dirt min=10 max=50 count=4 size=9
+cave width=0.055 lava=lava

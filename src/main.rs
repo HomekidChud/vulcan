@@ -109,12 +109,13 @@ fn main() {
     }
     if cmd == "package" {
         let file = args.get(2).map(|s| s.as_str())
-            .unwrap_or_else(|| { eprintln!("usage: vulcan package <file.vulcan> --platform <web|desktop|mobile|linux|windows|macos>"); std::process::exit(1); });
+            .unwrap_or_else(|| { eprintln!("usage: vulcan package <file.vulcan> --platform <web|web3d|desktop|mobile|linux|windows|macos> [--assets dir]"); std::process::exit(1); });
         if !Path::new(file).exists() {
             eprintln!("error: file not found: {file}");
             std::process::exit(1);
         }
-        package::package(file, &platform);
+        let assets = args.iter().position(|a| a == "--assets").and_then(|i| args.get(i + 1)).cloned();
+        package::package(file, &platform, assets.as_deref());
         return;
     }
     if !matches!(cmd.as_str(), "run" | "build" | "emit" | "bench" | "test") {

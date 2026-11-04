@@ -1,0 +1,386 @@
+// world.vulcan — chunked voxel world: storage, deterministic terrain generation,
+// biomes, caves, ores, trees, heightmaps and block-light emitter tracking.
+
+const CHT = 64
+const GRID = 32
+const RW = 22
+
+struct Chunk {
+    cx: i64, cz: i64, state: i64,
+    b: [i64], hm: [i64], em: [i64],
+    dirty: i64, has_m: i64, has_t: i64, slot: i64
+}
+
+struct World {
+    slots: [Chunk], none: Chunk, seed: i64,
+    hs: [i64], bs: [i64],
+    pb: [i64], ps: [i64], pl: [i64], lb: [i64], lb_used: i64, q: [i64],
+    vs: [f64], vt: [f64], ed: [i64],
+    i_stone: i64, i_bed: i64, i_water: i64, i_poppy: i64, i_dandelion: i64,
+    da: [i64], db: [i64], dn: [i64]
+}
+
+fn chunk_empty(slot: i64) -> Chunk {
+    return Chunk { cx: 0, cz: 0, state: 0, b: [], hm: [], em: [], dirty: 0, has_m: 0, has_t: 0, slot: slot }
+}
+
+fn zeros(n: i64) -> [i64] {
+    let a: [i64] = []
+    for i in 0 .. n { a.push(0) }
+    return a
+}
+
+fn world_new(seed: i64, ct: Content) -> World {
+    let w = World {
+        slots: [], none: chunk_empty(-1), seed: seed,
+        hs: zeros(RW * RW), bs: zeros(RW * RW),
+        pb: zeros(18 * 66 * 18), ps: zeros(18 * 66 * 18), pl: zeros(18 * 66 * 18),
+        lb: zeros(48 * 64 * 48), lb_used: 0, q: zeros(48 * 64 * 48 * 2),
+        vs: [], vt: [], ed: [],
+        i_stone: bid(ct.reg, "stone"), i_bed: bid(ct.reg, "bedrock"), i_water: bid(ct.reg, "water"),
+        i_poppy: bid(ct.reg, "poppy"), i_dandelion: bid(ct.reg, "dandelion"),
+        da: [1, 18, 18, 1, 324, 18, 324], db: [], dn: []
+    }
+    for i in 0 .. GRID * GRID { w.slots.push(chunk_empty(i)) }
+    // per-direction index deltas in the padded mesh arrays (x=1, z=18, y=324)
+    w.da = [324, 18, 18, 1, 1, 324]
+    w.db = [18, 324, 1, 18, 324, 1]
+    w.dn = [1, -1, 324, -324, 18, -18]
+    return w
+}
+
+fn slot_of(cx: i64, cz: i64) -> i64 { return fmod(cx, GRID) + fmod(cz, GRID) * GRID }
+
+fn chunk_at(w: World, cx: i64, cz: i64) -> Chunk {
+    let c = w.slots[slot_of(cx, cz)]
+    if c.state > 0 && c.cx == cx && c.cz == cz { return c }
+    return w.none
+}
+
+fn get_block(w: World, x: i64, y: i64, z: i64) -> i64 {
+    if y < 0 { return w.i_bed }
+    if y >= CHT { return 0 }
+    let cx = fdiv(x, 16)
+    let cz = fdiv(z, 16)
+    let c = chunk_at(w, cx, cz)
+    if c.state == 0 { return 1 }
+    return c.b[y * 256 + (z - cz * 16) * 16 + (x - cx * 16)]
+}
+
+fn chunk_loaded(w: World, cx: i64, cz: i64) -> bool {
+    return chunk_at(w, cx, cz).state > 0
+}
+
+// ---------------------------------------------------------------- terrain
+fn height_at(w: World, x: i64, z: i64) -> i64 {
+    let fx = x * 1.0
+    let fz = z * 1.0
+    let s = w.seed
+    let cont = fbm2(fx * 0.0042, fz * 0.0042, s, 3)
+    let hills = fbm2(fx * 0.02, fz * 0.02, s + 1, 4)
+    let rough = fbm2(fx * 0.09, fz * 0.09, s + 2, 2)
+    let mount = fbm2(fx * 0.009 + 40.0, fz * 0.009, s + 3, 3)
+    let h = 19.0 + (cont - 0.4) * 30.0 + hills * 15.0 + rough * 3.0
+    let m = clampf((mount - 0.5) * 4.5, 0.0, 1.0)
+    h += m * m * 28.0
+    return clampi(h as i64, 5, 57)
+}
+
+// 0 plains 1 forest 2 desert 3 snow 4 mountains 5 beach
+fn biome_of(w: World, x: i64, z: i64, h: i64, sea: i64) -> i64 {
+    if h <= sea + 1 { return 5 }
+    if h >= 44 { return 4 }
+    let fx = x * 1.0
+    let fz = z * 1.0
+    let temp = fbm2(fx * 0.0032 + 300.0, fz * 0.0032, w.seed + 10, 3)
+    let moist = fbm2(fx * 0.0036, fz * 0.0036 + 200.0, w.seed + 11, 3)
+    if temp > 0.56 && moist < 0.52 { return 2 }
+    if temp < 0.43 { return 3 }
+    if moist > 0.54 { return 1 }
+    return 0
+}
+
+fn gen_chunk(w: World, ct: Content, c: Chunk) {
+    let rg = ct.reg
+    let gn = ct.gen
+    let sea = gn.sea
+    let x0 = c.cx * 16
+    let z0 = c.cz * 16
+    for rz in 0 .. RW {
+        for rx in 0 .. RW {
+            let wx = x0 + rx - 3
+            let wz = z0 + rz - 3
+            let h = height_at(w, wx, wz)
+            w.hs[rz * RW + rx] = h
+            w.bs[rz * RW + rx] = biome_of(w, wx, wz, h, sea)
+        }
+    }
+    let b = zeros(16384)
+    c.b = b
+    let stone = w.i_stone
+    for lz in 0 .. 16 {
+        for lx in 0 .. 16 {
+            let ri = (lz + 3) * RW + lx + 3
+            let h = w.hs[ri]
+            let bi = w.bs[ri]
+            let top = gn.b_top[bi]
+            let fill = gn.b_fill[bi]
+            let wx = x0 + lx
+            let wz = z0 + lz
+            for y in 0 ..= h {
+                let id = stone
+                if y == 0 { id = w.i_bed }
+                elif y == 1 && rnd(wx, 1, wz, w.seed + 4) < 0.5 { id = w.i_bed }
+                elif y == h { id = top }
+                elif y >= h - 3 { id = fill }
+                // caves
+                if y >= 4 && y < h && y < 46 && id != w.i_bed {
+                    let carve = gn.cave
+                    if h <= sea + 1 && y > h - 4 { carve = 0.0 }
+                    if carve > 0.0 {
+                        let n1 = noise3(wx * 0.045, y * 0.07, wz * 0.045, w.seed + 300)
+                        if abs(n1 - 0.5) < carve * 2.2 {
+                            let n2 = noise3(wx * 0.045 + 100.0, y * 0.07, wz * 0.045, w.seed + 301)
+                            if abs(n1 - 0.5) < carve && abs(n2 - 0.5) < carve * 1.4 {
+                                if y <= 6 && gn.cave_lava > 0 { id = gn.cave_lava } else { id = 0 }
+                            }
+                        }
+                    }
+                }
+                b[y * 256 + lz * 16 + lx] = id
+            }
+            if h < sea {
+                for y in h + 1 ..= sea { b[y * 256 + lz * 16 + lx] = w.i_water }
+            }
+        }
+    }
+    // ores
+    for k in 0 .. gn.ore_blk.len() {
+        for v in 0 .. gn.ore_count[k] {
+            let ox = rnd(c.cx, k, v * 3, w.seed + 500) * 16.0
+            let oz = rnd(c.cz, k, v * 3 + 1, w.seed + 500) * 16.0
+            let oy = gn.ore_min[k] + rnd(c.cx + c.cz, k, v * 3 + 2, w.seed + 501) * (gn.ore_max[k] - gn.ore_min[k])
+            let px = ox as i64
+            let py = oy as i64
+            let pz = oz as i64
+            for s in 0 .. gn.ore_size[k] {
+                if px >= 0 && px < 16 && pz >= 0 && pz < 16 && py > 1 && py < CHT {
+                    let ii = py * 256 + pz * 16 + px
+                    if b[ii] == stone { b[ii] = gn.ore_blk[k] }
+                }
+                px += clampi((rnd(c.cx, v + s, k, w.seed + 510) * 3.0) as i64 - 1, -1, 1)
+                py += clampi((rnd(c.cz, v + s, k, w.seed + 511) * 3.0) as i64 - 1, -1, 1)
+                pz += clampi((rnd(c.cx + 7, v + s, k, w.seed + 512) * 3.0) as i64 - 1, -1, 1)
+            }
+        }
+    }
+    // trees: placed per column in an extended window so canopies cross chunk borders consistently
+    for tz in -3 .. 19 {
+        for tx in -3 .. 19 {
+            let ri = (tz + 3) * RW + tx + 3
+            let bi = w.bs[ri]
+            let freq = gn.b_tfreq[bi]
+            if freq <= 0.0 { continue }
+            let h = w.hs[ri]
+            if h <= sea { continue }
+            let wx = x0 + tx
+            let wz = z0 + tz
+            if rnd(wx, 0, wz, w.seed + 20) >= freq { continue }
+            let th = 4 + (rnd(wx, 1, wz, w.seed + 21) * 3.0) as i64
+            if h + th + 2 >= CHT { continue }
+            let logid = gn.b_log[bi]
+            let leafid = gn.b_leaf[bi]
+            if logid == 0 || leafid == 0 { continue }
+            for ly in h + th - 2 ..= h + th + 1 {
+                let r = 2
+                if ly >= h + th { r = 1 }
+                for dz in -r ..= r {
+                    for dx in -r ..= r {
+                        let lx = tx + dx
+                        let lz = tz + dz
+                        if lx < 0 || lx > 15 || lz < 0 || lz > 15 { continue }
+                        if abs(dx) == r && abs(dz) == r && (r == 2 || ly > h + th) && rnd(wx + dx, ly, wz + dz, w.seed + 22) < 0.55 { continue }
+                        let ii = ly * 256 + lz * 16 + lx
+                        if b[ii] == 0 { b[ii] = leafid }
+                    }
+                }
+            }
+            if tx >= 0 && tx < 16 && tz >= 0 && tz < 16 {
+                for ty in h + 1 ..= h + th { b[ty * 256 + tz * 16 + tx] = logid }
+            }
+        }
+    }
+    // ground cover
+    for lz in 0 .. 16 {
+        for lx in 0 .. 16 {
+            let ri = (lz + 3) * RW + lx + 3
+            let bi = w.bs[ri]
+            let pf = gn.b_pfreq[bi]
+            if pf <= 0.0 { continue }
+            let h = w.hs[ri]
+            if h <= sea || h + 1 >= CHT { continue }
+            let ii = (h + 1) * 256 + lz * 16 + lx
+            if b[ii] != 0 { continue }
+            let wx = x0 + lx
+            let wz = z0 + lz
+            let r = rnd(wx, 2, wz, w.seed + 30)
+            if r < pf {
+                let pid = gn.b_plant[bi]
+                if (bi == 0 || bi == 1) && rnd(wx, 3, wz, w.seed + 31) < 0.1 {
+                    if rnd(wx, 4, wz, w.seed + 32) < 0.5 && w.i_poppy > 0 { pid = w.i_poppy }
+                    elif w.i_dandelion > 0 { pid = w.i_dandelion }
+                }
+                if pid > 0 { b[ii] = pid }
+            }
+        }
+    }
+    chunk_rescan(w, ct, c)
+    c.state = 1
+    c.dirty = 1
+}
+
+// heightmap (highest light-blocking cube) and emitter list
+fn chunk_rescan(w: World, ct: Content, c: Chunk) {
+    let rg = ct.reg
+    let hm = zeros(256)
+    let em: [i64] = []
+    for lz in 0 .. 16 {
+        for lx in 0 .. 16 {
+            let top = 0
+            let y = CHT - 1
+            while y >= 0 {
+                let id = c.b[y * 256 + lz * 16 + lx]
+                if id != 0 {
+                    if top == 0 && rg.kind[id] == 1 { top = y }
+                    if rg.light[id] > 0 { em.push(y * 256 + lz * 16 + lx) }
+                }
+                y -= 1
+            }
+            hm[lz * 16 + lx] = top
+        }
+    }
+    c.hm = hm
+    c.em = em
+}
+
+fn mark_dirty(w: World, cx: i64, cz: i64) {
+    let c = chunk_at(w, cx, cz)
+    if c.state > 0 { c.dirty = 1 }
+}
+
+// place/remove a block; returns false if the position is not editable
+fn set_block(w: World, ct: Content, x: i64, y: i64, z: i64, id: i64) -> bool {
+    if y < 1 || y >= CHT { return false }
+    let cx = fdiv(x, 16)
+    let cz = fdiv(z, 16)
+    let c = chunk_at(w, cx, cz)
+    if c.state == 0 { return false }
+    let lx = x - cx * 16
+    let lz = z - cz * 16
+    let ii = y * 256 + lz * 16 + lx
+    let old = c.b[ii]
+    c.b[ii] = id
+    w.ed.push(x)
+    w.ed.push(y)
+    w.ed.push(z)
+    w.ed.push(id)
+    let rg = ct.reg
+    // heightmap
+    let hi = lz * 16 + lx
+    if rg.kind[id] == 1 {
+        if y > c.hm[hi] { c.hm[hi] = y }
+    } elif y == c.hm[hi] {
+        let t = y - 1
+        while t > 0 && rg.kind[c.b[t * 256 + hi]] != 1 { t -= 1 }
+        c.hm[hi] = t
+    }
+    // emitters
+    let light_change = rg.light[old] > 0 || rg.light[id] > 0
+    if light_change {
+        let ne: [i64] = []
+        for e in c.em { if e != ii { ne.push(e) } }
+        if rg.light[id] > 0 { ne.push(ii) }
+        c.em = ne
+    }
+    c.dirty = 1
+    if lx <= 1 { mark_dirty(w, cx - 1, cz) }
+    if lx >= 14 { mark_dirty(w, cx + 1, cz) }
+    if lz <= 1 { mark_dirty(w, cx, cz - 1) }
+    if lz >= 14 { mark_dirty(w, cx, cz + 1) }
+    if (lx <= 1 || lx >= 14) && (lz <= 1 || lz >= 14) {
+        let sx = 1
+        let sz = 1
+        if lx <= 1 { sx = -1 }
+        if lz <= 1 { sz = -1 }
+        mark_dirty(w, cx + sx, cz + sz)
+    }
+    if light_change {
+        for dz in -1 ..= 1 {
+            for dx in -1 ..= 1 { mark_dirty(w, cx + dx, cz + dz) }
+        }
+    }
+    return true
+}
+
+// find a land column near (bx, bz) for spawning; returns [x, z]
+fn find_spawn(w: World, ct: Content, bx: i64, bz: i64) -> [i64] {
+    let out = [bx, bz]
+    let r = 0
+    while r < 160 {
+        for k in 0 .. 12 {
+            let a = (k + r) * 2.399
+            let x = bx + (cos(a) * r) as i64
+            let z = bz + (sin(a) * r) as i64
+            let h = height_at(w, x, z)
+            if h > ct.gen.sea + 2 && h < 40 {
+                return [x, z]
+            }
+        }
+        r += 6
+    }
+    return out
+}
+
+// (re)load a chunk into its cache slot; replays recorded player edits
+fn load_chunk(w: World, ct: Content, cx: i64, cz: i64) -> Chunk {
+    let c = w.slots[slot_of(cx, cz)]
+    if c.state > 0 {
+        gfx_mesh_free(c.slot)
+        gfx_mesh_free(2000 + c.slot)
+    }
+    c.cx = cx
+    c.cz = cz
+    c.state = 0
+    c.has_m = 0
+    c.has_t = 0
+    gen_chunk(w, ct, c)
+    let n = w.ed.len() / 4
+    let any = false
+    for i in 0 .. n {
+        let x = w.ed[i * 4]
+        let z = w.ed[i * 4 + 2]
+        if fdiv(x, 16) == cx && fdiv(z, 16) == cz {
+            c.b[w.ed[i * 4 + 1] * 256 + (z - cz * 16) * 16 + (x - cx * 16)] = w.ed[i * 4 + 3]
+            any = true
+        }
+    }
+    if any { chunk_rescan(w, ct, c) }
+    return c
+}
+
+fn ensure_chunk(w: World, ct: Content, cx: i64, cz: i64) {
+    if !chunk_loaded(w, cx, cz) { load_chunk(w, ct, cx, cz) }
+}
+
+// first standable y above the terrain at (x, z); chunk must be loaded
+fn ground_y(w: World, ct: Content, x: i64, z: i64) -> i64 {
+    let rg = ct.reg
+    ensure_chunk(w, ct, fdiv(x, 16), fdiv(z, 16))
+    let y = CHT - 3
+    while y > 1 {
+        let k = rg.kind[get_block(w, x, y - 1, z)]
+        if (k == 1 || k == 2 || k == 3) && rg.kind[get_block(w, x, y, z)] != 1 && rg.kind[get_block(w, x, y + 1, z)] != 1 { return y }
+        y -= 1
+    }
+    return CHT - 2
+}
