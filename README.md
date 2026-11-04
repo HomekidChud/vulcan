@@ -13,6 +13,15 @@ fn main() {
 }
 ```
 
+## Vulcan 0.5.0 — what's new
+
+- **Package once, run anywhere**: `vulcan package app.vulcan --platform <web|desktop|mobile|linux|windows|macos>` emits a ready-to-ship bundle for that target (see Packaging below).
+- **File I/O and CLI args**: `file_read`, `file_write`, `file_exists`, `arg_count()`, `arg(i)` — identical on C, JS, and Python backends (args after the entry file are forwarded to your program).
+- **Full string stdlib**: `split`, `starts_with`, `ends_with`, `substring(start, end)`, `find`, plus `to_int(s)` / `to_float(s)` parsing.
+- **Full array stdlib**: `remove(index)`, `insert(index, item)` join `push`, `pop`, `shift`, `last`, `contains`.
+- **Not just games**: `examples/todo.vulcan` is a complete CLI todo app — file persistence, subcommands, struct lists, impl methods — running identically on all three backends.
+- The selftest suite now covers all of the above (14 cases, each verified on C, JS, and Python).
+
 ## Vulcan 0.4.0 — what's new
 
 - **Multiple backends** — the same Vulcan program now compiles to three targets:
@@ -96,6 +105,21 @@ vulcan test                 # runs every test_* function
 
 `vulcan add` vendors dependencies into `deps/` and records them in `vulcan.lock`. Dependencies are resolved from `deps/<name>/src/lib.vulcan`, `deps/<name>/lib.vulcan`, or `deps/<name>/src/main.vulcan`. Imports are also resolved relative to the importing file, plus `src/` and `lib/` directories — so plain `import math` works with a `lib/math.vulcan` next to your code.
 
+### Shipping to devices
+
+`vulcan package` turns one `.vulcan` file into a bundle for a target platform — no project setup needed:
+
+```bash
+vulcan package examples/pong.vulcan --platform web       # single index.html: ANSI terminal emulator + web-worker runtime
+vulcan package examples/pong.vulcan --platform desktop   # Electron scaffold (npm install; packages .dmg/.exe/AppImage)
+vulcan package examples/pong.vulcan --platform mobile    # Capacitor scaffold (npx cap add ios / android)
+vulcan package examples/pong.vulcan --platform linux     # embedded C source + ./build.sh (cc -O3 + hardening)
+vulcan package examples/pong.vulcan --platform windows   # mingw-w64 cross-compile build.sh
+vulcan package examples/pong.vulcan --platform macos      # universal (arm64 + x86_64) build.sh
+```
+
+The **web** bundle is a single self-contained `index.html`: your program compiles to JS, runs in a Web Worker, and renders through an 80x24 ANSI terminal emulator with full color support — keyboard input, `sleep_ms` pacing, and in-memory `file_read`/`file_write` all work in the browser. The **desktop** and **mobile** bundles are standard Electron/Capacitor scaffolds around the same runtime, and the **native-OS** bundles ship the generated C with a one-command build script.
+
 ## Security posture (an honest comparison)
 
 Is Vulcan "securer than Rust"? No. Rust's borrow checker proves memory safety at compile time; Vulcan compiles through C and inherits C's model, so use-after-free, leaks, and dangling pointers are possible in ways Rust rules out by construction. If your threat model is "untrusted input, hostile environment", use Rust.
@@ -141,6 +165,8 @@ vulcan run --target js examples/tour.vulcan   # run on Node.js — same output
 vulcan run --target py examples/tour.vulcan   # run on Python 3 — same output
 vulcan selftest                       # run the test suite (all 3 backends)
 vulcan init myproj                    # scaffold a new project
+vulcan package examples/pong.vulcan --platform web   # one-file web app (also: desktop, mobile, linux, windows, macos)
+vulcan run examples/todo.vulcan add "buy milk"       # args after the file are forwarded to your program
 ```
 
 Requires `clang` or `gcc` on your PATH for the default C backend (clang is preferred for faster loops). The `js` and `py` targets need `node` / `python3` installed.
@@ -172,5 +198,6 @@ Three complete games ship in `examples/`: Snake (arcade), Pong (real-time physic
 - `examples/fib.vulcan` — classic recursion
 - `examples/tour.vulcan` — a tour of every feature (runs identically on all backends)
 - `examples/impl_demo.vulcan` — struct methods (`impl`) across all three backends
+- `examples/todo.vulcan` — a CLI todo app (not a game): subcommands, file persistence, struct lists with impl methods
 - `examples/snake.vulcan` — Snake, written in pure Vulcan (WASD keys; uses `term_raw` + `defer` for terminal cleanup)
 - `bench/` — vulcan-vs-rust benchmarks

@@ -17,6 +17,12 @@ fn draw_paddle(x: i64, y: i64, fg: i64) {
     set_color(-1, -1)
 }
 
+fn erase_paddle(x: i64, y: i64) {
+    for i in 0 .. PADDLE_H {
+        print_at(x, y + i, " ")
+    }
+}
+
 fn draw_border() {
     set_color(6, -1)
     print_at(0, 0, "+".repeat(W))
@@ -59,6 +65,10 @@ fn main() {
     let ball = Ball { x: W / 2, y: H / 2, dx: 1.0, dy: 0.6 }
     let playing = true
     let frame_ms: i64 = 70
+    let prev_bx: i64 = W / 2
+    let prev_by: i64 = H / 2
+    let prev_py = py
+    let prev_ay = ay
 
     print("Pong! W/S to move, q to quit. First to 3 wins.")
     sleep_ms(1200)
@@ -115,6 +125,11 @@ fn main() {
             ball = Ball { x: W / 2, y: rand_int(2, H - 2), dx: 1.0, dy: -0.5 }
         }
 
+        // erase the previous frame (ball + paddles leave trails otherwise)
+        print_at(prev_bx, prev_by, " ")
+        erase_paddle(2, prev_py)
+        erase_paddle(W - 3, prev_ay)
+
         // draw
         draw_border()
         draw_paddle(2, py, 2)
@@ -123,6 +138,11 @@ fn main() {
         print_at((ball.x as i64), (ball.y as i64), "O")
         set_color(-1, -1)
         print_at(W / 2 - 4, H + 2, f"you {p_score}  ai {a_score}")
+
+        prev_bx = ball.x as i64
+        prev_by = ball.y as i64
+        prev_py = py
+        prev_ay = ay
 
         if p_score >= WIN_SCORE || a_score >= WIN_SCORE {
             playing = false

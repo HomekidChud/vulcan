@@ -78,7 +78,29 @@ static char* vstr_upper(char* s){ size_t n=strlen(s); char* r=malloc(n+1); for(s
 static char* vstr_lower(char* s){ size_t n=strlen(s); char* r=malloc(n+1); for(size_t i=0;i<n;i++) r[i]=(char)tolower((unsigned char)s[i]); r[n]=0; return r; }
 static char* vstr_trim(char* s){ char* p=s; while(*p&&isspace((unsigned char)*p))p++; char* e=s+strlen(s); while(e>p&&isspace((unsigned char)*(e-1)))e--; size_t n=(size_t)(e-p); char* r=malloc(n+1); memcpy(r,p,n); r[n]=0; return r; }
 static int8_t vstr_contains(const char* a, const char* b){ return strstr(a,b)!=NULL; }
+static int8_t vstr_starts_with(const char* s, const char* p){ return strncmp(s,p,strlen(p))==0; }
+static int8_t vstr_ends_with(const char* s, const char* p){ size_t ls=strlen(s), lp=strlen(p); return ls>=lp && strcmp(s+ls-lp,p)==0; }
+static char* vstr_substring(const char* s, int64_t start, int64_t end){ size_t n=strlen(s); if(start<0)start=0; if(end<0)end=0; if(start>(int64_t)n)start=(int64_t)n; if(end>(int64_t)n)end=(int64_t)n; if(end<start)end=start; size_t k=(size_t)(end-start); char* r=malloc(k+1); memcpy(r,s+start,k); r[k]=0; return r; }
+static int64_t vstr_find(const char* s, const char* sub){ const char* p=strstr(s,sub); return p ? (int64_t)(p-s) : -1; }
+static VecStr vstr_split(const char* s, const char* sep){ VecStr out=vstr_new(0); size_t n=strlen(s), m=strlen(sep); if(m==0){ for(size_t i=0;i<n;i++){ char* r=malloc(2); r[0]=s[i]; r[1]=0; vstr_push(&out,r);} return out; } size_t i=0; while(i<=n){ const char* p=strstr(s+i,sep); size_t j=p?(size_t)(p-s):n; size_t k=j-i; char* r=malloc(k+1); memcpy(r,s+i,k); r[k]=0; vstr_push(&out,r); if(!p)break; i=j+m; } return out; }
+static int64_t vstr_to_int(const char* s){ return (int64_t)strtoll(s,NULL,10); }
+static double vstr_to_float(const char* s){ return strtod(s,NULL); }
+static void vi64_remove(VecI64* v, int64_t i){ if(i<0||i>=v->len){ fprintf(stderr,"vulcan: index %lld out of bounds (len %lld)\n",(long long)i,(long long)v->len); exit(1);} memmove(v->data+i, v->data+i+1, (size_t)(v->len-i-1)*sizeof(int64_t)); v->len--; }
+static void vi64_insert(VecI64* v, int64_t i, int64_t x){ if(i<0||i>v->len){ fprintf(stderr,"vulcan: index %lld out of bounds (len %lld)\n",(long long)i,(long long)v->len); exit(1);} if(v->len==v->cap){ v->cap*=2; v->data=realloc(v->data,v->cap*sizeof(int64_t)); } memmove(v->data+i+1, v->data+i, (size_t)(v->len-i)*sizeof(int64_t)); v->data[i]=x; v->len++; }
+static void vf64_remove(VecF64* v, int64_t i){ if(i<0||i>=v->len){ fprintf(stderr,"vulcan: index out of bounds\n"); exit(1);} memmove(v->data+i, v->data+i+1, (size_t)(v->len-i-1)*sizeof(double)); v->len--; }
+static void vf64_insert(VecF64* v, int64_t i, double x){ if(i<0||i>v->len){ fprintf(stderr,"vulcan: index out of bounds\n"); exit(1);} if(v->len==v->cap){ v->cap*=2; v->data=realloc(v->data,v->cap*sizeof(double)); } memmove(v->data+i+1, v->data+i, (size_t)(v->len-i)*sizeof(double)); v->data[i]=x; v->len++; }
+static void vbool_remove(VecBool* v, int64_t i){ if(i<0||i>=v->len){ fprintf(stderr,"vulcan: index out of bounds\n"); exit(1);} memmove(v->data+i, v->data+i+1, (size_t)(v->len-i-1)*sizeof(int8_t)); v->len--; }
+static void vbool_insert(VecBool* v, int64_t i, int8_t x){ if(i<0||i>v->len){ fprintf(stderr,"vulcan: index out of bounds\n"); exit(1);} if(v->len==v->cap){ v->cap*=2; v->data=realloc(v->data,v->cap*sizeof(int8_t)); } memmove(v->data+i+1, v->data+i, (size_t)(v->len-i)*sizeof(int8_t)); v->data[i]=x; v->len++; }
+static void vstr_remove(VecStr* v, int64_t i){ if(i<0||i>=v->len){ fprintf(stderr,"vulcan: index out of bounds\n"); exit(1);} memmove(v->data+i, v->data+i+1, (size_t)(v->len-i-1)*sizeof(char*)); v->len--; }
+static void vstr_insert(VecStr* v, int64_t i, char* x){ if(i<0||i>v->len){ fprintf(stderr,"vulcan: index out of bounds\n"); exit(1);} if(v->len==v->cap){ v->cap*=2; v->data=realloc(v->data,v->cap*sizeof(char*)); } memmove(v->data+i+1, v->data+i, (size_t)(v->len-i)*sizeof(char*)); v->data[i]=x; v->len++; }
 static int64_t vchat(const char* s, int64_t i){ size_t n=strlen(s); if(i<0||(size_t)i>=n) return -1; return (int64_t)(unsigned char)s[i]; }
+// ---- files (whole-file read/write) and CLI args ----
+static char* vfile_read(const char* path){ FILE* f=fopen(path,"rb"); if(!f) return NULL; fseek(f,0,SEEK_END); long n=ftell(f); fseek(f,0,SEEK_SET); char* b=malloc((size_t)n+1); size_t r=fread(b,1,(size_t)n,f); b[r]=0; fclose(f); return b; }
+static void vfile_write(const char* path, const char* contents){ FILE* f=fopen(path,"wb"); if(!f) return; fputs(contents,f); fclose(f); }
+static int64_t vfile_exists(const char* path){ FILE* f=fopen(path,"rb"); if(f){ fclose(f); return 1; } return 0; }
+static int64_t __vulcan_argc = 0; static char** __vulcan_argv = 0;
+static int64_t varg_count(void){ return __vulcan_argc > 1 ? __vulcan_argc - 1 : 0; }
+static char* varg(int64_t i){ if(i < 0 || i >= varg_count()) return ""; return __vulcan_argv[i+1]; }
 static char* vto_str_i64(int64_t x){ char* s=malloc(32); snprintf(s,32,"%lld",(long long)x); return s; }
 static char* vto_str_f64(double x){ char* s=malloc(48); snprintf(s,48,"%.6g",x); return s; }
 static char* input_line(void){
@@ -256,6 +278,8 @@ fn generate_inner(program: &[Item], tests: Option<&[String]>) -> String {
         let _ = write!(out, "static {name} vs_{name}_pop(Vec_{name}* v){{ {name} z = {{0}}; return v->len>0 ? v->data[--v->len] : z; }}\n");
         let _ = write!(out, "static {name} vs_{name}_shift(Vec_{name}* v){{ {name} z = {{0}}; if(v->len==0) return z; {name} x=v->data[0]; memmove(v->data, v->data+1, (size_t)(v->len-1)*sizeof({name})); v->len--; return x; }}\n");
         let _ = write!(out, "static {name} vs_{name}_last(Vec_{name}* v){{ {name} z = {{0}}; return v->len>0 ? v->data[v->len-1] : z; }}\n");
+        let _ = write!(out, "static void vs_{name}_remove(Vec_{name}* v, int64_t i){{ if(i<0||i>=v->len){{ fprintf(stderr,\"vulcan: index out of bounds\\n\"); exit(1);}} memmove(v->data+i, v->data+i+1, (size_t)(v->len-i-1)*sizeof({name})); v->len--; }}\n");
+        let _ = write!(out, "static void vs_{name}_insert(Vec_{name}* v, int64_t i, {name} x){{ if(i<0||i>v->len){{ fprintf(stderr,\"vulcan: index out of bounds\\n\"); exit(1);}} if(v->len==v->cap){{ v->cap*=2; v->data=realloc(v->data,v->cap*sizeof({name})); }} memmove(v->data+i+1, v->data+i, (size_t)(v->len-i)*sizeof({name})); v->data[i]=x; v->len++; }}\n");
     }
     out.push_str("\n// ---- program ----\n");
     out.push_str(&g.body);
@@ -391,7 +415,7 @@ impl Codegen {
                 self.line("return;");
             }
             self.line("}");
-            let _ = writeln!(self.body, "\nint main(void) {{ {} }}", cast_ret);
+            let _ = writeln!(self.body, "\nint main(int __vargc, char** __vargv) {{ __vulcan_argc = __vargc; __vulcan_argv = __vargv; {} }}", cast_ret);
         } else {
             let _ = writeln!(self.body, "\nstatic {} {}({}) {{", self.ctype(&f.ret), safe_c_name(&f.name), params);
             self.emit_stmts(&f.body);
@@ -828,6 +852,8 @@ impl Codegen {
             "pop" => format!("{prefix}_pop"),
             "shift" => format!("{prefix}_shift"),
             "last" => format!("{prefix}_last"),
+            "remove" => format!("{prefix}_remove"),
+            "insert" => format!("{prefix}_insert"),
             "contains" => {
                 if let Ty::Struct(name) = &elem {
                     if self.is_enum(name) { return "vi64_contains".into(); }
@@ -1041,6 +1067,56 @@ impl Codegen {
                     }
                     "lower" => (format!("vstr_lower({recv_c})"), Ty::Str),
                     "trim" => (format!("vstr_trim({recv_c})"), Ty::Str),
+                    "split" => {
+                        if recv_ty != Ty::Str { panic!("vulcan: split is a string method"); }
+                        if args.len() != 1 { panic!("vulcan: split takes 1 arg"); }
+                        let (ac, at) = self.gen_expr(&args[0]);
+                        if at != Ty::Str { panic!("vulcan: split needs a string separator"); }
+                        (format!("vstr_split({recv_c}, {ac})"), Ty::Array(Box::new(Ty::Str)))
+                    }
+                    "starts_with" | "ends_with" => {
+                        if recv_ty != Ty::Str { panic!("vulcan: {name} is a string method"); }
+                        if args.len() != 1 { panic!("vulcan: {name} takes 1 arg"); }
+                        let (ac, at) = self.gen_expr(&args[0]);
+                        if at != Ty::Str { panic!("vulcan: {name} needs a string arg"); }
+                        let f = if name == "starts_with" { "vstr_starts_with" } else { "vstr_ends_with" };
+                        (format!("{f}({recv_c}, {ac})"), Ty::Bool)
+                    }
+                    "substring" => {
+                        if recv_ty != Ty::Str { panic!("vulcan: substring is a string method"); }
+                        if args.len() != 2 { panic!("vulcan: substring(start, end) takes 2 args"); }
+                        let (a, at) = self.gen_expr(&args[0]);
+                        if at != Ty::I64 { panic!("vulcan: substring needs i64 indices"); }
+                        let (b, bt) = self.gen_expr(&args[1]);
+                        if bt != Ty::I64 { panic!("vulcan: substring needs i64 indices"); }
+                        (format!("vstr_substring({recv_c}, {a}, {b})"), Ty::Str)
+                    }
+                    "find" => {
+                        if recv_ty != Ty::Str { panic!("vulcan: find is a string method"); }
+                        if args.len() != 1 { panic!("vulcan: find takes 1 arg"); }
+                        let (ac, at) = self.gen_expr(&args[0]);
+                        if at != Ty::Str { panic!("vulcan: find needs a string arg"); }
+                        (format!("vstr_find({recv_c}, {ac})"), Ty::I64)
+                    }
+                    "remove" => {
+                        if !matches!(recv_ty, Ty::Array(_)) { panic!("vulcan: remove is an array method"); }
+                        if args.len() != 1 { panic!("vulcan: remove takes 1 arg (index)"); }
+                        let (ac, at) = self.gen_expr(&args[0]);
+                        if at != Ty::I64 { panic!("vulcan: remove needs an i64 index"); }
+                        let remove = self.vec_helper(&recv_ty, "remove");
+                        (format!("{remove}(&{recv_c}, {ac})"), Ty::Void)
+                    }
+                    "insert" => {
+                        if !matches!(recv_ty, Ty::Array(_)) { panic!("vulcan: insert is an array method"); }
+                        if args.len() != 2 { panic!("vulcan: insert(index, item) takes 2 args"); }
+                        let (ic, it) = self.gen_expr(&args[0]);
+                        if it != Ty::I64 { panic!("vulcan: insert needs an i64 index"); }
+                        let (vc, vt) = self.gen_expr(&args[1]);
+                        let elem = self.array_elem(&recv_ty);
+                        let vc = self.cast(&vc, &vt, &elem);
+                        let insert = self.vec_helper(&recv_ty, "insert");
+                        (format!("{insert}(&{recv_c}, {ic}, {vc})"), Ty::Void)
+                    }
                     _ => panic!("vulcan: unknown method `.{name}()`"),
                 }
             }
@@ -1170,6 +1246,45 @@ impl Codegen {
             "clock" => ("vclock()".into(), Ty::F64),
             "rand" => ("vrand()".into(), Ty::I64),
             "input" => ("input_line()".into(), Ty::Str),
+            "to_int" => {
+                if args.len() != 1 { panic!("vulcan: to_int(s) takes 1 arg"); }
+                let (c, t) = self.gen_expr(&args[0]);
+                if t != Ty::Str { panic!("vulcan: to_int needs a string"); }
+                (format!("vstr_to_int({c})"), Ty::I64)
+            }
+            "to_float" => {
+                if args.len() != 1 { panic!("vulcan: to_float(s) takes 1 arg"); }
+                let (c, t) = self.gen_expr(&args[0]);
+                if t != Ty::Str { panic!("vulcan: to_float needs a string"); }
+                (format!("vstr_to_float({c})"), Ty::F64)
+            }
+            "file_read" => {
+                if args.len() != 1 { panic!("vulcan: file_read(path) takes 1 arg"); }
+                let (c, t) = self.gen_expr(&args[0]);
+                if t != Ty::Str { panic!("vulcan: file_read needs a string path"); }
+                (format!("vfile_read({c})"), Ty::Str)
+            }
+            "file_write" => {
+                if args.len() != 2 { panic!("vulcan: file_write(path, contents) takes 2 args"); }
+                let (p, pt) = self.gen_expr(&args[0]);
+                if pt != Ty::Str { panic!("vulcan: file_write needs a string path"); }
+                let (c, ct) = self.gen_expr(&args[1]);
+                if ct != Ty::Str { panic!("vulcan: file_write needs string contents"); }
+                (format!("(vfile_write({p}, {c}), (void)0)"), Ty::Void)
+            }
+            "file_exists" => {
+                if args.len() != 1 { panic!("vulcan: file_exists(path) takes 1 arg"); }
+                let (c, t) = self.gen_expr(&args[0]);
+                if t != Ty::Str { panic!("vulcan: file_exists needs a string path"); }
+                (format!("vfile_exists({c})"), Ty::Bool)
+            }
+            "arg_count" => ("varg_count()".into(), Ty::I64),
+            "arg" => {
+                if args.len() != 1 { panic!("vulcan: arg(i) takes 1 arg"); }
+                let (c, t) = self.gen_expr(&args[0]);
+                let c = self.cast(&c, &t, &Ty::I64);
+                (format!("varg({c})"), Ty::Str)
+            }
             "sleep_ms" => {
                 let (c, t) = self.gen_expr(&args[0]);
                 let c = self.cast(&c, &t, &Ty::I64);

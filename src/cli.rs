@@ -307,6 +307,39 @@ fn main() -> void {
 "#,
         expected: "p = 4 6\nlen2 = 52\nscaled = 8 12\npts[1].y = 3\n",
     },
+    Case {
+        name: "file I/O, args, string/array stdlib",
+        src: r#"
+fn main() -> void {
+    // file I/O
+    file_write("selftest_io.txt", "alpha,beta,gamma")
+    print(file_exists("selftest_io.txt"))
+    let raw = file_read("selftest_io.txt")
+    print(raw)
+    // string stdlib
+    let parts = raw.split(",")
+    print(parts.len())
+    print(parts[1])
+    print(raw.starts_with("alpha"))
+    print(raw.ends_with("gamma"))
+    print(raw.substring(6, 10))
+    print(raw.find("beta"))
+    print("SHOUT".lower())
+    print("  pad  ".trim())
+    print(to_int("42"), to_int("bad"))
+    print(to_float("2.5"))
+    // array stdlib
+    let xs = [1, 2, 3, 4]
+    xs.remove(0)
+    xs.insert(1, 99)
+    print(xs)
+    xs.push(5)
+    print(xs.last())
+    print(xs.contains(99))
+}
+"#,
+        expected: "true\nalpha,beta,gamma\n3\nbeta\ntrue\ntrue\nbeta\n6\nshout\npad\n42 0\n2.5\n[2, 99, 3, 4]\n5\ntrue\n",
+    },
 ];
 
 pub fn selftest() {

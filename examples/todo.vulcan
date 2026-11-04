@@ -1,0 +1,127 @@
+// examples/todo.vulcan — a CLI todo list, not a game.
+// Proves Vulcan does plain apps: file persistence, command-line args,
+// string parsing, lists of structs, and impl methods.
+//
+// usage:
+//   vulcan run examples/todo.vulcan add "buy milk"
+//   vulcan run examples/todo.vulcan list
+//   vulcan run examples/todo.vulcan done 1
+//   vulcan run examples/todo.vulcan rm 1
+
+const FILE = "todo.txt"
+
+struct Item {
+    text: string,
+    done: bool,
+}
+
+impl Item {
+    fn render(self) -> string {
+        if self.done {
+            return f"[x] {self.text}"
+        }
+        return f"[ ] {self.text}"
+    }
+}
+
+fn load() -> [Item] {
+    let items: [Item] = []
+    if file_exists(FILE) != 1 {
+        return items
+    }
+    let raw = file_read(FILE)
+    if raw.len() == 0 {
+        return items
+    }
+    for line in raw.split("\n") {
+        if line.len() == 0 {
+            continue
+        }
+        let done: bool = false
+        let text = line
+        if line.starts_with("[x] ") {
+            done = true
+            text = line.substring(4, line.len())
+        } elif line.starts_with("[ ] ") {
+            text = line.substring(4, line.len())
+        }
+        items.push(Item { text: text, done: done })
+    }
+    return items
+}
+
+fn save(items: [Item]) {
+    let out = ""
+    for item in items {
+        out = out + item.render() + "\n"
+    }
+    file_write(FILE, out)
+}
+
+fn usage() {
+    print("todo — a tiny todo list")
+    print("  add <text>   add an item")
+    print("  list         show items")
+    print("  done <n>     mark item n done (1-based)")
+    print("  rm <n>       remove item n")
+}
+
+fn main() {
+    let n = arg_count()
+    if n < 1 {
+        usage()
+        return
+    }
+    let cmd = arg(0)
+    let items = load()
+
+    if cmd == "list" {
+        if items.len() == 0 {
+            print("nothing to do — add something!")
+            return
+        }
+        let i = 1
+        for item in items {
+            print(f"{i}. {item.render()}")
+            i += 1
+        }
+        return
+    }
+
+    if cmd == "add" {
+        if n < 2 {
+            print("add what?")
+            return
+        }
+        items.push(Item { text: arg(1), done: false })
+        save(items)
+        print(f"added: {arg(1)}")
+        return
+    }
+
+    if cmd == "done" || cmd == "rm" {
+        if n < 2 {
+            print("which item? give its number")
+            return
+        }
+        let idx = to_int(arg(1)) - 1
+        if idx < 0 || idx >= items.len() {
+            print("no such item")
+            return
+        }
+        if cmd == "done" {
+            let it = items[idx]
+            items[idx] = Item { text: it.text, done: true }
+            save(items)
+            print(f"done: {it.text}")
+        } else {
+            let it = items[idx]
+            items.remove(idx)
+            save(items)
+            print(f"removed: {it.text}")
+        }
+        return
+    }
+
+    usage()
+}

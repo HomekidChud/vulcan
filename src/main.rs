@@ -9,6 +9,7 @@ mod codegen_py;
 mod cli;
 mod modules;
 mod pkg;
+mod package;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -21,6 +22,8 @@ USAGE (single file):
   vulcan build <file.vulcan>  emit native binary (C backend)
   vulcan emit <file.vulcan>   show generated code
   vulcan bench <file.vulcan>  compile, run, time it
+  vulcan package <file.vulcan> --platform <p>   ship it: web, desktop,
+                               mobile (iOS+Android), linux, windows, macos
   vulcan test <file.vulcan>   run every fn test_*() in the file
 
 add --target js or --target py to run/emit/bench for the JavaScript
@@ -70,7 +73,7 @@ fn main() {
         usage();
         std::process::exit(1);
     }
-    let cmd = &args[1];
+    let cmd = args[1].clone();
     if cmd == "selftest" {
         cli::selftest();
         return;
@@ -90,6 +93,28 @@ fn main() {
         let proj = pkg::find_project(Path::new("."))
             .unwrap_or_else(|| { eprintln!("vulcan: no vulcan.toml found (run `vulcan init` first)"); std::process::exit(1); });
         pkg::add(&proj, source);
+        return;
+    }
+    // `--platform <p>` for the package command
+    let mut platform = String::from("web");
+    if let Some(i) = args.iter().position(|a| a == "--platform") {
+        if i + 1 < args.len() {
+            platform = args[i + 1].clone();
+            args.remove(i);
+            args.remove(i);
+        } else {
+            eprintln!("vulcan: --platform needs a value (web, desktop, mobile, linux, windows, macos)");
+            std::process::exit(1);
+        }
+    }
+    if cmd == "package" {
+        let file = args.get(2).map(|s| s.as_str())
+            .unwrap_or_else(|| { eprintln!("usage: vulcan package <file.vulcan> --platform <web|desktop|mobile|linux|windows|macos>"); std::process::exit(1); });
+        if !Path::new(file).exists() {
+            eprintln!("error: file not found: {file}");
+            std::process::exit(1);
+        }
+        package::package(file, &platform);
         return;
     }
     if !matches!(cmd.as_str(), "run" | "build" | "emit" | "bench" | "test") {
@@ -123,6 +148,12 @@ fn main() {
         std::process::exit(1);
     }
 
+    // extra CLI args after the entry file are forwarded to the program
+    let prog_args: Vec<String> = match args.get(2) {
+        Some(a) if !Path::new(a).is_dir() => args[3.min(args.len())..].to_vec(),
+        _ => Vec::new(),
+    };
+
     let program = modules::load_program(&entry);
 
     if target != "c" {
@@ -152,7 +183,7 @@ fn main() {
             "run" | "bench" => {
                 std::fs::write(&out_path, &src).unwrap();
                 let t0 = std::time::Instant::now();
-                let status = Command::new(runner).arg(&out_path).status().unwrap();
+                let status = Command::new(runner).arg(&out_path).args(&prog_args).status().unwrap();
                 let dt = t0.elapsed();
                 if cmd == "bench" {
                     println!("exit: {:?}  time: {:.3}s", status.code(), dt.as_secs_f64());
@@ -211,7 +242,7 @@ fn main() {
         "run" | "test" => {
             std::fs::write(&c_path, &c_src).unwrap();
             compile_c(&c_path, &bin_path, safe);
-            let status = Command::new(&run_path).status().unwrap();
+            let status = Command::new(&run_path).args(&prog_args).status().unwrap();
             if !status.success() {
                 std::process::exit(status.code().unwrap_or(1));
             }
@@ -220,7 +251,7 @@ fn main() {
             std::fs::write(&c_path, &c_src).unwrap();
             compile_c(&c_path, &bin_path, safe);
             let t0 = std::time::Instant::now();
-            let status = Command::new(&run_path).status().unwrap();
+            let status = Command::new(&run_path).args(&prog_args).status().unwrap();
             let dt = t0.elapsed();
             println!("exit: {:?}  time: {:.3}s", status.code(), dt.as_secs_f64());
         }

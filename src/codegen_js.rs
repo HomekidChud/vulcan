@@ -38,6 +38,15 @@ function __set(a, i, v) {
 function __chat(s, i) { return (i >= 0 && i < s.length) ? s.charCodeAt(i) : -1; }
 function __repeat(s, n) { return s.repeat(Math.max(0, Math.trunc(n))); }
 function __contains(a, v) { return a.includes(v); }
+function __substring(s, a, b) {
+    const n = s.length;
+    if (a < 0) a = 0; if (b < 0) b = 0;
+    if (a > n) a = n; if (b > n) b = n;
+    if (b < a) b = a;
+    return s.slice(a, b);
+}
+function __to_int(s) { const n = parseInt(s, 10); return Number.isNaN(n) ? 0 : Math.trunc(n); }
+function __to_float(s) { const n = parseFloat(s); return Number.isNaN(n) ? 0 : n; }
 function __out(s) { process.stdout.write(s); }
 function __input() {
     let b = Buffer.alloc(0);
@@ -779,6 +788,60 @@ impl JsGen {
                         if at != Ty::I64 { panic!("vulcan: repeat needs an i64 count"); }
                         (format!("__repeat({recv_c}, {ac})"), Ty::Str)
                     }
+                    "split" => {
+                        if recv_ty != Ty::Str { panic!("vulcan: split is a string method"); }
+                        if args.len() != 1 { panic!("vulcan: split takes 1 arg"); }
+                        let (ac, at) = self.gen_expr(&args[0]);
+                        if at != Ty::Str { panic!("vulcan: split needs a string separator"); }
+                        (format!("{recv_c}.split({ac})"), Ty::Array(Box::new(Ty::Str)))
+                    }
+                    "starts_with" => {
+                        if recv_ty != Ty::Str { panic!("vulcan: starts_with is a string method"); }
+                        if args.len() != 1 { panic!("vulcan: starts_with takes 1 arg"); }
+                        let (ac, at) = self.gen_expr(&args[0]);
+                        if at != Ty::Str { panic!("vulcan: starts_with needs a string arg"); }
+                        (format!("{recv_c}.startsWith({ac})"), Ty::Bool)
+                    }
+                    "ends_with" => {
+                        if recv_ty != Ty::Str { panic!("vulcan: ends_with is a string method"); }
+                        if args.len() != 1 { panic!("vulcan: ends_with takes 1 arg"); }
+                        let (ac, at) = self.gen_expr(&args[0]);
+                        if at != Ty::Str { panic!("vulcan: ends_with needs a string arg"); }
+                        (format!("{recv_c}.endsWith({ac})"), Ty::Bool)
+                    }
+                    "substring" => {
+                        if recv_ty != Ty::Str { panic!("vulcan: substring is a string method"); }
+                        if args.len() != 2 { panic!("vulcan: substring(start, end) takes 2 args"); }
+                        let (a, at) = self.gen_expr(&args[0]);
+                        if at != Ty::I64 { panic!("vulcan: substring needs i64 indices"); }
+                        let (b, bt) = self.gen_expr(&args[1]);
+                        if bt != Ty::I64 { panic!("vulcan: substring needs i64 indices"); }
+                        (format!("__substring({recv_c}, {a}, {b})"), Ty::Str)
+                    }
+                    "find" => {
+                        if recv_ty != Ty::Str { panic!("vulcan: find is a string method"); }
+                        if args.len() != 1 { panic!("vulcan: find takes 1 arg"); }
+                        let (ac, at) = self.gen_expr(&args[0]);
+                        if at != Ty::Str { panic!("vulcan: find needs a string arg"); }
+                        (format!("{recv_c}.indexOf({ac})"), Ty::I64)
+                    }
+                    "remove" => {
+                        if !matches!(recv_ty, Ty::Array(_)) { panic!("vulcan: remove is an array method"); }
+                        if args.len() != 1 { panic!("vulcan: remove takes 1 arg (index)"); }
+                        let (ac, at) = self.gen_expr(&args[0]);
+                        if at != Ty::I64 { panic!("vulcan: remove needs an i64 index"); }
+                        (format!("{recv_c}.splice({ac}, 1)"), Ty::Void)
+                    }
+                    "insert" => {
+                        if !matches!(recv_ty, Ty::Array(_)) { panic!("vulcan: insert is an array method"); }
+                        if args.len() != 2 { panic!("vulcan: insert(index, item) takes 2 args"); }
+                        let (ic, it) = self.gen_expr(&args[0]);
+                        if it != Ty::I64 { panic!("vulcan: insert needs an i64 index"); }
+                        let (vc, vt) = self.gen_expr(&args[1]);
+                        let elem = self.array_elem(&recv_ty);
+                        let vc = self.cast(&vc, &vt, &elem);
+                        (format!("{recv_c}.splice({ic}, 0, {vc})"), Ty::Void)
+                    }
                     _ => panic!("vulcan: unknown method `.{name}()`"),
                 }
             }
@@ -910,6 +973,45 @@ impl JsGen {
             "clock" => ("__clock()".into(), Ty::F64),
             "rand" => ("__rand()".into(), Ty::I64),
             "input" => ("__input()".into(), Ty::Str),
+            "to_int" => {
+                if args.len() != 1 { panic!("vulcan: to_int(s) takes 1 arg"); }
+                let (c, t) = self.gen_expr(&args[0]);
+                if t != Ty::Str { panic!("vulcan: to_int needs a string"); }
+                (format!("__to_int({c})"), Ty::I64)
+            }
+            "to_float" => {
+                if args.len() != 1 { panic!("vulcan: to_float(s) takes 1 arg"); }
+                let (c, t) = self.gen_expr(&args[0]);
+                if t != Ty::Str { panic!("vulcan: to_float needs a string"); }
+                (format!("__to_float({c})"), Ty::F64)
+            }
+            "file_read" => {
+                if args.len() != 1 { panic!("vulcan: file_read(path) takes 1 arg"); }
+                let (c, t) = self.gen_expr(&args[0]);
+                if t != Ty::Str { panic!("vulcan: file_read needs a string path"); }
+                (format!("__fs.readFileSync({c}, \"utf8\")"), Ty::Str)
+            }
+            "file_write" => {
+                if args.len() != 2 { panic!("vulcan: file_write(path, contents) takes 2 args"); }
+                let (p, pt) = self.gen_expr(&args[0]);
+                if pt != Ty::Str { panic!("vulcan: file_write needs a string path"); }
+                let (c, ct) = self.gen_expr(&args[1]);
+                if ct != Ty::Str { panic!("vulcan: file_write needs string contents"); }
+                (format!("(__fs.writeFileSync({p}, {c}), undefined)"), Ty::Void)
+            }
+            "file_exists" => {
+                if args.len() != 1 { panic!("vulcan: file_exists(path) takes 1 arg"); }
+                let (c, t) = self.gen_expr(&args[0]);
+                if t != Ty::Str { panic!("vulcan: file_exists needs a string path"); }
+                (format!("__fs.existsSync({c})"), Ty::Bool)
+            }
+            "arg_count" => (format!("(process.argv.length - 2)"), Ty::I64),
+            "arg" => {
+                if args.len() != 1 { panic!("vulcan: arg(i) takes 1 arg"); }
+                let (c, t) = self.gen_expr(&args[0]);
+                let c = self.cast(&c, &t, &Ty::I64);
+                (format!("(process.argv[{c} + 2] || \"\")"), Ty::Str)
+            }
             "sleep_ms" => {
                 let (c, t) = self.gen_expr(&args[0]);
                 let c = self.cast(&c, &t, &Ty::I64);
