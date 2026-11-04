@@ -6,3 +6,11 @@ examples/fib
 examples/physics
 build/
 bench/*.c
+bench/*.js
+bench/*.py
+examples/*.js
+examples/*.py
+lib/*.js
+lib/*.py
+src/*.js
+src/*.py

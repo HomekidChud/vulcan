@@ -4,6 +4,8 @@
 mod lexer;
 mod parser;
 mod codegen;
+mod codegen_js;
+mod codegen_py;
 mod cli;
 mod modules;
 mod pkg;
@@ -12,18 +14,22 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn usage() {
-    println!("Vulcan 0.3 — a small, fast language that transpiles to C
+    println!("Vulcan 0.4 — a small, fast language with multiple backends
 
 USAGE (single file):
   vulcan run <file.vulcan>     compile + execute
-  vulcan build <file.vulcan>  emit native binary
-  vulcan emit <file.vulcan>   show generated C
+  vulcan build <file.vulcan>  emit native binary (C backend)
+  vulcan emit <file.vulcan>   show generated code
   vulcan bench <file.vulcan>  compile, run, time it
   vulcan test <file.vulcan>   run every fn test_*() in the file
 
+add --target js or --target py to run/emit/bench for the JavaScript
+(Node.js) or Python backend — same program, same output, different
+runtime. --target c (default) compiles to native code via C.
+
 add --safe to run/build/bench/test for a sanitizer build
 (AddressSanitizer + UndefinedBehaviorSanitizer: memory errors and
-integer overflow abort at the exact line).
+integer overflow abort at the exact line). C backend only.
 
 USAGE (project — when a vulcan.toml is present):
   vulcan init <name>          scaffold a new project
@@ -44,6 +50,22 @@ fn main() {
         Some(i) => { args.remove(i); true }
         None => false,
     };
+    // `--target <c|js|py>` picks the backend (default: c)
+    let mut target = String::from("c");
+    if let Some(i) = args.iter().position(|a| a == "--target") {
+        if i + 1 < args.len() {
+            target = args[i + 1].clone();
+            args.remove(i);
+            args.remove(i);
+        } else {
+            eprintln!("vulcan: --target needs a value (c, js or py)");
+            std::process::exit(1);
+        }
+    }
+    if !matches!(target.as_str(), "c" | "js" | "py") {
+        eprintln!("vulcan: unknown target `{target}` (expected c, js or py)");
+        std::process::exit(1);
+    }
     if args.len() < 2 {
         usage();
         std::process::exit(1);
@@ -102,6 +124,48 @@ fn main() {
     }
 
     let program = modules::load_program(&entry);
+
+    if target != "c" {
+        if cmd == "test" {
+            eprintln!("vulcan: `test` runs on the C backend (use --target c)");
+            std::process::exit(1);
+        }
+        if cmd == "build" {
+            eprintln!("vulcan: `build` produces native binaries — use the C backend (default)");
+            std::process::exit(1);
+        }
+        let (src, ext, runner): (String, &str, &str) = match target.as_str() {
+            "js" => (codegen_js::generate_js(&program), "js", "node"),
+            "py" => (codegen_py::generate_py(&program), "py", "python3"),
+            _ => unreachable!(),
+        };
+        let out_path = match proj_root {
+            Some(root) => {
+                let build = root.join("build");
+                let _ = std::fs::create_dir_all(&build);
+                build.join(format!("{}.{}", stem_name(&entry), ext)).to_string_lossy().into_owned()
+            }
+            None => format!("{}.{}", entry.to_string_lossy().trim_end_matches(".vulcan"), ext),
+        };
+        match cmd.as_str() {
+            "emit" => print!("{src}"),
+            "run" | "bench" => {
+                std::fs::write(&out_path, &src).unwrap();
+                let t0 = std::time::Instant::now();
+                let status = Command::new(runner).arg(&out_path).status().unwrap();
+                let dt = t0.elapsed();
+                if cmd == "bench" {
+                    println!("exit: {:?}  time: {:.3}s", status.code(), dt.as_secs_f64());
+                }
+                if !status.success() {
+                    std::process::exit(status.code().unwrap_or(1));
+                }
+            }
+            _ => unreachable!(),
+        }
+        return;
+    }
+
     let c_src = match cmd.as_str() {
         "test" => {
             let tests: Vec<String> = program.iter().filter_map(|i| match i {
@@ -192,6 +256,11 @@ fn compile_c(c_path: &str, out: &str, safe: bool) {
     }
     let dt = t0.elapsed();
     eprintln!("native compile: {:.0} ms", dt.as_secs_f64() * 1000.0);
+}
+
+fn stem_name(entry: &Path) -> String {
+    let s = entry.to_string_lossy();
+    s.trim_end_matches(".vulcan").to_string()
 }
 
 // Prefer clang (LLVM codegen — measurably faster loops), fall back to gcc.

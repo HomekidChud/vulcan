@@ -15,6 +15,7 @@ pub struct Codegen {
     enums: HashMap<String, Vec<String>>,
     consts: HashMap<String, (Ty, String)>, // name -> (type, C global name)
     defers: Vec<Vec<Stmt>>, // defer stack (LIFO at scope exit / return)
+    impls: HashMap<(String, String), FnDecl>, // (struct, method) -> decl
     cur_ret: Ty,
     is_main: bool,
 }
@@ -132,6 +133,7 @@ fn generate_inner(program: &[Item], tests: Option<&[String]>) -> String {
         enums: HashMap::new(),
         consts: HashMap::new(),
         defers: Vec::new(),
+        impls: HashMap::new(),
         cur_ret: Ty::Void,
         is_main: false,
     };
@@ -149,6 +151,11 @@ fn generate_inner(program: &[Item], tests: Option<&[String]>) -> String {
             Item::Const(c) => {
                 let cname = format!("vk_{}", c.name);
                 g.consts.insert(c.name.clone(), (const_ty(c), cname));
+            }
+            Item::Impl(i) => {
+                for m in &i.fns {
+                    g.impls.insert((i.struct_name.clone(), m.name.clone()), m.clone());
+                }
             }
             Item::Import(_) => {}
         }
@@ -195,6 +202,23 @@ fn generate_inner(program: &[Item], tests: Option<&[String]>) -> String {
         if let Item::Fn(f) = item {
             if tests.is_some() && f.name == "main" { continue; }
             g.gen_fn(f);
+        }
+    }
+    let _ = write!(g.out, "\n// ---- impl methods ----\n");
+    // prototypes first so methods can call each other in any order
+    for item in program {
+        if let Item::Impl(i) = item {
+            for m in &i.fns {
+                let params = g.method_params_c(&i.struct_name, m);
+                let _ = writeln!(g.out, "static {} {}({});", g.ctype(&m.ret), method_c_name(&i.struct_name, &m.name), params);
+            }
+        }
+    }
+    for item in program {
+        if let Item::Impl(i) = item {
+            for m in &i.fns {
+                g.gen_method(&i.struct_name, m);
+            }
         }
     }
     if let Some(tests) = tests {
@@ -279,6 +303,10 @@ const PRELUDE_PREFIXES: &[&str] = &[
     "term_normal", "key_ready", "read_key", "clear_screen",
     "vms_now", "vrand_int", "vprint_at", "vset_color", "vscreen_w", "vscreen_h", "vcursor_visible", "vchat",
 ];
+
+fn method_c_name(sname: &str, mname: &str) -> String {
+    format!("vm_{}_{}", sname, safe_c_name(mname))
+}
 
 fn safe_c_name(name: &str) -> String {
     if C_KEYWORDS.contains(&name) || PRELUDE_PREFIXES.iter().any(|p| name.starts_with(p)) {
@@ -371,6 +399,43 @@ impl Codegen {
             self.line("}");
         }
         self.locals.pop();
+    }
+
+    fn gen_method(&mut self, sname: &str, m: &FnDecl) {
+        self.cur_ret = m.ret.clone();
+        self.counter = 0;
+        self.is_main = false;
+        self.defers.clear();
+        self.locals.push(HashMap::new());
+        let has_self = m.params.first().map_or(false, |(n, _)| n == "self");
+        if has_self {
+            // `self` dereferences the pointer parameter in every use site
+            self.locals.last_mut().unwrap().insert("self".into(), (Ty::Struct(sname.to_string()), "(*__self)".into()));
+        }
+        for (pname, pty) in &m.params {
+            if has_self && pname == "self" { continue; }
+            self.locals.last_mut().unwrap().insert(pname.clone(), (pty.clone(), pname.clone()));
+        }
+        let params = self.method_params_c(sname, m);
+        let _ = writeln!(self.body, "\nstatic {} {}({}) {{", self.ctype(&m.ret), method_c_name(sname, &m.name), params);
+        self.indent = 1;
+        self.emit_stmts(&m.body);
+        self.emit_pending_defers();
+        self.line("}");
+        self.locals.pop();
+    }
+
+    fn method_params_c(&self, sname: &str, m: &FnDecl) -> String {
+        let has_self = m.params.first().map_or(false, |(n, _)| n == "self");
+        let mut params = Vec::new();
+        if has_self {
+            params.push(format!("{}* __self", sname));
+        }
+        for (n, t) in &m.params {
+            if has_self && n == "self" { continue; }
+            params.push(format!("{} {}", self.ctype(t), n));
+        }
+        if params.is_empty() { "void".into() } else { params.join(", ") }
     }
 
     fn emit_pending_defers(&mut self) {
@@ -884,6 +949,31 @@ impl Codegen {
             Expr::Call { callee, args } => self.gen_call(callee, args),
             Expr::Method { recv, name, args } => {
                 let (recv_c, recv_ty) = self.gen_expr(recv);
+                // user-defined impl methods take priority over same-named builtins
+                if let Ty::Struct(sname) = &recv_ty {
+                    if let Some(m) = self.impls.get(&(sname.clone(), name.clone())).cloned() {
+                        if !matches!(&**recv, Expr::Ident(_)) {
+                            panic!("vulcan: method calls need a simple variable receiver for now");
+                        }
+                        let has_self = m.params.first().map_or(false, |(n, _)| n == "self");
+                        let expected = m.params.len() - if has_self { 1 } else { 0 };
+                        if args.len() != expected {
+                            panic!("vulcan: method {sname}.{} takes {expected} arg(s)", m.name);
+                        }
+                        let mut call_args: Vec<String> = Vec::new();
+                        if has_self {
+                            call_args.push(format!("&{recv_c}"));
+                        }
+                        for (i, (_, pty)) in m.params.iter().enumerate() {
+                            if has_self && i == 0 { continue; }
+                            let arg = &args[if has_self { i - 1 } else { i }];
+                            let (ac, at) = self.gen_expr(arg);
+                            let ac = self.cast(&ac, &at, pty);
+                            call_args.push(ac);
+                        }
+                        return (format!("{}({})", method_c_name(sname, name), call_args.join(", ")), m.ret.clone());
+                    }
+                }
                 match name.as_str() {
                     "len" => match recv_ty {
                         Ty::Array(_) => (format!("({recv_c}.len)"), Ty::I64),

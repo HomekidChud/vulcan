@@ -9,7 +9,7 @@ pub enum Tok {
     Char(i64),
     KwFn, KwLet, KwReturn, KwIf, KwElse, KwElif, KwWhile, KwFor, KwIn, KwBy, KwStruct,
     KwTrue, KwFalse, KwBreak, KwContinue, KwLoop,
-    KwImport, KwPub, KwConst, KwEnum, KwMatch, KwWhen, KwDefer, KwAssert, KwAs,
+    KwImport, KwPub, KwConst, KwEnum, KwMatch, KwWhen, KwDefer, KwAssert, KwAs, KwImpl,
     Plus, Minus, Star, Slash, Percent,
     PlusEq, MinusEq, StarEq, SlashEq, PercentEq,
     PlusPlus, MinusMinus,
@@ -29,7 +29,7 @@ fn keyword(s: &str) -> Option<Tok> {
         "break" => Tok::KwBreak, "continue" => Tok::KwContinue, "loop" => Tok::KwLoop,
         "import" => Tok::KwImport, "pub" => Tok::KwPub, "const" => Tok::KwConst,
         "enum" => Tok::KwEnum, "match" => Tok::KwMatch, "when" => Tok::KwWhen,
-        "defer" => Tok::KwDefer, "assert" => Tok::KwAssert, "as" => Tok::KwAs,
+        "defer" => Tok::KwDefer, "assert" => Tok::KwAssert, "as" => Tok::KwAs, "impl" => Tok::KwImpl,
         _ => return None,
     })
 }

@@ -273,6 +273,40 @@ fn main() -> void {
 "#,
         expected: "[a, b, c]\n...\n",
     },
+    Case {
+        name: "impl methods (all backends)",
+        src: r#"
+struct Vec2 { x: f64, y: f64 }
+
+impl Vec2 {
+    fn move(self, dx: f64, dy: f64) -> Vec2 {
+        self.x = self.x + dx
+        self.y = self.y + dy
+        return self
+    }
+    fn len2(self) -> f64 {
+        return self.x * self.x + self.y * self.y
+    }
+    fn scale(self, k: f64) -> Vec2 {
+        self.x = self.x * k
+        self.y = self.y * k
+        return self
+    }
+}
+
+fn main() -> void {
+    let p = Vec2 { x: 1.0, y: 2.0 }
+    p.move(3.0, 4.0)
+    print("p =", p.x, p.y)
+    print("len2 =", p.len2())
+    p.scale(2.0)
+    print("scaled =", p.x, p.y)
+    let pts: [Vec2] = [Vec2 { x: 1.0, y: 1.0 }, Vec2 { x: 2.0, y: 3.0 }]
+    print("pts[1].y =", pts[1].y)
+}
+"#,
+        expected: "p = 4 6\nlen2 = 52\nscaled = 8 12\npts[1].y = 3\n",
+    },
 ];
 
 pub fn selftest() {
@@ -314,6 +348,30 @@ pub fn selftest() {
             failures += 1;
         } else {
             println!("[ok] {}", case.name);
+        }
+        // cross-backend check: the JS and Python backends must produce identical output
+        if case.name.starts_with("test runner") { continue; }
+        for backend in ["js", "py"] {
+            let (runner, src) = if backend == "js" {
+                ("node", crate::codegen_js::generate_js(&program))
+            } else {
+                ("python3", crate::codegen_py::generate_py(&program))
+            };
+            let script_path = dir.join(format!("{tag}.{backend}"));
+            std::fs::write(&script_path, &src).unwrap();
+            match Command::new(runner).arg(&script_path).output() {
+                Ok(r) => {
+                    let stdout = String::from_utf8_lossy(&r.stdout);
+                    if stdout != case.expected {
+                        eprintln!("[FAIL] {}: {backend} backend output mismatch\n--- got ---\n{stdout}--- expected ---\n{}", case.name, case.expected);
+                        failures += 1;
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    eprintln!("[skip] {}: `{runner}` not found — {backend} backend not verified", case.name);
+                }
+                Err(e) => { eprintln!("[FAIL] {}: {backend} runner error: {e}", case.name); failures += 1; }
+            }
         }
     }
     if failures > 0 {

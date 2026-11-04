@@ -1,0 +1,29 @@
+struct Vec2 { x: f64, y: f64 }
+
+impl Vec2 {
+    fn move(self, dx: f64, dy: f64) -> Vec2 {
+        self.x = self.x + dx
+        self.y = self.y + dy
+        return self
+    }
+    fn len2(self) -> f64 {
+        return self.x * self.x + self.y * self.y
+    }
+    fn sum(self, other: Vec2) -> Vec2 {
+        return Vec2 { x: self.x + other.x, y: self.y + other.y }
+    }
+}
+
+fn main() {
+    let p = Vec2 { x: 1.0, y: 2.0 }
+    p.move(3.0, 4.0)
+    print("p =", p.x, p.y)
+    print("len2 =", p.len2())
+    let q = Vec2 { x: 10.0, y: 20.0 }
+    let r = p.sum(q)
+    print("r =", r.x, r.y)
+    let bodies: [Vec2] = [p, q]
+    let b = bodies[0]
+    b.move(1.0, 1.0)
+    print("b =", b.x, b.y)
+}

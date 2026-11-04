@@ -1,6 +1,6 @@
 # Vulcan
 
-A small, fast-to-compile language that transpiles to C. Static types, no garbage collector, no runtime — your code becomes tight C, compiled by `clang -O3` (or `gcc`, whichever is found first).
+A small, fast-to-compile language with three backends: native code through C (`clang -O3`), JavaScript (Node.js), and Python. Static types, no garbage collector, no runtime — and the same program produces the same output on every backend.
 
 ```vulcan
 fn fib(n: i64) -> i64 {
@@ -12,6 +12,36 @@ fn main() {
     print(fib(35))    // 9227465
 }
 ```
+
+## Vulcan 0.4.0 — what's new
+
+- **Multiple backends** — the same Vulcan program now compiles to three targets:
+  - `--target c` (default): native code via C, `-O3` + full hardening
+  - `--target js`: plain JavaScript for Node.js — zero-install distribution, same output
+  - `--target py`: Python 3 source — structs become classes, `impl` methods become real class methods
+  - Cross-backend output is byte-for-byte identical for the benchmark suite (fib, collatz, primes, physics — including `%.6g` float formatting), and `vulcan selftest` now verifies every test case on all three backends automatically.
+- **`impl` blocks** — attach methods to your structs, Rust-style:
+
+  ```vulcan
+  struct Point { x: f64, y: f64 }
+
+  impl Point {
+      fn translate(self, dx: f64, dy: f64) -> Point {
+          self.x = self.x + dx
+          self.y = self.y + dy
+          return self
+      }
+  }
+
+  fn main() {
+      let p = Point { x: 1.0, y: 2.0 }
+      p.translate(3.0, 4.0)      // methods run on every backend
+      print(p.x, p.y)            // 4 6
+  }
+  ```
+
+  Methods take `self` (mutated in place on the C backend via a pointer), can call each other in any order, and user-defined methods take priority over builtins of the same name.
+- **Backend semantics note** — on the C backend struct assignment copies (value semantics); on the JS/Python backends structs are objects (reference semantics). Everything else — integer division, `%.6g` float printing, bounds-checked arrays, `defer`, f-strings, `match` — behaves identically.
 
 ## Vulcan 0.3.0 — what's new
 
@@ -102,16 +132,18 @@ Reproduce with:
 
 ```bash
 cargo build --release
-vulcan run examples/fib.vulcan        # compile + execute
+vulcan run examples/fib.vulcan        # compile + execute (native, via C)
 vulcan build examples/fib.vulcan     # emit C + native binary
 vulcan emit examples/fib.vulcan      # show generated C
 vulcan bench examples/fib.vulcan      # time repeated runs
 vulcan run --safe examples/fib.vulcan # sanitizer build (ASan + UBSan)
-vulcan selftest                       # run the test suite
+vulcan run --target js examples/tour.vulcan   # run on Node.js — same output
+vulcan run --target py examples/tour.vulcan   # run on Python 3 — same output
+vulcan selftest                       # run the test suite (all 3 backends)
 vulcan init myproj                    # scaffold a new project
 ```
 
-Requires `clang` or `gcc` on your PATH (Vulcan compiles through C; clang is preferred for faster loops).
+Requires `clang` or `gcc` on your PATH for the default C backend (clang is preferred for faster loops). The `js` and `py` targets need `node` / `python3` installed.
 
 ## Making games
 
@@ -129,14 +161,16 @@ Three complete games ship in `examples/`: Snake (arcade), Pong (real-time physic
 ## How it works
 
 1. Lexer → parser → AST
-2. Codegen emits readable C (see `vulcan emit`)
-3. `clang -O3` (or `gcc -O3`) compiles it to a native binary
-
-No runtime, no GC — arrays and structs are plain C vectors and values, with bounds-checked access.
+2. One of three code generators emits code for the target:
+   - **C backend** (default): readable C (see `vulcan emit`), compiled by `clang -O3` to a native binary. No runtime, no GC — arrays and structs are plain C vectors and values, with bounds-checked access.
+   - **JS backend**: plain Node.js-compatible JavaScript — arrays are JS arrays, f-strings become template literals, `defer` becomes `try/finally`, integer division truncates like C.
+   - **Python backend**: Python 3 source — structs become classes, `impl` methods become real class methods, `defer` becomes `try/finally`.
+3. `vulcan selftest` compiles and runs every test case on all three backends and diffs the output — byte-for-byte identical or the build fails.
 
 ## Examples
 
 - `examples/fib.vulcan` — classic recursion
-- `examples/tour.vulcan` — a tour of every 0.2.0 feature
+- `examples/tour.vulcan` — a tour of every feature (runs identically on all backends)
+- `examples/impl_demo.vulcan` — struct methods (`impl`) across all three backends
 - `examples/snake.vulcan` — Snake, written in pure Vulcan (WASD keys; uses `term_raw` + `defer` for terminal cleanup)
 - `bench/` — vulcan-vs-rust benchmarks

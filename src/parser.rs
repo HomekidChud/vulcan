@@ -15,6 +15,13 @@ pub enum Item {
     Enum(EnumDecl),
     Const(ConstDecl),
     Import(String),
+    Impl(ImplDecl),
+}
+
+#[derive(Debug, Clone)]
+pub struct ImplDecl {
+    pub struct_name: String,
+    pub fns: Vec<FnDecl>,
 }
 
 #[derive(Debug, Clone)]
@@ -199,12 +206,37 @@ impl Parser {
             }
             return Item::Struct(StructDecl { name, fields });
         }
+        if self.eat(&Tok::KwImpl) {
+            let struct_name = self.ident("impl struct name");
+            self.expect(Tok::LBrace, "{ to open impl");
+            let mut fns = Vec::new();
+            while !self.eat(&Tok::RBrace) {
+                self.expect(Tok::KwFn, "fn in impl block");
+                fns.push(self.parse_fn());
+            }
+            return Item::Impl(ImplDecl { struct_name, fns });
+        }
         self.expect(Tok::KwFn, "fn (or struct/enum/const/import) at top level");
+        self.parse_fn_as_item()
+    }
+
+    fn parse_fn_as_item(&mut self) -> Item {
+        let f = self.parse_fn();
+        Item::Fn(f)
+    }
+
+    fn parse_fn(&mut self) -> FnDecl {
         let name = self.ident("fn name");
         self.expect(Tok::LParen, "(");
         let mut params = Vec::new();
         while !self.eat(&Tok::RParen) {
             let pname = self.ident("param name");
+            // `self` in impl methods takes no type annotation
+            if pname == "self" && self.peek() != &Tok::Colon {
+                params.push((pname, Ty::Struct(String::new())));
+                self.eat(&Tok::Comma);
+                continue;
+            }
             self.expect(Tok::Colon, ": after param");
             let pty = self.parse_ty();
             params.push((pname, pty));
@@ -217,7 +249,7 @@ impl Parser {
         };
         self.expect(Tok::LBrace, "{ to open fn body");
         let body = self.parse_block();
-        Item::Fn(FnDecl { name, params, ret, body })
+        FnDecl { name, params, ret, body }
     }
 
     fn parse_block(&mut self) -> Vec<Stmt> {
