@@ -159,7 +159,14 @@ fn compile_c(c_path: &str, out: &str) {
     let out_flag = format!("-o{out}");
     let cc = std::env::var("VULCAN_CC").unwrap_or_else(|_| pick_cc());
     let status = Command::new(&cc)
-        .args(["-O3", "-fno-strict-aliasing", "-Wall", "-Wno-unused-variable", "-Wno-unused-function", c_path, "-lm", &out_flag])
+        .args([
+            "-O3", "-fno-strict-aliasing", "-Wall", "-Wno-unused-variable", "-Wno-unused-function",
+            // hardening: stack canaries, fortified libc calls, full PIE/ASLR, strict format strings,
+            // and read-only relocations (GOT hardening where the platform supports it)
+            "-fstack-protector-strong", "-D_FORTIFY_SOURCE=2", "-fPIE", "-pie",
+            "-Wformat", "-Werror=format-security", "-Wl,-z,relro", "-Wl,-z,now",
+            c_path, "-lm", &out_flag,
+        ])
         .status()
         .unwrap_or_else(|e| panic!("C compiler `{cc}` failed: {e}"));
     if !status.success() {
