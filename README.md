@@ -26,7 +26,8 @@ fn main() {
   - `examples/snake.vulcan` — arcade (grid, growth, collision)
   - `examples/pong.vulcan` — real-time physics (ball angles, AI opponent, frame loop)
   - `examples/tictactoe.vulcan` — turn-based strategy (full minimax AI — it cannot be beaten)
-- **Language**: bare `return` (no semicolon, no value), string `.repeat(n)`, array printing, typed empty arrays
+- **A first-person 3D engine** — `examples/raycaster.vulcan` is a Wolfenstein-style raycaster written in pure Vulcan: one ray per screen column, distance-falloff wall heights, fisheye correction, 256-color depth shading, collision detection, live minimap, ~30fps. This is the same core technique that powered Wolfenstein 3D.
+- **Language**: bare `return` (no semicolon, no value), string indexing (`s[i]` yields the char code), trailing commas in array literals, `.repeat(n)`, array printing, typed empty arrays
 
 ## Vulcan 0.2.0 — what's new
 

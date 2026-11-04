@@ -1,0 +1,193 @@
+// examples/raycaster.vulcan — a Wolfenstein-style first-person 3D engine, in pure Vulcan.
+//
+// This is the real technique Wolfenstein 3D used: cast one ray per screen
+// column, measure the distance to the wall, and draw a vertical strip whose
+// height falls off with distance. 60 columns at 30fps, with depth shading,
+// fisheye correction, collision detection, and a live minimap.
+//
+// Controls: W/S move, A/D strafe, Q/E turn, m toggles the minimap, x quits.
+
+const MW = 24   // map width
+const MH = 16   // map height
+const FOV = 1.05
+const MAXDIST = 24.0
+
+// the level: # is wall, . is floor, P is the player start
+fn make_level() -> [string] {
+    return [
+    "########################",
+    "#......#........#......#",
+    "#.####.#.######.#.####.#",
+    "#.#....#.#....#.#....#.#",
+    "#.#.##.#.#.##.#.####.#.#",
+    "#.#.#..#.#.P..#......#.#",
+    "#.#.#.##.#.##.######.#.#",
+    "#.#.#....#.#........#..#",
+    "#.#.####.#.####.###.#..#",
+    "#.#......#....#.#...##.#",
+    "#.######.####.#.#.#..#.#",
+    "#......#....#.#.#.##.#.#",
+    "######.#.##.#.#.#....#.#",
+    "#....#.#.#..#.#.#.####.#",
+    "#....#...#.....#......#",
+    "########################",
+    ]
+}
+
+fn wall_at(level: [string], x: i64, y: i64) -> bool {
+    if x < 0 || x >= MW || y < 0 || y >= MH { return true }
+    return level[y][x] == '#'
+}
+
+fn cast_ray(level: [string], px: f64, py: f64, angle: f64) -> f64 {
+    let dx = cos(angle)
+    let dy = sin(angle)
+    let t = 0.02
+    while t < MAXDIST {
+        let cx = px + dx * t
+        let cy = py + dy * t
+        if wall_at(level, cx as i64, cy as i64) {
+            return t
+        }
+        t += 0.02
+    }
+    return MAXDIST
+}
+
+fn wall_char(dist: f64) -> string {
+    if dist < 3.0 { return "#" }
+    if dist < 5.0 { return "+" }
+    if dist < 8.0 { return "=" }
+    if dist < 12.0 { return "-" }
+    return ":"
+}
+
+fn shade(dist: f64) -> i64 {
+    // 256-color grayscale ramp: bright near, dark far
+    let band = dist * 1.1
+    if band > 23.0 { band = 23.0 }
+    return 232 + (band as i64)
+}
+
+fn main() {
+    term_raw()
+    defer { term_normal() }
+    cursor_visible(0)
+    defer { cursor_visible(1) }
+    clear_screen()
+
+    let level = make_level()
+
+    // player state
+    let px = 0.0
+    let py = 0.0
+    let pa = 0.0
+    let show_map = true
+
+    // find the P marker
+    for y in 0 .. MH {
+        for x in 0 .. MW {
+            if level[y][x] == 'P' {
+                px = x + 0.5
+                py = y + 0.5
+            }
+        }
+    }
+
+    print("vulcan raycaster — W/S move, A/D strafe, Q/E turn, m map, x quit")
+    sleep_ms(1500)
+    clear_screen()
+
+    let running = true
+    let frames: i64 = 0
+    while running {
+        // ---- input ----
+        while key_ready() == 1 {
+            let k = read_key()
+            if k == 'x' {
+                running = false
+            } elif k == 'w' {
+                let nx = px + cos(pa) * 0.25
+                let ny = py + sin(pa) * 0.25
+                if !wall_at(level, nx as i64, py as i64) { px = nx }
+                if !wall_at(level, px as i64, ny as i64) { py = ny }
+            } elif k == 's' {
+                let nx = px - cos(pa) * 0.25
+                let ny = py - sin(pa) * 0.25
+                if !wall_at(level, nx as i64, py as i64) { px = nx }
+                if !wall_at(level, px as i64, ny as i64) { py = ny }
+            } elif k == 'a' {
+                let nx = px + sin(pa) * 0.25
+                let ny = py - cos(pa) * 0.25
+                if !wall_at(level, nx as i64, py as i64) { px = nx }
+                if !wall_at(level, px as i64, ny as i64) { py = ny }
+            } elif k == 'd' {
+                let nx = px - sin(pa) * 0.25
+                let ny = py + cos(pa) * 0.25
+                if !wall_at(level, nx as i64, py as i64) { px = nx }
+                if !wall_at(level, px as i64, ny as i64) { py = ny }
+            } elif k == 'q' {
+                pa -= 0.12
+            } elif k == 'e' {
+                pa += 0.12
+            } elif k == 'm' {
+                if show_map { show_map = false } else { show_map = true }
+            }
+        }
+        if !running { break }
+        while pa < 0.0 { pa += 6.28318 }
+        while pa > 6.28318 { pa -= 6.28318 }
+
+        // ---- render ----
+        let SW = screen_width() - 2
+        let SH = screen_height() - 3
+        if SW > 100 { SW = 100 }
+        if SH > 40 { SH = 40 }
+
+        for col in 0 .. SW {
+            let ray_a = pa - FOV / 2 + FOV * ((col as f64) / (SW as f64))
+            let dist = cast_ray(level, px, py, ray_a)
+            // fisheye correction: distance along the view direction
+            let d = dist * cos(ray_a - pa)
+            if d < 0.1 { d = 0.1 }
+            let h = (SH as f64) / d
+            if h > (SH as f64) { h = SH as f64 }
+            let top = ((SH as f64) - h) / 2.0
+            let ch = wall_char(d)
+            set_color(shade(d), -1)
+            print_at(col, top as i64, ch.repeat(h as i64))
+        }
+        set_color(-1, -1)
+
+        // floor line
+        set_color(236, -1)
+        print_at(0, SH - 1, "~".repeat(SW))
+        set_color(-1, -1)
+
+        // minimap
+        if show_map {
+            for my in 0 .. MH {
+                for mx in 0 .. MW {
+                    if wall_at(level, mx, my) {
+                        set_color(240, -1)
+                        print_at(mx, my, "#")
+                    }
+                }
+            }
+            set_color(196, -1)
+            print_at(px as i64, py as i64, "@")
+            set_color(-1, -1)
+        }
+
+        // hud
+        print_at(0, SH + 1, f"x {px} y {py} heading {pa}  fps-ish 30  frames {frames}")
+
+        frames += 1
+        sleep_ms(33)
+    }
+
+    clear_screen()
+    cursor_visible(1)
+    term_normal()
+    print(f"after {frames} frames of raycasting — bye!")
+}

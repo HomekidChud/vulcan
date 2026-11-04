@@ -77,6 +77,7 @@ static char* vstr_upper(char* s){ size_t n=strlen(s); char* r=malloc(n+1); for(s
 static char* vstr_lower(char* s){ size_t n=strlen(s); char* r=malloc(n+1); for(size_t i=0;i<n;i++) r[i]=(char)tolower((unsigned char)s[i]); r[n]=0; return r; }
 static char* vstr_trim(char* s){ char* p=s; while(*p&&isspace((unsigned char)*p))p++; char* e=s+strlen(s); while(e>p&&isspace((unsigned char)*(e-1)))e--; size_t n=(size_t)(e-p); char* r=malloc(n+1); memcpy(r,p,n); r[n]=0; return r; }
 static int8_t vstr_contains(const char* a, const char* b){ return strstr(a,b)!=NULL; }
+static int64_t vchat(const char* s, int64_t i){ size_t n=strlen(s); if(i<0||(size_t)i>=n) return -1; return (int64_t)(unsigned char)s[i]; }
 static char* vto_str_i64(int64_t x){ char* s=malloc(32); snprintf(s,32,"%lld",(long long)x); return s; }
 static char* vto_str_f64(double x){ char* s=malloc(48); snprintf(s,48,"%.6g",x); return s; }
 static char* input_line(void){
@@ -96,7 +97,7 @@ static void vsleep(int64_t ms){ if(ms>0){ struct timespec t; t.tv_sec=ms/1000; t
 static int64_t vms_now(void){ struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t); return (int64_t)t.tv_sec*1000 + t.tv_nsec/1000000; }
 static int64_t vrand_int(int64_t lo, int64_t hi){ static unsigned vseed = 0; if(!vseed) vseed = (unsigned)vms_now() ^ (unsigned)getpid(); vseed = vseed*1103515245u + 12345u; return lo + (int64_t)(vseed>>16) % (hi - lo + 1); }
 static void vprint_at(int64_t x, int64_t y, const char* s){ printf("\033[%lld;%lldH%s", (long long)(y+1), (long long)(x+1), s); }
-static void vset_color(int64_t fg, int64_t bg){ if(fg<0&&bg<0){ printf("\033[0m"); return; } if(fg>=0) printf("\033[%lldm", (long long)(30+(fg%8))); if(bg>=0) printf("\033[%lldm", (long long)(40+(bg%8))); }
+static void vset_color(int64_t fg, int64_t bg){ if(fg<0&&bg<0){ printf("\033[0m"); return; } if(fg>=8) printf("\033[38;5;%lldm", (long long)(fg%256)); else if(fg>=0) printf("\033[%lldm", (long long)(30+fg)); if(bg>=8) printf("\033[48;5;%lldm", (long long)(bg%256)); else if(bg>=0) printf("\033[%lldm", (long long)(40+bg)); }
 static int64_t vscreen_w(void){ struct winsize w; if(ioctl(STDOUT_FILENO,TIOCGWINSZ,&w)==0&&w.ws_col) return (int64_t)w.ws_col; return 80; }
 static int64_t vscreen_h(void){ struct winsize w; if(ioctl(STDOUT_FILENO,TIOCGWINSZ,&w)==0&&w.ws_row) return (int64_t)w.ws_row; return 24; }
 static void vcursor_visible(int64_t v){ printf(v? "\033[?25h" : "\033[?25l"); }
@@ -276,7 +277,7 @@ const PRELUDE_PREFIXES: &[&str] = &[
     "vi64_", "vf64_", "vbool_", "vstr_", "vs_", "vk_", "vto_", "vulcan_",
     "vmin_", "vmax_", "vclock", "vrand", "vsleep", "input_line", "term_raw",
     "term_normal", "key_ready", "read_key", "clear_screen",
-    "vms_now", "vrand_int", "vprint_at", "vset_color", "vscreen_w", "vscreen_h", "vcursor_visible",
+    "vms_now", "vrand_int", "vprint_at", "vset_color", "vscreen_w", "vscreen_h", "vcursor_visible", "vchat",
 ];
 
 fn safe_c_name(name: &str) -> String {
@@ -978,9 +979,14 @@ impl Codegen {
                 let (recv_c, recv_ty) = self.gen_expr(recv);
                 let (idx_c, idx_ty) = self.gen_expr(idx);
                 let idx_c = self.cast(&idx_c, &idx_ty, &Ty::I64);
-                let elem = self.array_elem(&recv_ty);
-                let get = self.vec_helper(&recv_ty, "get");
-                (format!("{get}(&{recv_c}, {idx_c})"), elem)
+                if recv_ty == Ty::Str {
+                    // string indexing: s[i] yields the char code (bounds-checked, -1 when out of range)
+                    (format!("vchat({recv_c}, {idx_c})"), Ty::I64)
+                } else {
+                    let elem = self.array_elem(&recv_ty);
+                    let get = self.vec_helper(&recv_ty, "get");
+                    (format!("{get}(&{recv_c}, {idx_c})"), elem)
+                }
             }
             Expr::ArrayLit(items) => {
                 if items.is_empty() {

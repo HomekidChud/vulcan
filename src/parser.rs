@@ -567,11 +567,13 @@ impl Parser {
             Tok::LBracket => {
                 let mut items = Vec::new();
                 if !self.eat(&Tok::RBracket) {
+                    let mut closed = false;
                     loop {
                         items.push(self.parse_expr());
                         if !self.eat(&Tok::Comma) { break; }
+                        if self.eat(&Tok::RBracket) { closed = true; break; } // trailing comma allowed
                     }
-                    self.expect(Tok::RBracket, "] after array literal");
+                    if !closed { self.expect(Tok::RBracket, "] after array literal"); }
                 }
                 Expr::ArrayLit(items)
             }
