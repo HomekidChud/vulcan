@@ -1,0 +1,16 @@
+// lib/math.vulcan — tiny math library for imports.
+pub const PI = 3.141592653589793
+pub const E = 2.718281828459045
+
+pub fn square(x: f64) -> f64 {
+    return x * x
+}
+
+pub fn clamp(x: f64, lo: f64, hi: f64) -> f64 {
+    if x < lo {
+        return lo
+    } elif x > hi {
+        return hi
+    }
+    return x
+}

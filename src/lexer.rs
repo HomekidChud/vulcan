@@ -1,110 +1,245 @@
-// Lexer for Vulcan.
+// Lexer for Vulcan — emits tokens tagged with source line numbers.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Tok {
     Ident(String),
     Int(i64),
     Float(f64),
     Str(String),
-    KwFn, KwLet, KwReturn, KwIf, KwElse, KwWhile, KwFor, KwIn, KwStruct, KwTrue, KwFalse, KwBreak, KwContinue,
+    FStr(String), // f"..." — raw content; {expr} placeholders are resolved by the parser
+    Char(i64),
+    KwFn, KwLet, KwReturn, KwIf, KwElse, KwElif, KwWhile, KwFor, KwIn, KwBy, KwStruct,
+    KwTrue, KwFalse, KwBreak, KwContinue, KwLoop,
+    KwImport, KwPub, KwConst, KwEnum, KwMatch, KwWhen, KwDefer, KwAssert, KwAs,
     Plus, Minus, Star, Slash, Percent,
+    PlusEq, MinusEq, StarEq, SlashEq, PercentEq,
+    PlusPlus, MinusMinus,
+    Amp, Pipe, Caret, Tilde, Shl, Shr, AmpEq, PipeEq, CaretEq, ShlEq, ShrEq,
     Eq, EqEq, Ne, Lt, Gt, Le, Ge, AndAnd, OrOr, Not,
     LParen, RParen, LBrace, RBrace, LBracket, RBracket, Dot, Comma, Colon, ColonColon, Semi, Arrow,
+    DotDot, DotDotEq,
     EOF,
 }
 
-pub fn lex(src: &str) -> Vec<Tok> {
-    let mut toks = Vec::new();
+fn keyword(s: &str) -> Option<Tok> {
+    Some(match s {
+        "fn" => Tok::KwFn, "let" => Tok::KwLet, "return" => Tok::KwReturn,
+        "if" => Tok::KwIf, "else" => Tok::KwElse, "elif" => Tok::KwElif,
+        "while" => Tok::KwWhile, "for" => Tok::KwFor, "in" => Tok::KwIn, "by" => Tok::KwBy,
+        "struct" => Tok::KwStruct, "true" => Tok::KwTrue, "false" => Tok::KwFalse,
+        "break" => Tok::KwBreak, "continue" => Tok::KwContinue, "loop" => Tok::KwLoop,
+        "import" => Tok::KwImport, "pub" => Tok::KwPub, "const" => Tok::KwConst,
+        "enum" => Tok::KwEnum, "match" => Tok::KwMatch, "when" => Tok::KwWhen,
+        "defer" => Tok::KwDefer, "assert" => Tok::KwAssert, "as" => Tok::KwAs,
+        _ => return None,
+    })
+}
+
+fn lex_escape(c: char) -> char {
+    match c {
+        'n' => '\n', 't' => '\t', 'r' => '\r', '0' => '\0',
+        '\\' => '\\', '"' => '"', '\'' => '\'',
+        other => other,
+    }
+}
+
+pub fn lex(src: &str) -> Vec<(Tok, usize)> {
+    let mut toks: Vec<(Tok, usize)> = Vec::new();
     let chars: Vec<char> = src.chars().collect();
     let mut i = 0;
+    let mut line = 1usize;
     let n = chars.len();
     while i < n {
         let c = chars[i];
-        if c.is_whitespace() {
-            i += 1;
-            continue;
-        }
+        if c == '\n' { line += 1; i += 1; continue; }
+        if c.is_whitespace() { i += 1; continue; }
+        // comments
         if c == '/' && i + 1 < n && chars[i + 1] == '/' {
             while i < n && chars[i] != '\n' { i += 1; }
             continue;
         }
         if c == '/' && i + 1 < n && chars[i + 1] == '*' {
             i += 2;
-            while i + 1 < n && !(chars[i] == '*' && chars[i + 1] == '/') { i += 1; }
+            while i + 1 < n && !(chars[i] == '*' && chars[i + 1] == '/') {
+                if chars[i] == '\n' { line += 1; }
+                i += 1;
+            }
             i += 2;
             continue;
         }
-        if c.is_ascii_digit() || (c == '.' && i + 1 < n && chars[i + 1].is_ascii_digit()) {
+        // char literal 'a'
+        if c == '\'' {
+            i += 1;
+            let v = if i < n && chars[i] == '\\' && i + 1 < n {
+                i += 1;
+                let e = lex_escape(chars[i]);
+                i += 1;
+                e
+            } else if i < n {
+                let ch = chars[i];
+                i += 1;
+                ch
+            } else { ' ' };
+            if i < n && chars[i] == '\'' { i += 1; }
+            toks.push((Tok::Char(v as i64), line));
+            continue;
+        }
+        // numbers: hex, binary, decimal, float
+        if c.is_ascii_digit() {
+            if c == '0' && i + 1 < n && (chars[i + 1] == 'x' || chars[i + 1] == 'X') {
+                i += 2;
+                let mut v: i64 = 0;
+                while i < n && chars[i].is_ascii_hexdigit() {
+                    v = v * 16 + chars[i].to_digit(16).unwrap() as i64;
+                    i += 1;
+                }
+                toks.push((Tok::Int(v), line));
+                continue;
+            }
+            if c == '0' && i + 1 < n && (chars[i + 1] == 'b' || chars[i + 1] == 'B') {
+                i += 2;
+                let mut v: i64 = 0;
+                while i < n && (chars[i] == '0' || chars[i] == '1') {
+                    v = v * 2 + (chars[i] == '1') as i64;
+                    i += 1;
+                }
+                toks.push((Tok::Int(v), line));
+                continue;
+            }
             let mut s = String::new();
             let mut is_float = false;
-            while i < n && (chars[i].is_ascii_digit() || chars[i] == '.' || chars[i] == '_') {
-                if chars[i] == '.' { is_float = true; }
+            while i < n && (chars[i].is_ascii_digit() || chars[i] == '_') {
                 if chars[i] != '_' { s.push(chars[i]); }
                 i += 1;
             }
+            // a '.' only continues the number when followed by a digit
+            // (so `0..10` ranges still lex correctly)
+            if i + 1 < n && chars[i] == '.' && chars[i + 1].is_ascii_digit() {
+                is_float = true;
+                s.push('.');
+                i += 1;
+                while i < n && (chars[i].is_ascii_digit() || chars[i] == '_') {
+                    if chars[i] != '_' { s.push(chars[i]); }
+                    i += 1;
+                }
+            }
             if is_float {
-                toks.push(Tok::Float(s.parse().unwrap()));
+                toks.push((Tok::Float(s.parse().unwrap()), line));
             } else {
-                toks.push(Tok::Int(s.parse().unwrap()));
+                toks.push((Tok::Int(s.parse().unwrap()), line));
             }
             continue;
         }
+        // identifiers / keywords / f-strings
         if c.is_alphabetic() || c == '_' {
             let mut s = String::new();
             while i < n && (chars[i].is_alphanumeric() || chars[i] == '_') {
                 s.push(chars[i]);
                 i += 1;
             }
-            let t = match s.as_str() {
-                "fn" => Tok::KwFn, "let" => Tok::KwLet, "return" => Tok::KwReturn,
-                "if" => Tok::KwIf, "else" => Tok::KwElse, "while" => Tok::KwWhile,
-                "for" => Tok::KwFor, "in" => Tok::KwIn, "struct" => Tok::KwStruct,
-                "true" => Tok::KwTrue, "false" => Tok::KwFalse,
-                "break" => Tok::KwBreak, "continue" => Tok::KwContinue,
-                _ => Tok::Ident(s),
-            };
-            toks.push(t);
+            if s == "f" && i < n && chars[i] == '"' {
+                i += 1;
+                let raw = lex_fstr(&chars, &mut i);
+                toks.push((Tok::FStr(raw), line));
+                continue;
+            }
+            let t = keyword(&s).unwrap_or(Tok::Ident(s));
+            toks.push((t, line));
             continue;
         }
+        // strings
         if c == '"' {
             i += 1;
             let mut s = String::new();
             while i < n && chars[i] != '"' {
                 if chars[i] == '\\' && i + 1 < n {
                     i += 1;
-                    match chars[i] {
-                        'n' => s.push('\n'), 't' => s.push('\t'), '"' => s.push('"'),
-                        other => { s.push('\\'); s.push(other); }
-                    }
+                    s.push(lex_escape(chars[i]));
                 } else {
                     s.push(chars[i]);
                 }
                 i += 1;
             }
             i += 1;
-            toks.push(Tok::Str(s));
+            toks.push((Tok::Str(s), line));
+            continue;
+        }
+        // operators: longest match first
+        let three = if i + 2 < n {
+            Some(chars[i].to_string() + &chars[i + 1].to_string() + &chars[i + 2].to_string())
+        } else { None };
+        let t = if let Some(ref th) = three {
+            match th.as_str() {
+                "<<=" => Some(Tok::ShlEq), ">>=" => Some(Tok::ShrEq), "..=" => Some(Tok::DotDotEq),
+                _ => None,
+            }
+        } else { None };
+        if t.is_some() {
+            toks.push((t.unwrap(), line));
+            i += 3;
+            continue;
+        }
+        let two = if i + 1 < n { format!("{}{}", chars[i], chars[i + 1]) } else { String::new() };
+        let t = match two.as_str() {
+            "==" => Some(Tok::EqEq), "!=" => Some(Tok::Ne),
+            "<=" => Some(Tok::Le), ">=" => Some(Tok::Ge),
+            "&&" => Some(Tok::AndAnd), "||" => Some(Tok::OrOr),
+            "+=" => Some(Tok::PlusEq), "-=" => Some(Tok::MinusEq),
+            "*=" => Some(Tok::StarEq), "/=" => Some(Tok::SlashEq), "%=" => Some(Tok::PercentEq),
+            "++" => Some(Tok::PlusPlus), "--" => Some(Tok::MinusMinus),
+            "&=" => Some(Tok::AmpEq), "|=" => Some(Tok::PipeEq), "^=" => Some(Tok::CaretEq),
+            "<<" => Some(Tok::Shl), ">>" => Some(Tok::Shr),
+            "->" => Some(Tok::Arrow), "::" => Some(Tok::ColonColon),
+            ".." => Some(Tok::DotDot),
+            _ => None,
+        };
+        if let Some(t) = t {
+            toks.push((t, line));
+            i += 2;
             continue;
         }
         let t = match c {
-            '+' => Tok::Plus, '*' => Tok::Star, '/' => Tok::Slash, '%' => Tok::Percent,
-            '=' => { if i + 1 < n && chars[i + 1] == '=' { i += 1; Tok::EqEq } else { Tok::Eq } }
-            '!' => { if i + 1 < n && chars[i + 1] == '=' { i += 1; Tok::Ne } else { Tok::Not } }
-            '<' => { if i + 1 < n && chars[i + 1] == '=' { i += 1; Tok::Le } else { Tok::Lt } }
-            '>' => { if i + 1 < n && chars[i + 1] == '=' { i += 1; Tok::Ge } else { Tok::Gt } }
-            '&' => { if i + 1 < n && chars[i + 1] == '&' { i += 1; Tok::AndAnd } else { panic!("single & not supported"); } }
-            '|' => { if i + 1 < n && chars[i + 1] == '|' { i += 1; Tok::OrOr } else { panic!("single | not supported"); } }
-            '-' => { if i + 1 < n && chars[i + 1] == '>' { i += 1; Tok::Arrow } else { Tok::Minus } }
+            '+' => Tok::Plus, '-' => Tok::Minus, '*' => Tok::Star, '/' => Tok::Slash,
+            '%' => Tok::Percent, '&' => Tok::Amp, '|' => Tok::Pipe, '^' => Tok::Caret,
+            '~' => Tok::Tilde, '=' => Tok::Eq, '!' => Tok::Not,
+            '<' => Tok::Lt, '>' => Tok::Gt,
             '(' => Tok::LParen, ')' => Tok::RParen, '{' => Tok::LBrace, '}' => Tok::RBrace,
             '[' => Tok::LBracket, ']' => Tok::RBracket,
-            '.' => { if i + 1 < n && chars[i + 1] == '.' { i += 1; Tok::ColonColon } else { Tok::Dot } },
-            ',' => Tok::Comma,
-            ':' => { if i + 1 < n && chars[i + 1] == ':' { i += 1; Tok::ColonColon } else { Tok::Colon } }
-            ';' => Tok::Semi,
-            _ => unreachable!(),
+            '.' => Tok::Dot, ',' => Tok::Comma, ':' => Tok::Colon, ';' => Tok::Semi,
+            _ => panic!("vulcan: line {line}: unexpected character `{c}`"),
         };
-        let _ = t.clone();
-        toks.push(t);
+        toks.push((t, line));
         i += 1;
     }
-    toks.push(Tok::EOF);
+    toks.push((Tok::EOF, line));
     toks
+}
+
+// f-string body: escapes are processed outside {expr} regions; {expr} copied verbatim.
+fn lex_fstr(chars: &[char], i: &mut usize) -> String {
+    let mut out = String::new();
+    let n = chars.len();
+    while *i < n && chars[*i] != '"' {
+        if chars[*i] == '{' {
+            let mut depth = 0i64;
+            while *i < n {
+                let ch = chars[*i];
+                out.push(ch);
+                if ch == '{' { depth += 1; }
+                else if ch == '}' {
+                    depth -= 1;
+                    if depth == 0 { *i += 1; break; }
+                }
+                *i += 1;
+            }
+        } else if chars[*i] == '\\' && *i + 1 < n {
+            *i += 1;
+            out.push(lex_escape(chars[*i]));
+            *i += 1;
+        } else {
+            out.push(chars[*i]);
+            *i += 1;
+        }
+    }
+    *i += 1; // closing quote
+    out
 }

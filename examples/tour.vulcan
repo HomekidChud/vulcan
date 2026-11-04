@@ -1,0 +1,125 @@
+// examples/tour.vulcan — a quick tour of the language.
+// run with: vulcan run examples/tour.vulcan
+
+import math
+
+const Two = 2
+enum Color { Red, Green, Blue }
+
+struct Point { x: f64, y: f64 }
+struct Rect { p1: Point, p2: Point, color: Color }
+
+fn area(r: Rect) -> f64 {
+    return abs(r.p1.x - r.p2.x) * abs(r.p1.y - r.p2.y)
+}
+
+fn main() {
+    // numbers: ints, floats, hex, binary, chars
+    print(f"ints, floats, hex/bin literals: {42} {3.14} {0xFF} {0b1010}")
+    print(f"char literal: {'A'}")
+
+    // inference and explicit types
+    let n = 10
+    let pi: f64 = PI
+    print(f"n = {n}, pi = {pi}")
+
+    // operators: arithmetic, compound, bitwise, comparisons, precedence
+    n += 5
+    n *= Two
+    print(f"n after += 5, *= 2: {n}")
+    print("bitwise: {} & {} = {}, {} | {} = {}, ~{} = {}", 12, 10, 12 & 10, 12, 10, 12 | 10, 5, ~5)
+    print(f"shifts: 1 << 4 = {1 << 4}, 256 >> 4 = {256 >> 4}")
+    print(f"precedence: 2 + 3 * 4 = {2 + 3 * 4}, (2 + 3) * 4 = {(2 + 3) * 4}")
+
+    // strings: f-string interpolation, repeat, methods
+    let name = "Vulcan"
+    print(f"hello, {name}!" + " ".repeat(3) + f"uppercase: {name.upper()}")
+    print(f"trimmed: '[{"  pad  ".trim()}]', contains 'ulc': {name.contains("ulc")}")
+
+    // if / elif / else
+    let grade = 87
+    if grade >= 90 {
+        print("grade: A")
+    } elif grade >= 80 {
+        print("grade: B")
+    } else {
+        print("grade: C")
+    }
+
+    // loops: while, for over ranges (with step), for-in
+    let total = 0
+    for i in 0 ..= 5 by 2 {
+        total += i
+    }
+    print(f"sum of evens 0..5: {total}")
+
+    let seen: [string] = []
+    for c in ["a", "b", "c"] {
+        seen.push(c)
+    }
+    print("for-in collected:", seen)
+
+    let countdown = 3
+    while countdown > 0 {
+        countdown -= 1
+    }
+    print("countdown done")
+
+    // loop (infinite) with break/continue
+    let found = 0
+    loop {
+        found += 1
+        if found == 5 {
+            break
+        } else {
+            continue
+        }
+    }
+    print(f"loop stopped at {found}")
+
+    // defer: cleanup runs at scope exit, in reverse order
+    defer { print("main scope: deferred cleanup runs last") }
+
+    // structs, enums, constants
+    let p1 = Point { x: 0, y: 0 }
+    let p2 = Point { x: 4, y: 2.5 }
+    let r = Rect { p1: p1, p2: p2, color: Color.Red }
+    print(f"rect area: {area(r)}")
+    match r.color {
+        when Color.Red { print("color: red") }
+        when Color.Green { print("color: green") }
+        else { print("color: blue") }
+    }
+
+    p1.x += 1
+    p1.y += 1
+    print(f"p1 moved to ({p1.x}, {p1.y})")
+
+    // arrays: index, set, pop, shift, length, contains
+    let xs = [10, 20, 30]
+    xs.push(40)
+    print("xs:", xs, "- len", xs.len(), ", contains 30:", xs.contains(30), ", last:", xs.last())
+    let popped = xs.pop()
+    print(f"popped: {popped}, shifted: {xs.shift()}")
+
+    // match / when (arms take patterns, `else` is the fallback)
+    let day = "sat"
+    match day {
+        when "sat", "sun" { print(f"{day} is a weekend") }
+        when "mon" { print("mondays, am I right") }
+        else { print(f"{day} is a weekday") }
+    }
+
+    // assert (with an optional message)
+    assert(3 + 4 == 7, "arithmetic still works")
+
+    // built-ins and library imports (math.square comes from lib/math.vulcan)
+    print(f"min(3,7)={min(3, 7)} max(3,7)={max(3, 7)} abs(-5)={abs(-5)} sqrt(16.0)={sqrt(16.0)}")
+    print(f"math.square(6.0) = {square(6.0)}")
+
+    // casts
+    let f: f64 = 9.99
+    print(f"9.99 as i64 = {f as i64}, 'A' as i64 = {'A' as i64}")
+
+    print("\ntour complete.")
+}

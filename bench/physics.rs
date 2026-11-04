@@ -1,0 +1,29 @@
+#[derive(Clone, Copy)]
+struct Body { x: f64, y: f64, z: f64, vx: f64, vy: f64, vz: f64, mass: f64 }
+
+fn step(b: Body, dt: f64) -> Body {
+    let g = 9.81;
+    let drag = 0.015;
+    let nvx = (b.vx - b.vx * drag) * dt;
+    let nvy = (b.vy - b.vy * drag - g * dt) * dt;
+    let nvz = (b.vz - b.vz * drag) * dt;
+    Body { x: b.x + b.vx * dt, y: b.y + b.vy * dt, z: b.z + b.vz * dt,
+           vx: b.vx + nvx, vy: b.vy + nvy, vz: b.vz + nvz, mass: b.mass }
+}
+
+fn main() {
+    let mut bodies: Vec<Body> = vec![Body { x: 0.0, y: 100.0, z: 0.0, vx: 3.0, vy: 0.0, vz: 2.0, mass: 1.0 }];
+    for i in 1..200 {
+        bodies.push(Body { x: 0.0, y: 100.0 + i as f64, z: 0.0, vx: 3.0, vy: 0.0, vz: 2.0, mass: 1.0 });
+    }
+    let dt = 0.016;
+    for _f in 0..2000 {
+        for i in 0..bodies.len() {
+            let b = bodies[i];
+            bodies[i] = step(b, dt);
+        }
+    }
+    let mut total_y = 0.0;
+    for i in 0..bodies.len() { total_y += bodies[i].y; }
+    println!("total y: {}", total_y);
+}

@@ -1,20 +1,24 @@
-// Embedded self-test: compiles and runs a sample program, verifying output.
+// Embedded self-test suite: compiles and runs sample programs, verifying output.
 use std::process::Command;
 
-const SAMPLE: &str = r#"
-struct Vec2 {
-    x: f64,
-    y: f64,
+struct Case {
+    name: &'static str,
+    src: &'static str,
+    expected: &'static str,
 }
+
+const CASES: &[Case] = &[
+    Case {
+        name: "basic (0.1 feature set)",
+        src: r#"
+struct Vec2 { x: f64, y: f64 }
 
 fn len(v: Vec2) -> f64 {
     return sqrt(v.x * v.x + v.y * v.y)
 }
 
 fn fib(n: i64) -> i64 {
-    if n < 2 {
-        return n
-    }
+    if n < 2 { return n }
     return fib(n - 1) + fib(n - 2)
 }
 
@@ -33,34 +37,249 @@ fn main() -> void {
     let msg = "hello" + " " + "world"
     print(msg)
 }
-"#;
+"#,
+        expected: "Vulcan selftest\nlen(3,4) = 5\nfib(20) = 6765\narr sum:\n20\nhello world\n",
+    },
+    Case {
+        name: "elif / compound assign / ++ --",
+        src: r#"
+fn classify(n: i64) -> string {
+    if n < 0 { return "negative" }
+    elif n == 0 { return "zero" }
+    elif n < 10 { return "small" }
+    else { return "big" }
+}
 
-const EXPECTED: &str = "Vulcan selftest\nlen(3,4) = 5\nfib(20) = 6765\narr sum:\n20\nhello world\n";
+fn main() -> void {
+    print(classify(-5), classify(0), classify(3), classify(99))
+    let x = 10
+    x += 5
+    x -= 3
+    x *= 2
+    print(x)
+    x++
+    x++
+    print(x)
+    x--
+    print(x)
+    let f = 2.5
+    f /= 0.5
+    print(f)
+}
+"#,
+        expected: "negative zero small big\n24\n26\n25\n5\n",
+    },
+    Case {
+        name: "for-in / step ranges / loop-break",
+        src: r#"
+fn main() -> void {
+    let xs = [10, 20, 30]
+    let total = 0
+    for x in xs { total += x }
+    print(total)
+    for i in 0 .. 10 by 3 { print(i) }
+    for i in 0 ..= 4 by 2 { print(i) }
+    for i in 10 .. 0 by -2 { print(i) }
+    let n = 0
+    loop {
+        n++
+        if n >= 3 { break }
+    }
+    print("looped", n)
+}
+"#,
+        expected: "60\n0\n3\n6\n9\n0\n2\n4\n10\n8\n6\n4\n2\nlooped 3\n",
+    },
+    Case {
+        name: "match / enums",
+        src: r#"
+enum Color { Red, Green, Blue }
+
+fn name(c: Color) -> string {
+    match c {
+        when Color.Red { return "red" }
+        when Color.Green { return "green" }
+        else { return "blue" }
+    }
+}
+
+fn main() -> void {
+    print(name(Color.Red), name(Color.Green), name(Color.Blue))
+    let c = Color.Blue
+    match c {
+        when Color.Red { print("nope") }
+        when Color.Blue, Color.Green { print("cool color") }
+    }
+    let m = "b"
+    match m {
+        when "a" { print("letter a") }
+        when "b" { print("letter b") }
+        else { print("other") }
+    }
+}
+"#,
+        expected: "red green blue\ncool color\nletter b\n",
+    },
+    Case {
+        name: "f-strings / consts / string methods",
+        src: r#"
+const LIMIT: i64 = 42
+const APP: string = "vulcan"
+
+fn main() -> void {
+    let name = "ada"
+    let n = 7
+    print(f"{APP} says: {name} scored {n * 6} points")
+    print(f"limit is {LIMIT}")
+    print("SHOUT".lower(), "quiet".upper())
+    print("  padded  ".trim())
+    print(f"nested: {[1,2][1]}")
+}
+"#,
+        expected: "vulcan says: ada scored 42 points\nlimit is 42\nshout QUIET\npadded\nnested: 2\n",
+    },
+    Case {
+        name: "defer / assert",
+        src: r#"
+fn work() -> i64 {
+    defer { print("cleanup") }
+    print("working")
+    return 5
+}
+
+fn main() -> void {
+    print(work())
+    assert(1 + 1 == 2)
+    let items = [1, 2, 3]
+    assert(items.len() == 3, "array size")
+    print("after asserts")
+}
+"#,
+        expected: "working\ncleanup\n5\nafter asserts\n",
+    },
+    Case {
+        name: "bitwise / hex / binary / chars / casts",
+        src: r#"
+fn main() -> void {
+    let flags = 0b1010
+    print(flags)
+    print(0xFF)
+    print(flags & 0b0110)
+    print(flags | 1)
+    print(flags ^ 0b1111)
+    print(flags << 2)
+    print(flags >> 1)
+    print(~0)
+    print('A')
+    let x = 3
+    let y = x as f64 / 2.0
+    print(y)
+    print('z' - 'a')
+}
+"#,
+        expected: "10\n255\n2\n11\n5\n40\n5\n-1\n65\n1.5\n25\n",
+    },
+    Case {
+        name: "array methods / min max / pop",
+        src: r#"
+fn main() -> void {
+    let xs = [5, 3, 8]
+    print(xs.pop())
+    print(xs.len())
+    print(xs.last())
+    print(xs.contains(3), xs.contains(99))
+    print(min(4, 9), max(4, 9))
+    print(min(2.5, 1.5), max(2.5, 1.5))
+    print(abs(-7), abs(-2.5))
+    print(pow(2.0, 10.0))
+    print(floor(2.7), ceil(2.1))
+}
+"#,
+        expected: "8\n2\n3\ntrue false\n4 9\n1.5 2.5\n7 2.5\n1024\n2 3\n",
+    },
+    Case {
+        name: "structs with arrays + compound field update",
+        src: r#"
+struct Player { name: string, hp: i64 }
+
+fn main() -> void {
+    let party = [Player { name: "ada", hp: 100 }, Player { name: "bob", hp: 80 }]
+    party[0].hp -= 30
+    party[1].hp += 10
+    print(party[0].name, party[0].hp)
+    print(party[1].name, party[1].hp)
+    let v = [1, 2, 3]
+    v[1] += 10
+    print(v[1])
+}
+"#,
+        expected: "ada 70\nbob 90\n12\n",
+    },
+    Case {
+        name: "test runner (vulcan test)",
+        src: r#"
+fn add(a: i64, b: i64) -> i64 { return a + b }
+
+fn test_add() -> void {
+    assert(add(2, 3) == 5)
+}
+
+fn test_negatives() -> void {
+    assert(add(-2, 3) == 1)
+}
+
+fn main() -> void {
+    print("main is not run in test mode")
+}
+"#,
+        expected: "running 2 test(s)\n  test_add ...\n  test_negatives ...\nall tests passed\n",
+    },
+];
 
 pub fn selftest() {
     let dir = std::env::temp_dir().join("vulcan_selftest");
     let _ = std::fs::create_dir_all(&dir);
-    let src_path = dir.join("selftest.vulcan");
-    std::fs::write(&src_path, SAMPLE).unwrap();
-    let c_path = dir.join("selftest.v.c");
-    let out_path = dir.join("selftest.vbin");
-    let tokens = crate::lexer::lex(SAMPLE);
-    let program = crate::parser::parse_program(&tokens);
-    let c_src = crate::codegen::generate(&program);
-    std::fs::write(&c_path, c_src).unwrap();
-    let status = Command::new("gcc")
-        .args(["-O3", c_path.to_str().unwrap(), "-lm", "-o", out_path.to_str().unwrap()])
-        .output()
-        .expect("gcc not found");
-    if !status.status.success() {
-        eprintln!("selftest compile failed:\n{}", String::from_utf8_lossy(&status.stderr));
+    let mut failures = 0;
+    for case in CASES {
+        let tag = case.name.replace(['(', ')', ' ', '/'], "_");
+        let src_path = dir.join(format!("{tag}.vulcan"));
+        std::fs::write(&src_path, case.src).unwrap();
+        let c_path = dir.join(format!("{tag}.v.c"));
+        let out_path = dir.join(format!("{tag}.vbin"));
+        let tokens = crate::lexer::lex(case.src);
+        let program = crate::parser::parse_program(&tokens);
+        let c_src = if case.name.starts_with("test runner") {
+            let tests: Vec<String> = program.iter().filter_map(|i| match i {
+                crate::parser::Item::Fn(f) if f.name.starts_with("test_") => Some(f.name.clone()),
+                _ => None,
+            }).collect();
+            crate::codegen::generate_test(&program, &tests)
+        } else {
+            crate::codegen::generate(&program)
+        };
+        std::fs::write(&c_path, c_src).unwrap();
+        let cc = crate::pick_cc();
+        let status = Command::new(&cc)
+            .args(["-O3", c_path.to_str().unwrap(), "-lm", "-o", out_path.to_str().unwrap()])
+            .output()
+            .expect("no C compiler found");
+        if !status.status.success() {
+            eprintln!("[FAIL] {}: compile failed:\n{}", case.name, String::from_utf8_lossy(&status.stderr));
+            failures += 1;
+            continue;
+        }
+        let run = Command::new(&out_path).output().unwrap();
+        let stdout = String::from_utf8_lossy(&run.stdout);
+        if stdout != case.expected {
+            eprintln!("[FAIL] {}: output mismatch\n--- got ---\n{stdout}--- expected ---\n{}", case.name, case.expected);
+            failures += 1;
+        } else {
+            println!("[ok] {}", case.name);
+        }
+    }
+    if failures > 0 {
+        eprintln!("{failures} selftest case(s) failed");
         std::process::exit(1);
     }
-    let run = Command::new(out_path).output().unwrap();
-    let stdout = String::from_utf8_lossy(&run.stdout);
-    if stdout != EXPECTED {
-        eprintln!("selftest output mismatch!\n--- got ---\n{stdout}\n--- expected ---\n{EXPECTED}");
-        std::process::exit(1);
-    }
-    println!("vulcan selftest: OK (compile + run + verified output)");
+    println!("vulcan selftest: {} cases passed", CASES.len());
 }

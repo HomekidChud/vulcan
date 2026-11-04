@@ -1,5 +1,8 @@
 target/
 *.vbin
 *.v.c
+*.rs.bin
 examples/fib
 examples/physics
+build/
+bench/*.c

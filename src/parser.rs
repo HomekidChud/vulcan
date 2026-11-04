@@ -12,6 +12,9 @@ pub enum Ty {
 pub enum Item {
     Fn(FnDecl),
     Struct(StructDecl),
+    Enum(EnumDecl),
+    Const(ConstDecl),
+    Import(String),
 }
 
 #[derive(Debug, Clone)]
@@ -29,12 +32,41 @@ pub struct StructDecl {
 }
 
 #[derive(Debug, Clone)]
+pub struct EnumDecl {
+    pub name: String,
+    pub variants: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ConstDecl {
+    pub name: String,
+    pub ty: Option<Ty>,
+    pub value: ConstVal,
+}
+
+#[derive(Debug, Clone)]
+pub enum ConstVal { Int(i64), Float(f64), Str(String), Bool(bool) }
+
+#[derive(Debug, Clone)]
+pub struct MatchArm {
+    pub pats: Vec<Expr>,
+    pub body: Vec<Stmt>,
+}
+
+#[derive(Debug, Clone)]
 pub enum Stmt {
     Let { name: String, ty: Option<Ty>, init: Expr },
     Assign { target: Expr, value: Expr },
+    CompoundAssign { target: Expr, op: String, value: Expr },
+    IncDec { target: Expr, delta: i64 },
     If { cond: Expr, then: Vec<Stmt>, els: Option<Vec<Stmt>> },
     While { cond: Expr, body: Vec<Stmt> },
-    For { var: String, from: Expr, to: Expr, body: Vec<Stmt> },
+    Loop { body: Vec<Stmt> },
+    For { var: String, from: Expr, to: Expr, step: Option<i64>, inclusive: bool, body: Vec<Stmt> },
+    ForIn { var: String, arr: Expr, body: Vec<Stmt> },
+    Match { scrutinee: Expr, arms: Vec<MatchArm>, default: Option<Vec<Stmt>> },
+    Defer(Vec<Stmt>),
+    Assert { cond: Expr, msg: Option<Expr>, line: usize },
     Return(Option<Expr>),
     Break,
     Continue,
@@ -42,8 +74,14 @@ pub enum Stmt {
 }
 
 #[derive(Debug, Clone)]
+pub enum IPart {
+    Lit(String),
+    E(Expr),
+}
+
+#[derive(Debug, Clone)]
 pub enum Expr {
-    Int(i64), Float(f64), Str(String), Bool(bool),
+    Int(i64), Float(f64), Str(String), Bool(bool), Char(i64),
     Ident(String),
     BinOp(Box<Expr>, String, Box<Expr>),
     Call { callee: String, args: Vec<Expr> },
@@ -52,14 +90,16 @@ pub enum Expr {
     Index(Box<Expr>, Box<Expr>),
     ArrayLit(Vec<Expr>),
     StructLit { name: String, fields: Vec<(String, Expr)> },
+    Interp(Vec<IPart>),          // f"sum is {x}"
+    As(Box<Expr>, Ty),           // x as f64
 }
 
 pub struct Parser {
-    toks: Vec<Tok>,
+    toks: Vec<(Tok, usize)>,
     pos: usize,
 }
 
-pub fn parse_program(toks: &[Tok]) -> Vec<Item> {
+pub fn parse_program(toks: &[(Tok, usize)]) -> Vec<Item> {
     let mut p = Parser { toks: toks.to_vec(), pos: 0 };
     let mut items = Vec::new();
     while p.peek() != &Tok::EOF {
@@ -69,11 +109,16 @@ pub fn parse_program(toks: &[Tok]) -> Vec<Item> {
 }
 
 impl Parser {
-    fn peek(&self) -> &Tok { &self.toks[self.pos] }
-    fn next(&mut self) -> Tok { let t = self.toks[self.pos].clone(); self.pos += 1; t }
+    fn peek(&self) -> &Tok { &self.toks[self.pos].0 }
+    fn peek_line(&self) -> usize { self.toks[self.pos].1 }
+    fn next(&mut self) -> Tok { let t = self.toks[self.pos].0.clone(); self.pos += 1; t }
+    fn err(&self, msg: String) -> ! {
+        panic!("vulcan: line {}: {}", self.peek_line(), msg);
+    }
     fn expect(&mut self, t: Tok, what: &str) {
         if self.peek() != &t {
-            panic!("parse error: expected {what}, got {:?} (near token #{})", t, self.pos);
+            let got = self.peek().clone();
+            self.err(format!("expected {what} ({t:?}), got {got:?}"));
         }
         self.pos += 1;
     }
@@ -83,7 +128,7 @@ impl Parser {
     fn ident(&mut self, what: &str) -> String {
         match self.next() {
             Tok::Ident(s) => s,
-            other => panic!("parse error: expected {what}, got {other:?}"),
+            other => self.err(format!("expected {what}, got {other:?}")),
         }
     }
 
@@ -99,11 +144,48 @@ impl Parser {
                 self.expect(Tok::RBracket, "] in array type");
                 Ty::Array(Box::new(inner))
             }
-            other => panic!("parse error: expected type, got {other:?}"),
+            other => self.err(format!("expected type, got {other:?}")),
         }
     }
 
     fn parse_item(&mut self) -> Item {
+        let _ = self.eat(&Tok::KwPub); // visibility is permissive in the single-compilation-unit model
+        if self.eat(&Tok::KwImport) {
+            let spec = match self.next() {
+                Tok::Ident(s) => s,
+                Tok::Str(s) => s,
+                other => self.err(format!("expected module name after import, got {other:?}")),
+            };
+            return Item::Import(spec);
+        }
+        if self.eat(&Tok::KwConst) {
+            let name = self.ident("const name");
+            let ty = if self.eat(&Tok::Colon) {
+                Some(self.parse_ty())
+            } else {
+                None
+            };
+            self.expect(Tok::Eq, "= in const");
+            let value = match self.next() {
+                Tok::Int(v) => ConstVal::Int(v),
+                Tok::Float(v) => ConstVal::Float(v),
+                Tok::Str(s) => ConstVal::Str(s),
+                Tok::KwTrue => ConstVal::Bool(true),
+                Tok::KwFalse => ConstVal::Bool(false),
+                other => self.err(format!("const value must be a literal, got {other:?}")),
+            };
+            return Item::Const(ConstDecl { name, ty, value });
+        }
+        if self.eat(&Tok::KwEnum) {
+            let name = self.ident("enum name");
+            self.expect(Tok::LBrace, "{ to open enum");
+            let mut variants = Vec::new();
+            while !self.eat(&Tok::RBrace) {
+                variants.push(self.ident("enum variant"));
+                self.eat(&Tok::Comma);
+            }
+            return Item::Enum(EnumDecl { name, variants });
+        }
         if self.eat(&Tok::KwStruct) {
             let name = self.ident("struct name");
             self.expect(Tok::LBrace, "{");
@@ -117,7 +199,7 @@ impl Parser {
             }
             return Item::Struct(StructDecl { name, fields });
         }
-        self.expect(Tok::KwFn, "fn");
+        self.expect(Tok::KwFn, "fn (or struct/enum/const/import) at top level");
         let name = self.ident("fn name");
         self.expect(Tok::LParen, "(");
         let mut params = Vec::new();
@@ -128,8 +210,11 @@ impl Parser {
             params.push((pname, pty));
             self.eat(&Tok::Comma);
         }
-        self.expect(Tok::Arrow, "'->' before return type");
-        let ret = self.parse_ty();
+        let ret = if self.eat(&Tok::Arrow) {
+            self.parse_ty()
+        } else {
+            Ty::Void
+        };
         self.expect(Tok::LBrace, "{ to open fn body");
         let body = self.parse_block();
         Item::Fn(FnDecl { name, params, ret, body })
@@ -138,6 +223,7 @@ impl Parser {
     fn parse_block(&mut self) -> Vec<Stmt> {
         let mut stmts = Vec::new();
         while !self.eat(&Tok::RBrace) {
+            if self.peek() == &Tok::EOF { self.err("unexpected end of file inside block (missing })".into()); }
             stmts.push(self.parse_stmt());
         }
         stmts
@@ -154,29 +240,7 @@ impl Parser {
                 self.eat(&Tok::Semi);
                 Stmt::Let { name, ty, init }
             }
-            Tok::KwIf => {
-                self.next();
-                let cond = self.parse_expr();
-                self.expect(Tok::LBrace, "{ after if");
-                let then = self.parse_block();
-                let els = if self.eat(&Tok::KwElse) {
-                    if self.eat(&Tok::KwIf) {
-                        // else if — desugar into nested if
-                        let cond2 = self.parse_expr();
-                        self.expect(Tok::LBrace, "{ after else if");
-                        let then2 = self.parse_block();
-                        let els2 = if self.eat(&Tok::KwElse) {
-                            self.expect(Tok::LBrace, "{ after else");
-                            Some(self.parse_block())
-                        } else { None };
-                        Some(vec![Stmt::If { cond: cond2, then: then2, els: els2 }])
-                    } else {
-                        self.expect(Tok::LBrace, "{ after else");
-                        Some(self.parse_block())
-                    }
-                } else { None };
-                Stmt::If { cond, then, els }
-            }
+            Tok::KwIf => self.parse_if(),
             Tok::KwWhile => {
                 self.next();
                 let cond = self.parse_expr();
@@ -184,16 +248,76 @@ impl Parser {
                 let body = self.parse_block();
                 Stmt::While { cond, body }
             }
+            Tok::KwLoop => {
+                self.next();
+                self.expect(Tok::LBrace, "{ after loop");
+                let body = self.parse_block();
+                Stmt::Loop { body }
+            }
             Tok::KwFor => {
                 self.next();
                 let var = self.ident("loop var");
                 self.expect(Tok::KwIn, "in");
-                let from = self.parse_expr();
-                self.expect(Tok::ColonColon, ".. in for");
-                let to = self.parse_expr();
-                self.expect(Tok::LBrace, "{ after for");
-                let body = self.parse_block();
-                Stmt::For { var, from, to, body }
+                let subject = self.parse_expr();
+                if self.peek() == &Tok::DotDot || self.peek() == &Tok::DotDotEq {
+                    let inclusive = self.next() == Tok::DotDotEq;
+                    let to = self.parse_expr();
+                    let step = if self.eat(&Tok::KwBy) {
+                        Some(match self.next() {
+                            Tok::Minus => match self.next() {
+                                Tok::Int(v) => -v,
+                                other => self.err(format!("step after `by` must be an integer literal, got {other:?}")),
+                            },
+                            Tok::Int(v) => v,
+                            other => self.err(format!("step after `by` must be an integer literal, got {other:?}")),
+                        })
+                    } else { None };
+                    self.expect(Tok::LBrace, "{ after for");
+                    let body = self.parse_block();
+                    Stmt::For { var, from: subject, to, step, inclusive, body }
+                } else {
+                    self.expect(Tok::LBrace, "{ after `for x in <array>`");
+                    let body = self.parse_block();
+                    Stmt::ForIn { var, arr: subject, body }
+                }
+            }
+            Tok::KwMatch => {
+                self.next();
+                let scrutinee = self.parse_expr();
+                self.expect(Tok::LBrace, "{ to open match");
+                let mut arms: Vec<MatchArm> = Vec::new();
+                let mut default = None;
+                while !self.eat(&Tok::RBrace) {
+                    if self.peek() == &Tok::KwElse {
+                        self.next();
+                        self.expect(Tok::LBrace, "{ after else in match");
+                        default = Some(self.parse_block());
+                    } else {
+                        self.expect(Tok::KwWhen, "when (or else) in match");
+                        let mut pats = vec![self.parse_expr()];
+                        while self.eat(&Tok::Comma) { pats.push(self.parse_expr()); }
+                        self.expect(Tok::LBrace, "{ after match arm patterns");
+                        let body = self.parse_block();
+                        arms.push(MatchArm { pats, body });
+                    }
+                }
+                if arms.is_empty() { self.err("match needs at least one `when` arm".into()); }
+                Stmt::Match { scrutinee, arms, default }
+            }
+            Tok::KwDefer => {
+                self.next();
+                self.expect(Tok::LBrace, "{ after defer");
+                Stmt::Defer(self.parse_block())
+            }
+            Tok::KwAssert => {
+                let line = self.peek_line();
+                self.next();
+                self.expect(Tok::LParen, "( after assert");
+                let cond = self.parse_expr();
+                let msg = if self.eat(&Tok::Comma) { Some(self.parse_expr()) } else { None };
+                self.expect(Tok::RParen, ") to close assert");
+                self.eat(&Tok::Semi);
+                Stmt::Assert { cond, msg, line }
             }
             Tok::KwReturn => {
                 self.next();
@@ -209,13 +333,72 @@ impl Parser {
                 if self.eat(&Tok::Eq) {
                     let value = self.parse_expr();
                     self.eat(&Tok::Semi);
-                    Stmt::Assign { target: e, value }
-                } else {
-                    self.eat(&Tok::Semi);
-                    Stmt::Expr(e)
+                    return Stmt::Assign { target: e, value };
                 }
+                if let Some(op) = self.compound_op() {
+                    let value = self.parse_expr();
+                    self.eat(&Tok::Semi);
+                    return Stmt::CompoundAssign { target: e, op, value };
+                }
+                if self.eat(&Tok::PlusPlus) { self.eat(&Tok::Semi); return Stmt::IncDec { target: e, delta: 1 }; }
+                if self.eat(&Tok::MinusMinus) { self.eat(&Tok::Semi); return Stmt::IncDec { target: e, delta: -1 }; }
+                self.eat(&Tok::Semi);
+                Stmt::Expr(e)
             }
         }
+    }
+
+    fn compound_op(&mut self) -> Option<String> {
+        let op = match self.peek() {
+            Tok::PlusEq => "+=", Tok::MinusEq => "-=",
+            Tok::StarEq => "*=", Tok::SlashEq => "/=", Tok::PercentEq => "%=",
+            Tok::AmpEq => "&=", Tok::PipeEq => "|=", Tok::CaretEq => "^=",
+            Tok::ShlEq => "<<=", Tok::ShrEq => ">>=",
+            _ => return None,
+        };
+        self.pos += 1;
+        Some(op.into())
+    }
+
+    fn parse_if(&mut self) -> Stmt {
+        self.expect(Tok::KwIf, "if");
+        let cond = self.parse_expr();
+        self.expect(Tok::LBrace, "{ after if");
+        let then = self.parse_block();
+        let els = if self.eat(&Tok::KwElse) {
+            if self.peek() == &Tok::KwIf {
+                Some(vec![self.parse_if()])
+            } else if self.peek() == &Tok::KwElif {
+                Some(vec![self.parse_elif()])
+            } else {
+                self.expect(Tok::LBrace, "{ after else");
+                Some(self.parse_block())
+            }
+        } else if self.peek() == &Tok::KwElif {
+            Some(vec![self.parse_elif()])
+        } else { None };
+        Stmt::If { cond, then, els }
+    }
+
+    // `elif` continuing an if-chain (Python-style; an `else` before it is optional).
+    fn parse_elif(&mut self) -> Stmt {
+        self.expect(Tok::KwElif, "elif");
+        let cond = self.parse_expr();
+        self.expect(Tok::LBrace, "{ after elif");
+        let then = self.parse_block();
+        let els = if self.eat(&Tok::KwElse) {
+            if self.peek() == &Tok::KwIf {
+                Some(vec![self.parse_if()])
+            } else if self.peek() == &Tok::KwElif {
+                Some(vec![self.parse_elif()])
+            } else {
+                self.expect(Tok::LBrace, "{ after else");
+                Some(self.parse_block())
+            }
+        } else if self.peek() == &Tok::KwElif {
+            Some(vec![self.parse_elif()])
+        } else { None };
+        Stmt::If { cond, then, els }
     }
 
     fn parse_expr(&mut self) -> Expr {
@@ -239,12 +422,52 @@ impl Parser {
         lhs
     }
     fn parse_cmp(&mut self) -> Expr {
-        let mut lhs = self.parse_add();
+        let mut lhs = self.parse_bitor();
         loop {
             let op = match self.peek() {
                 Tok::EqEq => "==", Tok::Ne => "!=",
                 Tok::Lt => "<", Tok::Gt => ">",
                 Tok::Le => "<=", Tok::Ge => ">=",
+                _ => break,
+            };
+            self.next();
+            let rhs = self.parse_bitor();
+            lhs = Expr::BinOp(Box::new(lhs), op.into(), Box::new(rhs));
+        }
+        lhs
+    }
+    fn parse_bitor(&mut self) -> Expr {
+        let mut lhs = self.parse_bitxor();
+        while self.peek() == &Tok::Pipe {
+            self.next();
+            let rhs = self.parse_bitxor();
+            lhs = Expr::BinOp(Box::new(lhs), "|".into(), Box::new(rhs));
+        }
+        lhs
+    }
+    fn parse_bitxor(&mut self) -> Expr {
+        let mut lhs = self.parse_bitand();
+        while self.peek() == &Tok::Caret {
+            self.next();
+            let rhs = self.parse_bitand();
+            lhs = Expr::BinOp(Box::new(lhs), "^".into(), Box::new(rhs));
+        }
+        lhs
+    }
+    fn parse_bitand(&mut self) -> Expr {
+        let mut lhs = self.parse_shift();
+        while self.peek() == &Tok::Amp {
+            self.next();
+            let rhs = self.parse_shift();
+            lhs = Expr::BinOp(Box::new(lhs), "&".into(), Box::new(rhs));
+        }
+        lhs
+    }
+    fn parse_shift(&mut self) -> Expr {
+        let mut lhs = self.parse_add();
+        loop {
+            let op = match self.peek() {
+                Tok::Shl => "<<", Tok::Shr => ">>",
                 _ => break,
             };
             self.next();
@@ -286,14 +509,24 @@ impl Parser {
         }
         if self.eat(&Tok::Minus) {
             let e = self.parse_unary();
-            return Expr::BinOp(Box::new(Expr::Int(0)), "-".into(), Box::new(e));
+            return Expr::BinOp(Box::new(Expr::Int(0)), "-u".into(), Box::new(e));
         }
-        self.parse_postfix()
+        if self.eat(&Tok::Tilde) {
+            let e = self.parse_unary();
+            return Expr::BinOp(Box::new(Expr::Int(0)), "~".into(), Box::new(e));
+        }
+        let e = self.parse_postfix();
+        if self.eat(&Tok::KwAs) {
+            let ty = self.parse_ty();
+            return Expr::As(Box::new(e), ty);
+        }
+        e
     }
     fn parse_postfix(&mut self) -> Expr {
         let mut e = self.parse_atom();
         loop {
-            if self.eat(&Tok::Dot) {
+            if self.eat(&Tok::Dot) || (self.peek() == &Tok::ColonColon) {
+                if self.peek() == &Tok::ColonColon { self.pos += 1; }
                 let name = self.ident("field or method");
                 if self.eat(&Tok::LParen) {
                     let mut args = Vec::new();
@@ -318,8 +551,10 @@ impl Parser {
     fn parse_atom(&mut self) -> Expr {
         match self.next() {
             Tok::Int(v) => Expr::Int(v),
+            Tok::Char(v) => Expr::Char(v),
             Tok::Float(v) => Expr::Float(v),
             Tok::Str(s) => Expr::Str(s),
+            Tok::FStr(raw) => self.parse_interp(&raw),
             Tok::KwTrue => Expr::Bool(true),
             Tok::KwFalse => Expr::Bool(false),
             Tok::LParen => {
@@ -347,8 +582,20 @@ impl Parser {
                     }
                     return Expr::Call { callee: name, args };
                 }
-                if self.eat(&Tok::LBrace) {
+                if self.peek() == &Tok::LBrace {
                     // struct literal  Name { field: val, ... }
+                    // Only capitalized names are treated as struct literals, and only when
+                    // the brace is followed by `field:` (or `}`) — this keeps
+                    // `for y in 0 .. H { ... }` / `match C { ... }` unambiguous.
+                    let looks_like_literal = self.toks.get(self.pos + 1).map(|t| match &t.0 {
+                        Tok::RBrace => true,
+                        Tok::Ident(_) => matches!(self.toks.get(self.pos + 2).map(|t| &t.0), Some(Tok::Colon)),
+                        _ => false,
+                    }).unwrap_or(false);
+                    if name.chars().next().map(|c| c.is_uppercase()) != Some(true) || !looks_like_literal {
+                        return Expr::Ident(name);
+                    }
+                    self.pos += 1;
                     let mut fields = Vec::new();
                     while !self.eat(&Tok::RBrace) {
                         let fname = self.ident("struct field");
@@ -357,11 +604,52 @@ impl Parser {
                         self.eat(&Tok::Comma);
                     }
                     return Expr::StructLit { name, fields };
-                    // trailing comma handled by eat(Comma) + RBrace check below
                 }
                 Expr::Ident(name)
             }
-            other => panic!("parse error: unexpected token {other:?}"),
+            other => self.err(format!("unexpected token {other:?}")),
         }
+    }
+
+    // f-string: split raw content into literal / {expr} parts.
+    fn parse_interp(&mut self, raw: &str) -> Expr {
+        let chars: Vec<char> = raw.chars().collect();
+        let mut parts: Vec<IPart> = Vec::new();
+        let mut lit = String::new();
+        let mut i = 0;
+        while i < chars.len() {
+            if chars[i] == '{' {
+                if i + 1 < chars.len() && chars[i + 1] == '{' {
+                    lit.push('{');
+                    i += 2;
+                    continue;
+                }
+                let mut depth = 0i64;
+                let mut j = i;
+                while j < chars.len() {
+                    if chars[j] == '{' { depth += 1; }
+                    else if chars[j] == '}' {
+                        depth -= 1;
+                        if depth == 0 { break; }
+                    }
+                    j += 1;
+                }
+                if j >= chars.len() { self.err("unbalanced {{ in f-string".into()); }
+                let inner: String = chars[i + 1..j].iter().collect();
+                if inner.trim().is_empty() { self.err("empty {} in f-string (use a positional print, or put an expression inside: {x})".into()); }
+                if !lit.is_empty() { parts.push(IPart::Lit(std::mem::take(&mut lit))); }
+                let toks = crate::lexer::lex(&inner);
+                let mut p = Parser { toks, pos: 0 };
+                let e = p.parse_expr();
+                if p.peek() != &Tok::EOF { p.err(format!("unexpected token after f-string expression")); }
+                parts.push(IPart::E(e));
+                i = j + 1;
+            } else {
+                lit.push(chars[i]);
+                i += 1;
+            }
+        }
+        if !lit.is_empty() { parts.push(IPart::Lit(lit)); }
+        Expr::Interp(parts)
     }
 }
