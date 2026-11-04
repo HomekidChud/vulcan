@@ -2,12 +2,16 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#000000">
 <title>__TITLE__</title>
 <style>
   :root { color-scheme: dark; }
   html, body { margin: 0; height: 100%; background: #000; overflow: hidden; font-family: ui-monospace, Menlo, Consolas, monospace; }
-  canvas { position: fixed; left: 0; top: 0; display: block; }
+  html, body { overscroll-behavior: none; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent; }
+  canvas { position: fixed; left: 0; top: 0; display: block; touch-action: none; }
   #hud { pointer-events: none; }
   #bar { position: fixed; right: 10px; top: 10px; z-index: 5; display: flex; gap: 8px; align-items: center; font-size: 12px; color: #cfd6e4; }
   body.locked #bar { display: none; }
@@ -21,6 +25,35 @@
   #netpanel button { margin-top: 10px; background: #2f6bff; color: #fff; border: 0; border-radius: 6px; padding: 8px 16px; cursor: pointer; font: inherit; }
   #netpanel .row { display: flex; gap: 8px; }
   #vc-msg { margin: 6px 0; color: #ffd27a; min-height: 1.4em; }
+
+  #bar { flex-wrap: wrap; justify-content: flex-end; max-width: calc(100vw - 20px); }
+  @media (max-width: 640px) { #bar { font-size: 11px; right: 6px; top: 6px; gap: 6px; } #bar button { padding: 5px 8px; } #importmsg { display: none; } }
+  #fsbtn { display: none; }
+  body.touch #fsbtn { display: inline-block; }
+  /* ---- touch controls ---- */
+  #touch { display: none; position: fixed; inset: 0; z-index: 4; pointer-events: none; --uik: 1; }
+  body.touchplay #touch { display: block; }
+  #touch .tb { position: absolute; pointer-events: auto; touch-action: none; display: flex; align-items: center; justify-content: center;
+    border-radius: 50%; background: rgba(20,24,34,.45); border: 2px solid rgba(255,255,255,.35); color: #fff; font: bold 13px ui-monospace, Menlo, monospace;
+    text-shadow: 0 1px 2px #000; -webkit-backdrop-filter: blur(2px); backdrop-filter: blur(2px); }
+  #touch .tb.on { background: rgba(120,170,255,.6); border-color: #fff; }
+  #touch .sq { border-radius: 10px; }
+  #tb-hit { right: calc(20px + env(safe-area-inset-right)); bottom: calc(24px + env(safe-area-inset-bottom)); width: 88px; height: 88px; background: rgba(220,70,70,.45); font-size: 15px; }
+  #tb-jump { right: calc(30px + env(safe-area-inset-right)); bottom: calc(126px + env(safe-area-inset-bottom)); width: 68px; height: 68px; }
+  #tb-place { right: calc(124px + env(safe-area-inset-right)); bottom: calc(58px + env(safe-area-inset-bottom)); width: 62px; height: 62px; }
+  #tb-menu, #tb-inv, #tb-fx { top: calc(8px + env(safe-area-inset-top)); width: 52px; height: 34px; font-size: 12px; }
+  #tb-menu { right: calc(8px + env(safe-area-inset-right)); }
+  #tb-inv { right: calc(68px + env(safe-area-inset-right)); }
+  #tb-fx { right: calc(128px + env(safe-area-inset-right)); }
+  #tb-prev, #tb-next { bottom: calc(18px * var(--uik) + env(safe-area-inset-bottom)); width: 42px; height: 42px; font-size: 18px; }
+  #tb-prev { left: calc(50% - 266px * var(--uik) - 48px); }
+  #tb-next { left: calc(50% + 266px * var(--uik) + 6px); }
+  #stick { display: none; position: absolute; width: 0; height: 0; pointer-events: none; }
+  #stick::before { content: ""; position: absolute; left: -56px; top: -56px; width: 108px; height: 108px; border-radius: 50%; border: 2px solid rgba(255,255,255,.4); background: rgba(255,255,255,.08); }
+  #knob { position: absolute; left: -24px; top: -24px; width: 48px; height: 48px; border-radius: 50%; background: rgba(255,255,255,.45); border: 2px solid rgba(255,255,255,.8); }
+  #stickhint { position: absolute; left: calc(40px + env(safe-area-inset-left)); bottom: calc(40px + env(safe-area-inset-bottom)); width: 100px; height: 100px; border-radius: 50%; border: 2px dashed rgba(255,255,255,.22); display: flex; align-items: center; justify-content: center; color: rgba(255,255,255,.35); font-size: 11px; pointer-events: none; }
+  #rotate { display: none; position: fixed; inset: 0; z-index: 30; background: rgba(0,0,0,.88); color: #fff; align-items: center; justify-content: center; text-align: center; font-size: 16px; padding: 30px; }
+  @media (orientation: portrait) { body.touchplay #rotate { display: flex; } }
   #err { display: none; position: fixed; left: 10px; bottom: 10px; right: 10px; z-index: 20; background: rgba(120,20,20,.92); color: #fff; padding: 10px 14px; border-radius: 8px; font: 12px ui-monospace, monospace; white-space: pre-wrap; max-height: 40vh; overflow: auto; }
 </style>
 </head>
@@ -30,8 +63,22 @@
 <div id="bar"><span id="importmsg"></span>
   <button id="importbtn" title="Import .vmod mods, .modpack lists or .vshader shader packs">Import mods / shader packs</button>
   <button id="clearbtn">Clear imports</button>
+  <button id="fsbtn">Fullscreen</button>
   <input id="importfile" type="file" multiple accept=".vmod,.vshader,.modpack,.txt" style="display:none">
 </div>
+<div id="touch">
+  <div id="stickhint">move</div>
+  <div id="stick"><div id="knob"></div></div>
+  <div class="tb" id="tb-hit">HIT</div>
+  <div class="tb" id="tb-jump">JUMP</div>
+  <div class="tb" id="tb-place">PLACE</div>
+  <div class="tb sq" id="tb-fx">FX</div>
+  <div class="tb sq" id="tb-inv">Blocks</div>
+  <div class="tb sq" id="tb-menu">Menu</div>
+  <div class="tb" id="tb-prev">&lt;</div>
+  <div class="tb" id="tb-next">&gt;</div>
+</div>
+<div id="rotate">Rotate your device to landscape to play.</div>
 <div id="netpanel">
   <h3 id="vc-title">1v1</h3>
   <div id="vc-msg"></div>

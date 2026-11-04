@@ -121,7 +121,7 @@
 
   // ------------------------------------------------------------------ state
   let gl = null, glc = null, hudc = null, hctx = null;
-  let W = 1, Hh = 1, dpr = 1, renderScale = 1;
+  let W = 1, Hh = 1, dpr = 1, renderScale = 1, uiK = 1;
   const meshes = new Map();
   const uniformsV = new Map();           // name -> Float32Array (game-set uniforms)
   const progs = new Map();               // slot -> {prog, locs, kind, scale}
@@ -164,7 +164,9 @@
     const hd = Math.min(window.devicePixelRatio || 1, 2);
     hudc.width = Math.floor(cw * hd); hudc.height = Math.floor(ch * hd);
     hudc.style.width = cw + "px"; hudc.style.height = ch + "px";
-    hudc._k = hd; hudc._cw = cw; hudc._ch = ch;
+    uiK = Math.max(0.5, Math.min(1, cw / 560, ch / 470));
+    hudc._k = hd; hudc._cw = cw / uiK; hudc._ch = ch / uiK; hudc._rw = cw; hudc._rh = ch;
+    layoutTouch();
   }
   H.gfx_size_w = () => hudc ? hudc._cw : window.innerWidth;
   H.gfx_size_h = () => hudc ? hudc._ch : window.innerHeight;
@@ -173,7 +175,7 @@
   H.gfx_info = () => { const e = gl.getExtension("WEBGL_debug_renderer_info"); return (e ? gl.getParameter(e.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER)) + (hasHalf ? " (HDR)" : " (LDR)"); };
   H.gfx_stats = () => stats;
   H.gfx_fullscreen = () => { if (document.fullscreenElement) document.exitFullscreen(); else document.documentElement.requestFullscreen && document.documentElement.requestFullscreen(); };
-  H.gfx_chrome = (on) => { const b = $("bar"); if (b) b.style.display = on ? "" : "none"; };
+  H.gfx_chrome = (on) => { const b = $("bar"); if (b) b.style.display = on ? "" : "none"; if (isTouch) { const was = document.body.classList.contains("touchplay"); if (was === on) setTouchPlay(!on); } };
 
   // ------------------------------------------------------------------ shaders
   const UNIFORMS_DECL = `
@@ -528,7 +530,7 @@ uniform sampler2D uPass0; uniform sampler2D uPass1; uniform sampler2D uPass2; un
   const rgba = (r, g, b, a) => `rgba(${(r * 255) | 0},${(g * 255) | 0},${(b * 255) | 0},${a})`;
   function flushHud() {
     const k = hudc._k;
-    hctx.setTransform(k, 0, 0, k, 0, 0);
+    hctx.setTransform(k * uiK, 0, 0, k * uiK, 0, 0);
     hctx.clearRect(0, 0, hudc._cw, hudc._ch);
     hctx.textBaseline = "top";
     for (const c of hudCmds) {
@@ -551,7 +553,7 @@ uniform sampler2D uPass0; uniform sampler2D uPass1; uniform sampler2D uPass2; un
     requestAnimationFrame((t) => {
       const dt = Math.min(0.1, Math.max(0.0005, (t - lastT) / 1000));
       lastT = t; frameT += dt;
-      document.body.classList.toggle("locked", !!document.pointerLockElement);
+      document.body.classList.toggle("locked", !!document.pointerLockElement || (isTouch && wantLock));
       resolve(dt);
     });
   });
@@ -574,7 +576,87 @@ uniform sampler2D uPass0; uniform sampler2D uPass1; uniform sampler2D uPass2; un
     const f = /^F(\d+)$/.exec(c); if (f) return 111 + parseInt(f[1]);
     return 0;
   }
+
+  // ------------------------------------------------------------------ touch controls
+  const isTouch = (typeof window !== "undefined") && (("ontouchstart" in window) || (navigator.maxTouchPoints > 0)) && window.matchMedia && window.matchMedia("(pointer: coarse)").matches;
+  let touchEl = null, stickEl = null, knobEl = null, menuArm = 0;
+  const tpt = new Map();                 // pointerId -> {role, sx, sy, lx, ly, t}
+  const STICK_R = 56;
+  function setStick(dx, dy) {
+    const m = Math.hypot(dx, dy) || 1, r = Math.min(1, m / STICK_R);
+    const nx = dx / m * r, ny = dy / m * r;
+    const set = (k, on) => { if (on) keys.add(k); else keys.delete(k); };
+    set(87, ny < -0.28); set(83, ny > 0.28); set(65, nx < -0.28); set(68, nx > 0.28);
+    set(17, ny < -0.9);                                   // push all the way forward to sprint
+    if (knobEl) knobEl.style.transform = "translate(" + (nx * STICK_R) + "px," + (ny * STICK_R) + "px)";
+  }
+  function clearStick() { for (const k of [87, 83, 65, 68, 17]) keys.delete(k); if (knobEl) knobEl.style.transform = ""; if (stickEl) stickEl.style.display = "none"; }
+  function setTouchPlay(on, keepOverlay) {
+    if (!keepOverlay) document.body.classList.toggle("touchplay", !!(isTouch && on));
+    if (!on) { clearStick(); tpt.clear(); held[0] = held[1] = false; keys.delete(32); }
+  }
+  function layoutTouch() { const t = $("touch"); if (t) t.style.setProperty("--uik", uiK); }
+  function bindBtn(id, down, up) {
+    const el = $(id); if (!el) return;
+    el.addEventListener("pointerdown", (e) => { e.preventDefault(); e.stopPropagation(); audioInit(); el.setPointerCapture && el.setPointerCapture(e.pointerId); el.classList.add("on"); down(); });
+    const end = (e) => { e.preventDefault(); el.classList.remove("on"); if (up) up(); };
+    el.addEventListener("pointerup", end); el.addEventListener("pointercancel", end);
+  }
+  function initTouch() {
+    if (!isTouch) return;
+    document.body.classList.add("touch");
+    touchEl = $("touch"); stickEl = $("stick"); knobEl = $("knob");
+    glc.addEventListener("pointerdown", (e) => {
+      if (e.pointerType === "mouse") return;
+      e.preventDefault(); audioInit();
+      glc.setPointerCapture && glc.setPointerCapture(e.pointerId);
+      if (!(wantLock)) {                                  // menu / palette: behave like a mouse
+        mx = e.clientX / uiK; my = e.clientY / uiK; clicks[0]++; held[0] = true;
+        tpt.set(e.pointerId, { role: "ui" }); return;
+      }
+      const left = e.clientX < window.innerWidth * 0.42;
+      const hasStick = [...tpt.values()].some((p) => p.role === "stick");
+      if (left && !hasStick) {
+        tpt.set(e.pointerId, { role: "stick", sx: e.clientX, sy: e.clientY });
+        stickEl.style.display = "block"; stickEl.style.left = e.clientX + "px"; stickEl.style.top = e.clientY + "px";
+        setStick(0, 0);
+      } else tpt.set(e.pointerId, { role: "look", lx: e.clientX, ly: e.clientY });
+    });
+    glc.addEventListener("pointermove", (e) => {
+      const p = tpt.get(e.pointerId); if (!p) return;
+      e.preventDefault();
+      if (p.role === "ui") { mx = e.clientX / uiK; my = e.clientY / uiK; }
+      else if (p.role === "stick") setStick(e.clientX - p.sx, e.clientY - p.sy);
+      else { mdx += (e.clientX - p.lx) * 1.9; mdy += (e.clientY - p.ly) * 1.9; p.lx = e.clientX; p.ly = e.clientY; }
+    });
+    const up = (e) => {
+      const p = tpt.get(e.pointerId); if (!p) return;
+      tpt.delete(e.pointerId);
+      if (p.role === "ui") held[0] = false;
+      else if (p.role === "stick") clearStick();
+    };
+    glc.addEventListener("pointerup", up); glc.addEventListener("pointercancel", up);
+    bindBtn("tb-jump", () => keys.add(32), () => keys.delete(32));
+    bindBtn("tb-hit", () => { clicks[0]++; held[0] = true; }, () => { held[0] = false; });
+    bindBtn("tb-place", () => { clicks[1]++; }, null);
+    bindBtn("tb-prev", () => { wheel -= 1; }, null);
+    bindBtn("tb-next", () => { wheel += 1; }, null);
+    bindBtn("tb-inv", () => { keysPressed.add(69); }, null);
+    bindBtn("tb-fx", () => { keysPressed.add(117); }, null);
+    bindBtn("tb-menu", () => {
+      const now = performance.now();
+      if (now < menuArm) { menuArm = 0; $("tb-menu").textContent = "Menu"; keysPressed.add(81); }
+      else { menuArm = now + 2200; $("tb-menu").textContent = "Sure?"; setTimeout(() => { if (performance.now() >= menuArm) $("tb-menu").textContent = "Menu"; }, 2300); }
+    }, null);
+    const fs = $("fsbtn");
+    if (fs) {
+      if (document.documentElement.requestFullscreen) fs.addEventListener("click", () => { H.gfx_fullscreen(); try { screen.orientation.lock("landscape").catch(() => {}); } catch (e) {} });
+      else fs.style.display = "none";
+    }
+  }
+
   function initInput() {
+    initTouch();
     window.addEventListener("keydown", (e) => {
       if (e.target && (e.target.tagName === "TEXTAREA" || e.target.tagName === "INPUT")) return;
       const k = keyCode(e); if (!k) return;
@@ -586,13 +668,16 @@ uniform sampler2D uPass0; uniform sampler2D uPass1; uniform sampler2D uPass2; un
     window.addEventListener("keyup", (e) => { const k = keyCode(e); keys.delete(k); });
     window.addEventListener("blur", () => { keys.clear(); held[0] = held[1] = held[2] = false; });
     glc.addEventListener("mousedown", (e) => {
+      if (isTouch && e.sourceCapabilities && e.sourceCapabilities.firesTouchEvents) return;
+      mx = e.clientX / uiK; my = e.clientY / uiK;
       audioInit();
       if (wantLock && !document.pointerLockElement) { glc.requestPointerLock && glc.requestPointerLock(); }
       if (e.button < 3) { clicks[e.button]++; held[e.button] = true; }
     });
     window.addEventListener("mouseup", (e) => { if (e.button < 3) held[e.button] = false; });
-    window.addEventListener("mousemove", (e) => {
-      mx = e.clientX; my = e.clientY;
+    window.addEventListener("pointermove", (e) => {
+      if (e.pointerType === "touch") return;
+      mx = e.clientX / uiK; my = e.clientY / uiK;
       if (document.pointerLockElement) { mdx += e.movementX; mdy += e.movementY; }
     });
     window.addEventListener("wheel", (e) => { wheel += Math.sign(e.deltaY); }, { passive: true });
@@ -607,10 +692,12 @@ uniform sampler2D uPass0; uniform sampler2D uPass1; uniform sampler2D uPass2; un
   H.gfx_click = (b) => clicks[b] || 0;
   H.gfx_mouse_held = (b) => !!held[b];
   H.gfx_wheel = () => { const v = wheel; wheel = 0; return v; };
-  H.gfx_locked = () => !!document.pointerLockElement;
+  H.gfx_locked = () => !!document.pointerLockElement || (isTouch && wantLock);
+  H.gfx_touch = () => isTouch;
   H.gfx_set_lock = (on) => {
     wantLock = on;
-    if (on && !document.pointerLockElement) { try { const p = glc.requestPointerLock(); if (p && p.catch) p.catch(() => {}); } catch (e) { /* needs gesture */ } }
+    if (!on) setTouchPlay(false, true);
+    if (on && !isTouch && !document.pointerLockElement) { try { const p = glc.requestPointerLock(); if (p && p.catch) p.catch(() => {}); } catch (e) { /* needs gesture */ } }
     if (!on && document.pointerLockElement) document.exitPointerLock();
   };
 

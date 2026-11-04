@@ -166,7 +166,11 @@ fn draw_palette(g: Game) -> i64 {
     let H = sh_()
     hud_rect(0.0, 0.0, W, H, 0.0, 0.0, 0.0, 0.62)
     ctext(W / 2.0, 28.0, 26.0, 1.0, 1.0, 1.0, 1.0, "Blocks")
-    ctext(W / 2.0, 62.0, 13.0, 0.8, 0.85, 1.0, 1.0, f"Click an item to put it in hotbar slot {g.sel + 1}.  E or Esc to close.")
+    if gfx_touch() {
+        ctext(W / 2.0, 62.0, 13.0, 0.8, 0.85, 1.0, 1.0, f"Tap an item to put it in hotbar slot {g.sel + 1}.  Tap Blocks to close.")
+    } else {
+        ctext(W / 2.0, 62.0, 13.0, 0.8, 0.85, 1.0, 1.0, f"Click an item to put it in hotbar slot {g.sel + 1}.  E or Esc to close.")
+    }
     let cell = 56.0
     let cols = floori((W - 80.0) / (cell + 8.0))
     if cols > 14 { cols = 14 }

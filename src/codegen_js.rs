@@ -205,7 +205,7 @@ const HOST_BUILTINS: &[(&str, &str, char)] = &[
     ("gfx_mouse_dx", "", 'f'), ("gfx_mouse_dy", "", 'f'),
     ("gfx_mouse_x", "", 'f'), ("gfx_mouse_y", "", 'f'),
     ("gfx_click", "i", 'i'), ("gfx_mouse_held", "i", 'b'), ("gfx_wheel", "", 'i'),
-    ("gfx_locked", "", 'b'), ("gfx_set_lock", "b", 'v'), ("gfx_fullscreen", "", 'v'), ("gfx_chrome", "b", 'v'),
+    ("gfx_locked", "", 'b'), ("gfx_set_lock", "b", 'v'), ("gfx_fullscreen", "", 'v'), ("gfx_chrome", "b", 'v'), ("gfx_touch", "", 'b'),
     ("hud_rect", "ffffffff", 'v'), ("hud_text", "fffffffs", 'v'), ("hud_text_w", "fs", 'f'),
     ("net_start", "s", 'v'), ("net_state", "", 'i'), ("net_send", "s", 'v'), ("net_recv", "", 's'),
     ("net_ui", "b", 'v'), ("net_stop", "", 'v'),

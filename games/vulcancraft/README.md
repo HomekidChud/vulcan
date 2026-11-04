@@ -20,6 +20,10 @@ First to the pack's kill limit wins. The lowest peer id chooses the world seed, 
 
 WASD move, Shift sprint, Space jump (hold to swim), mouse look, left click hit / mine, right click place, middle click pick block, 1-9 or wheel for the hotbar, E block palette, F6 next shader pack, F3 debug, Q (or Esc) back to the menu.
 
+## Mobile and touch
+
+The page detects touch devices and shows on-screen controls (landscape): drag on the left half to move (push the stick all the way forward to sprint), drag on the right half to look, HIT (hold to mine), PLACE, JUMP, the < > buttons to change hotbar slot, Blocks for the palette, FX to cycle shader packs and Menu (tap twice) to leave the match. Touch devices default to the Vanilla shader and a render distance of 4; raise them in the menu if your phone can take it. The UI scales down automatically on small screens, and the Fullscreen button appears where the browser supports it (not on iPhone Safari; use Share, Add to Home Screen there).
+
 ## Mod packs
 
 A modpack (`assets/modpacks/*.modpack`) is an ordered list of mods:
