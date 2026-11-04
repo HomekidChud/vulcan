@@ -24,7 +24,7 @@ struct Game {
     part: [f64], notes: [string], note_t: [f64],
     rd: i64, order: [i64], show_dbg: i64, fps: f64, fps_n: f64, fps_t: f64,
     net_phase: i64, hs_sent: i64, peer_ok: i64, load_total: i64, scale: f64,
-    role: i64, peer_id: i64, pal_page: i64, sens: f64, step_t: f64, ready: i64, last_dmg: f64, shake: f64
+    role: i64, peer_id: i64, pal_page: i64, sens: f64, step_t: f64, ready: i64, last_dmg: f64, shake: f64, touch: i64
 }
 
 fn body_new() -> Body {
@@ -93,7 +93,7 @@ fn new_game() -> Game {
         part: [], notes: [], note_t: [],
         rd: 6, order: chunk_order(), show_dbg: 0, fps: 60.0, fps_n: 0.0, fps_t: 0.0,
         net_phase: 0, hs_sent: 0, peer_ok: 0, load_total: 0, scale: 1.0,
-        role: 0, peer_id: 0, pal_page: 0, sens: 0.0024, step_t: 0.0, ready: 0, last_dmg: 0.0, shake: 0.0
+        role: 0, peer_id: 0, pal_page: 0, sens: 0.0024, step_t: 0.0, ready: 0, last_dmg: 0.0, shake: 0.0, touch: 0
     }
     return g
 }

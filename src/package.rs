@@ -2,32 +2,38 @@
 //  - web:     single self-contained HTML file (terminal emulator + web worker)
 //  - desktop: Electron project wrapping the web bundle (macOS/Windows/Linux)
 //  - mobile:  Capacitor project wrapping the web bundle (iOS/Android)
+//  - android: a ready-to-build native Android project (WebView) and, when the SDK is found, a signed .apk
 //  - linux/windows/macos: native C cross-build scripts
-pub fn package(entry: &str, platform: &str, assets: Option<&str>) {
+pub fn package(entry: &str, platform: &str, assets: Option<&str>, name: Option<&str>) {
     let program = crate::modules::load_program(std::path::Path::new(entry));
     let js = crate::codegen_js::generate_js(&program);
     let stem = entry.trim_end_matches(".vulcan");
+    let stem_owned = name.map(|n| n.to_string());
+    let stem = stem_owned.as_deref().unwrap_or(stem);
+    let is3d = js.contains("__host.gfx_open") || js.contains("H.gfx_open") || js.contains("gfx_open(");
     let (dir, files): (String, Vec<(String, String)>) = match platform {
         "web" => web_bundle(stem, &js),
         "web3d" => web3d_bundle(stem, &js, assets),
-        "desktop" => desktop_bundle(stem, &js),
-        "mobile" => mobile_bundle(stem, &js),
+        "desktop" => desktop_bundle(stem, &js, is3d, assets),
+        "mobile" => mobile_bundle(stem, &js, is3d, assets),
+        "android" => android_bundle(stem, &js, assets),
         "linux" | "windows" | "macos" => {
             let c_src = crate::codegen::generate(&program);
             native_bundle(stem, platform, &c_src)
         }
-        "android" | "ios" => {
-            eprintln!("vulcan: for {platform} use `--platform mobile` (Capacitor wraps the web build)");
+        "ios" => {
+            eprintln!("vulcan: iOS apps need Xcode on a Mac; use `--platform mobile` (Capacitor wraps the web build) and run `npx cap add ios` there");
             std::process::exit(1);
         }
         _ => {
-            eprintln!("vulcan: unknown platform `{platform}` (web, web3d, desktop, mobile, linux, windows, macos)");
+            eprintln!("vulcan: unknown platform `{platform}` (web, web3d, android, desktop, mobile, linux, windows, macos)");
             std::process::exit(1);
         }
     };
     let _ = std::fs::create_dir_all(&dir);
     for (name, content) in files {
         let path = format!("{dir}/{name}");
+        if let Some(parent) = std::path::Path::new(&path).parent() { let _ = std::fs::create_dir_all(parent); }
         std::fs::write(&path, content).unwrap();
         if name == "build.sh" {
             #[cfg(unix)]
@@ -40,6 +46,7 @@ pub fn package(entry: &str, platform: &str, assets: Option<&str>) {
         }
     }
     println!("packaged for {platform}: {dir}/");
+    if platform == "android" { android_build(&dir); }
 }
 
 fn web_bundle(stem: &str, js: &str) -> (String, Vec<(String, String)>) {
@@ -94,8 +101,8 @@ fn collect_assets(root: &std::path::Path, dir: &std::path::Path, out: &mut Vec<(
     }
 }
 
-fn desktop_bundle(stem: &str, js: &str) -> (String, Vec<(String, String)>) {
-    let (webdir, webfiles) = web_bundle(stem, js);
+fn desktop_bundle(stem: &str, js: &str, is3d: bool, assets: Option<&str>) -> (String, Vec<(String, String)>) {
+    let (webdir, webfiles) = if is3d { web3d_bundle(stem, js, assets) } else { web_bundle(stem, js) };
     let name = file_stem(stem);
     let dir = format!("package-{name}-desktop");
     let mut files: Vec<(String, String)> = webfiles;
@@ -106,8 +113,8 @@ fn desktop_bundle(stem: &str, js: &str) -> (String, Vec<(String, String)>) {
     (dir, files)
 }
 
-fn mobile_bundle(stem: &str, js: &str) -> (String, Vec<(String, String)>) {
-    let (webdir, webfiles) = web_bundle(stem, js);
+fn mobile_bundle(stem: &str, js: &str, is3d: bool, assets: Option<&str>) -> (String, Vec<(String, String)>) {
+    let (webdir, webfiles) = if is3d { web3d_bundle(stem, js, assets) } else { web_bundle(stem, js) };
     let name = file_stem(stem);
     let dir = format!("package-{name}-mobile");
     let mut files: Vec<(String, String)> = webfiles;
@@ -505,4 +512,238 @@ Notarization for distribution outside the App Store:
 
     codesign --sign "Developer ID Application: YOU" binary
     xcrun notarytool submit binary.zip --apple-id ... --wait
+"#;
+
+// ---------------------------------------------------------------- android
+// A tiny native shell: one Activity with a full-screen WebView that loads the bundled
+// page from assets. No Gradle: build.sh calls aapt2 / javac / d8 / apksigner directly,
+// which takes a few seconds.
+fn android_bundle(stem: &str, js: &str, assets: Option<&str>) -> (String, Vec<(String, String)>) {
+    let name = file_stem(stem);
+    let is3d = js.contains("gfx_open(") || js.contains("__host.gfx_open") || js.contains("H.gfx_open");
+    let (_d, webfiles) = if is3d { web3d_bundle(stem, js, assets) } else { web_bundle(stem, js) };
+    let pkg_id: String = name.chars().filter(|c| c.is_ascii_alphanumeric()).collect::<String>().to_lowercase();
+    let pkg_id = if pkg_id.is_empty() || pkg_id.chars().next().unwrap().is_ascii_digit() { format!("app{pkg_id}") } else { pkg_id };
+    let pkg = format!("com.vulcan.{pkg_id}");
+    let label = name.replace('&', "and").replace('<', "").replace('>', "");
+    let fill = |t: &str| t.replace("__PKG__", &pkg).replace("__LABEL__", &label).replace("__NAME__", &name);
+    let mut files: Vec<(String, String)> = Vec::new();
+    for (n, c) in webfiles { files.push((format!("assets/{n}"), c)); }
+    files.push(("AndroidManifest.xml".into(), fill(ANDROID_MANIFEST)));
+    files.push((format!("src/{}/MainActivity.java", pkg.replace('.', "/")), fill(ANDROID_ACTIVITY)));
+    files.push(("res/drawable/ic_launcher.xml".into(), ANDROID_ICON.into()));
+    files.push(("build.sh".into(), fill(ANDROID_BUILD)));
+    files.push(("README.md".into(), fill(ANDROID_README)));
+    (format!("package-{name}-android"), files)
+}
+
+fn android_tools() -> Option<(String, String)> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let sdk = ["ANDROID_HOME", "ANDROID_SDK_ROOT", "VULCAN_ANDROID_SDK"].iter()
+        .filter_map(|k| std::env::var(k).ok()).chain(std::iter::once(format!("{home}/sdk/android")))
+        .find(|p| std::path::Path::new(&format!("{p}/build-tools")).is_dir() && std::path::Path::new(&format!("{p}/platforms")).is_dir())?;
+    let jdk = std::env::var("JAVA_HOME").ok().into_iter().chain(std::iter::once(format!("{home}/sdk/jdk")))
+        .find(|p| std::path::Path::new(&format!("{p}/bin/javac")).exists());
+    let jdk = match jdk {
+        Some(j) => j,
+        None => if std::process::Command::new("javac").arg("-version").output().is_ok() { String::new() } else { return None },
+    };
+    Some((sdk, jdk))
+}
+
+fn android_build(dir: &str) {
+    let Some((sdk, jdk)) = android_tools() else {
+        println!("android SDK/JDK not found. Install the Android SDK (build-tools + a platform) and a JDK, set ANDROID_HOME, then run {dir}/build.sh");
+        return;
+    };
+    let t = std::time::Instant::now();
+    let mut cmd = std::process::Command::new("sh");
+    cmd.arg("build.sh").current_dir(dir).env("ANDROID_HOME", &sdk);
+    if !jdk.is_empty() {
+        let path = std::env::var("PATH").unwrap_or_default();
+        cmd.env("JAVA_HOME", &jdk).env("PATH", format!("{jdk}/bin:{path}"));
+    }
+    match cmd.status() {
+        Ok(st) if st.success() => println!("built apk in {:.1}s", t.elapsed().as_secs_f64()),
+        _ => eprintln!("vulcan: apk build failed (see output above); project is in {dir}/"),
+    }
+}
+
+const ANDROID_MANIFEST: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="__PKG__" android:versionCode="1" android:versionName="1.0">
+    <uses-sdk android:minSdkVersion="24" android:targetSdkVersion="34"/>
+    <uses-permission android:name="android.permission.INTERNET"/>
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
+    <uses-feature android:glEsVersion="0x00030000" android:required="true"/>
+    <application android:label="__LABEL__" android:icon="@drawable/ic_launcher" android:hardwareAccelerated="true" android:allowBackup="true">
+        <activity android:name=".MainActivity" android:exported="true"
+            android:screenOrientation="sensorLandscape"
+            android:configChanges="orientation|screenSize|keyboardHidden|keyboard|navigation|smallestScreenSize|screenLayout|uiMode|density"
+            android:theme="@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
+"#;
+
+const ANDROID_ACTIVITY: &str = r#"package __PKG__;
+
+import android.app.Activity;
+import android.content.Intent;
+import android.graphics.Color;
+import android.net.Uri;
+import android.os.Build;
+import android.os.Bundle;
+import android.view.View;
+import android.view.WindowManager;
+import android.webkit.ValueCallback;
+import android.webkit.WebChromeClient;
+import android.webkit.WebSettings;
+import android.webkit.WebView;
+import android.webkit.WebViewClient;
+
+public class MainActivity extends Activity {
+    private WebView web;
+    private ValueCallback<Uri[]> chooser;
+    private static final int REQ_FILES = 7;
+
+    @Override
+    protected void onCreate(Bundle b) {
+        super.onCreate(b);
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        if (Build.VERSION.SDK_INT >= 28) {
+            WindowManager.LayoutParams lp = getWindow().getAttributes();
+            lp.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+            getWindow().setAttributes(lp);
+        }
+        web = new WebView(this);
+        web.setBackgroundColor(Color.BLACK);
+        web.setOverScrollMode(View.OVER_SCROLL_NEVER);
+        WebSettings s = web.getSettings();
+        s.setJavaScriptEnabled(true);
+        s.setDomStorageEnabled(true);
+        s.setAllowFileAccess(true);
+        s.setMediaPlaybackRequiresUserGesture(false);
+        s.setSupportZoom(false);
+        s.setBuiltInZoomControls(false);
+        web.setWebViewClient(new WebViewClient());
+        web.setWebChromeClient(new WebChromeClient() {
+            @Override
+            public boolean onShowFileChooser(WebView v, ValueCallback<Uri[]> cb, FileChooserParams params) {
+                if (chooser != null) chooser.onReceiveValue(null);
+                chooser = cb;
+                Intent i = new Intent(Intent.ACTION_GET_CONTENT);
+                i.addCategory(Intent.CATEGORY_OPENABLE);
+                i.setType("*/*");
+                i.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
+                try {
+                    startActivityForResult(Intent.createChooser(i, "Import mods and shaders"), REQ_FILES);
+                } catch (Exception e) {
+                    chooser = null;
+                    return false;
+                }
+                return true;
+            }
+        });
+        setContentView(web);
+        web.loadUrl("file:///android_asset/index.html");
+    }
+
+    @Override
+    protected void onActivityResult(int req, int res, Intent data) {
+        if (req == REQ_FILES && chooser != null) {
+            chooser.onReceiveValue(WebChromeClient.FileChooserParams.parseResult(res, data));
+            chooser = null;
+        }
+        super.onActivityResult(req, res, data);
+    }
+
+    private void immersive() {
+        getWindow().getDecorView().setSystemUiVisibility(
+            View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY | View.SYSTEM_UI_FLAG_FULLSCREEN
+            | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION | View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+            | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION);
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean focus) {
+        super.onWindowFocusChanged(focus);
+        if (focus) immersive();
+    }
+
+    @Override
+    public void onBackPressed() {
+        web.evaluateJavascript("(window.__vulcanBack && window.__vulcanBack()) ? '1' : '0'", new ValueCallback<String>() {
+            @Override
+            public void onReceiveValue(String v) {
+                if (!"\"1\"".equals(v)) finish();
+            }
+        });
+    }
+
+    @Override
+    protected void onPause() { super.onPause(); web.onPause(); }
+
+    @Override
+    protected void onResume() { super.onResume(); web.onResume(); immersive(); }
+
+    @Override
+    protected void onDestroy() { web.destroy(); super.onDestroy(); }
+}
+"#;
+
+const ANDROID_ICON: &str = r##"<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
+    <path android:fillColor="#1B2236" android:pathData="M0,0h108v108h-108z"/>
+    <path android:fillColor="#7FD36B" android:pathData="M54,22 L84,38 L54,54 L24,38 Z"/>
+    <path android:fillColor="#8A5A2B" android:pathData="M24,38 L54,54 L54,88 L24,72 Z"/>
+    <path android:fillColor="#6B4521" android:pathData="M84,38 L54,54 L54,88 L84,72 Z"/>
+    <path android:fillColor="#FFC93C" android:pathData="M54,30 L70,38 L54,46 L38,38 Z"/>
+</vector>
+"##;
+
+const ANDROID_BUILD: &str = r#"#!/bin/sh
+# Builds __NAME__.apk without Gradle: aapt2 -> javac -> d8 -> zipalign -> apksigner.
+set -e
+cd "$(dirname "$0")"
+SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-${VULCAN_ANDROID_SDK:-$HOME/sdk/android}}}"
+BT=$(ls -d "$SDK"/build-tools/* | sort -V | tail -1)
+PL=$(ls -d "$SDK"/platforms/android-* | sort -V | tail -1)
+JAR="$PL/android.jar"
+if ! command -v javac >/dev/null 2>&1; then
+  if [ -x "$HOME/sdk/jdk/bin/javac" ]; then export JAVA_HOME="$HOME/sdk/jdk" PATH="$HOME/sdk/jdk/bin:$PATH"; else echo "javac not found: install a JDK (11+) or set JAVA_HOME" >&2; exit 1; fi
+fi
+KS="${VULCAN_KEYSTORE:-$HOME/.vulcan/debug.keystore}"
+if [ ! -f "$KS" ]; then
+  mkdir -p "$(dirname "$KS")"
+  keytool -genkeypair -keystore "$KS" -storepass android -keypass android -alias vulcandebug -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Vulcan Debug,O=Vulcan,C=US" >/dev/null 2>&1
+fi
+rm -rf build; mkdir -p build/classes
+"$BT/aapt2" compile --dir res -o build/res.zip
+"$BT/aapt2" link -o build/base.apk -I "$JAR" --manifest AndroidManifest.xml --min-sdk-version 24 --target-sdk-version 34 -A assets build/res.zip
+javac -nowarn -Xlint:-options -source 8 -target 8 -classpath "$JAR" -d build/classes $(find src -name '*.java')
+"$BT/d8" --release --min-api 24 --lib "$JAR" --output build $(find build/classes -name '*.class')
+( cd build && if command -v zip >/dev/null 2>&1; then zip -q -0 -X base.apk classes.dex; else "$BT/aapt" add base.apk classes.dex >/dev/null; fi )
+"$BT/zipalign" -f -p 4 build/base.apk build/aligned.apk
+"$BT/apksigner" sign --ks "$KS" --ks-pass pass:android --key-pass pass:android --out __NAME__.apk build/aligned.apk
+rm -f __NAME__.apk.idsig
+echo "built $(pwd)/__NAME__.apk ($(wc -c < __NAME__.apk) bytes)"
+"#;
+
+const ANDROID_README: &str = r#"# __NAME__ for Android
+
+Native shell around a full-screen WebView (WebGL2), generated by `vulcan package --platform android`.
+
+Build (a few seconds, no Gradle):
+
+    ./build.sh          # needs Android build-tools + a platform in $ANDROID_HOME and a JDK 11+
+
+Output: `__NAME__.apk`, signed with a debug key (`~/.vulcan/debug.keystore`). Install it by copying the
+file to the phone and opening it (allow "install unknown apps" for your file manager), or with
+`adb install __NAME__.apk`.
+
+The package id is `__PKG__`. For the Play Store, sign with your own release key instead of the debug key.
 "#;

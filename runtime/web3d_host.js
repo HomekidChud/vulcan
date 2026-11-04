@@ -151,6 +151,7 @@
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
     initInput();
+    applyQuality(quality);
     resize();
     window.addEventListener("resize", resize);
     lastT = performance.now();
@@ -170,12 +171,37 @@
   }
   H.gfx_size_w = () => hudc ? hudc._cw : window.innerWidth;
   H.gfx_size_h = () => hudc ? hudc._ch : window.innerHeight;
-  H.gfx_scale = (s) => { renderScale = Math.max(0.25, Math.min(2, s)); };
+  // Quality: "auto" adapts the render resolution to keep ~60 fps; low/medium/high are fixed.
+  let userScale = 1, qScale = 1, quality = "auto", drs = 1, emaDt = 0.016, drsFrames = 0, drsGood = 0, drsOn = true;
+  try { quality = localStorage.getItem("vcquality") || "auto"; } catch (e) { /* ignore */ }
+  const QBASE = { low: 0.6, medium: 0.8, high: 1.0 };
+  function recomputeScale() {
+    qScale = quality === "auto" ? drs : QBASE[quality] || 1;
+    renderScale = Math.max(0.25, Math.min(2, userScale * qScale));
+  }
+  function qualityShadowSize() { return quality === "high" || (quality === "auto" && !isTouch) ? 2048 : 1024; }
+  function applyQuality(q) {
+    quality = q; try { localStorage.setItem("vcquality", q); } catch (e) { /* ignore */ }
+    if (q === "auto") drs = isTouch ? 0.8 : 1;
+    recomputeScale();
+    const ss = qualityShadowSize();
+    if (ss !== shadowSize) { shadowSize = ss; if (shadowRT && gl) { gl.deleteTexture(shadowRT.dtex); gl.deleteFramebuffer(shadowRT.fb); } shadowRT = null; rts.key = ""; }
+  }
+  function drsTick(dt) {
+    drsFrames++;
+    if (quality !== "auto" || drsFrames < 150 || document.hidden) return;
+    emaDt = emaDt * 0.92 + dt * 0.08;
+    if (drsFrames % 40 !== 0) return;
+    if (emaDt > 0.0245 && drs > 0.5) { drs = Math.max(0.5, drs - 0.1); drsGood = 0; recomputeScale(); }
+    else if (emaDt < 0.0185 && drs < 1) { if (++drsGood >= 4) { drs = Math.min(1, drs + 0.1); drsGood = 0; recomputeScale(); } }
+    else drsGood = 0;
+  }
+  H.gfx_scale = (s) => { userScale = Math.max(0.25, Math.min(2, s)); recomputeScale(); };
   H.gfx_shadow_area = (a) => { shadowArea = Math.max(8, a); };
   H.gfx_info = () => { const e = gl.getExtension("WEBGL_debug_renderer_info"); return (e ? gl.getParameter(e.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER)) + (hasHalf ? " (HDR)" : " (LDR)"); };
   H.gfx_stats = () => stats;
   H.gfx_fullscreen = () => { if (document.fullscreenElement) document.exitFullscreen(); else document.documentElement.requestFullscreen && document.documentElement.requestFullscreen(); };
-  H.gfx_chrome = (on) => { const b = $("bar"); if (b) b.style.display = on ? "" : "none"; if (isTouch) { const was = document.body.classList.contains("touchplay"); if (was === on) setTouchPlay(!on); } };
+  H.gfx_chrome = (on) => { const b = $("bar"); if (b) b.style.display = on ? "" : "none"; if (matchUI === !on) return; setTouchPlay(!on); };
 
   // ------------------------------------------------------------------ shaders
   const UNIFORMS_DECL = `
@@ -354,7 +380,7 @@ uniform sampler2D uPass0; uniform sampler2D uPass1; uniform sampler2D uPass2; un
       meshes.set(id, m);
     }
     m.layer = layer;
-    const arr = Float32Array.from(data);
+    const arr = new Float32Array(data);
     gl.bindVertexArray(m.vao); gl.bindBuffer(gl.ARRAY_BUFFER, m.vbo);
     gl.bufferData(gl.ARRAY_BUFFER, arr, gl.DYNAMIC_DRAW);
     m.count = (arr.length / STRIDE) | 0;
@@ -546,14 +572,24 @@ uniform sampler2D uPass0; uniform sampler2D uPass1; uniform sampler2D uPass2; un
   }
 
   // ------------------------------------------------------------------ frame loop
+  let tResumed = 0, jsMs = 0, jsMax = 0, rdMs = 0, jsWin = [];
+  window.__vcPerf = () => { const a = jsWin.slice().sort((x, y) => x - y); return { n: a.length, median: a[a.length >> 1], p95: a[Math.floor(a.length * 0.95)], max: a[a.length - 1], scale: renderScale, q: quality }; };
   H.gfx_frame = () => new Promise((resolve) => {
+    const t0 = performance.now();
+    jsMs = t0 - tResumed;
     renderFrame();
+    const t1 = performance.now(); rdMs = t1 - t0;
     flushHud();
+    jsWin.push(jsMs); if (jsWin.length > 90) jsWin.shift();
+    if ((drsFrames & 15) === 0) jsMax = Math.max.apply(null, jsWin);
+    stats += ` · js ${jsMs.toFixed(1)}ms (max ${jsMax.toFixed(0)}) · gl ${rdMs.toFixed(1)}ms · res ${Math.round(renderScale * 100)}%`;
     keysPressed.clear(); clicks[0] = clicks[1] = clicks[2] = 0;
     requestAnimationFrame((t) => {
       const dt = Math.min(0.1, Math.max(0.0005, (t - lastT) / 1000));
       lastT = t; frameT += dt;
       document.body.classList.toggle("locked", !!document.pointerLockElement || (isTouch && wantLock));
+      drsTick(dt);
+      tResumed = performance.now();
       resolve(dt);
     });
   });
@@ -578,48 +614,120 @@ uniform sampler2D uPass0; uniform sampler2D uPass1; uniform sampler2D uPass2; un
   }
 
   // ------------------------------------------------------------------ touch controls
-  const isTouch = (typeof window !== "undefined") && (("ontouchstart" in window) || (navigator.maxTouchPoints > 0)) && window.matchMedia && window.matchMedia("(pointer: coarse)").matches;
+  // Virtual stick (move), look pad, action buttons. Every button can be moved and resized
+  // in the layout editor (Options > Customize touch controls); settings persist in localStorage.
+  const UA_MOBILE = /Android|iPhone|iPad|iPod|Mobile|HarmonyOS/i.test((navigator && navigator.userAgent) || "");
+  let isTouch = false, touchBound = false, editing = false, selId = null, matchUI = false;
   let touchEl = null, stickEl = null, knobEl = null, menuArm = 0;
-  const tpt = new Map();                 // pointerId -> {role, sx, sy, lx, ly, t}
+  const tpt = new Map();                 // pointerId -> {role, ...}
+  const TS_DEF = { size: 1, opacity: 0.8, sens: 1, lefty: false, float: true, sprint: true, labels: true, hints: true };
+  let TS = Object.assign({}, TS_DEF, { pos: {} });
+  try { const o = JSON.parse(localStorage.getItem("vctouch") || "{}"); TS = Object.assign({}, TS_DEF, o, { pos: (o && o.pos) || {} }); } catch (e) { /* storage blocked */ }
+  function saveTS() { try { localStorage.setItem("vctouch", JSON.stringify(TS)); } catch (e) { /* ignore */ } }
+  const TB = {
+    hit:   { id: "tb-hit",   w: 88, h: 88, a: "br", x: 64,  y: 68,  name: "HIT" },
+    jump:  { id: "tb-jump",  w: 68, h: 68, a: "br", x: 64,  y: 160, name: "JUMP" },
+    place: { id: "tb-place", w: 62, h: 62, a: "br", x: 155, y: 89,  name: "PLACE" },
+    fx:    { id: "tb-fx",    w: 52, h: 34, a: "tr", x: 154, y: 25,  name: "FX" },
+    inv:   { id: "tb-inv",   w: 56, h: 34, a: "tr", x: 94,  y: 25,  name: "Blocks" },
+    menu:  { id: "tb-menu",  w: 52, h: 34, a: "tr", x: 34,  y: 25,  name: "Menu" },
+    prev:  { id: "tb-prev",  w: 42, h: 42, a: "hl", name: "<" },
+    next:  { id: "tb-next",  w: 42, h: 42, a: "hr", name: ">" },
+    stick: { id: "stickhint", w: 100, h: 100, a: "bl", x: 90, y: 90, name: "move" },
+  };
+  const clampN = (v, a, b) => Math.max(a, Math.min(b, v));
+  function insets() {
+    let p = $("sa-probe");
+    if (!p) { p = document.createElement("div"); p.id = "sa-probe"; p.style.cssText = "position:fixed;left:0;top:0;width:0;height:0;visibility:hidden;padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left)"; document.body.appendChild(p); }
+    const c = getComputedStyle(p);
+    return { t: parseFloat(c.paddingTop) || 0, r: parseFloat(c.paddingRight) || 0, b: parseFloat(c.paddingBottom) || 0, l: parseFloat(c.paddingLeft) || 0 };
+  }
+  function defCenter(s) {
+    const Wn = window.innerWidth, Hn = window.innerHeight, I = insets();
+    let cx = 0, cy = 0;
+    switch (s.a) {
+      case "br": cx = Wn - I.r - s.x; cy = Hn - I.b - s.y; break;
+      case "tr": cx = Wn - I.r - s.x; cy = I.t + s.y; break;
+      case "bl": cx = I.l + s.x;      cy = Hn - I.b - s.y; break;
+      case "hl": cx = Wn / 2 - (266 * uiK + 27); cy = Hn - I.b - (18 * uiK + 21); break;
+      default:   cx = Wn / 2 + (266 * uiK + 27); cy = Hn - I.b - (18 * uiK + 21);
+    }
+    if (TS.lefty && (s.a === "br" || s.a === "tr" || s.a === "bl")) cx = Wn - cx;
+    return [cx, cy];
+  }
+  function btnScale(k) { const o = TS.pos[k]; return TS.size * ((o && o.s) || 1); }
+  function applyTouchLayout() {
+    if (!touchEl) return;
+    const Wn = window.innerWidth, Hn = window.innerHeight;
+    for (const k in TB) {
+      const s = TB[k], el = $(s.id); if (!el) continue;
+      const o = TS.pos[k], sc = btnScale(k);
+      let [cx, cy] = defCenter(s);
+      if (o && o.x != null) { cx = o.x * Wn; cy = o.y * Hn; }
+      const w = s.w * sc, h = s.h * sc;
+      cx = clampN(cx, w / 2, Wn - w / 2); cy = clampN(cy, h / 2, Hn - h / 2);
+      const st = el.style;
+      st.left = (cx - w / 2) + "px"; st.top = (cy - h / 2) + "px"; st.right = "auto"; st.bottom = "auto";
+      st.width = w + "px"; st.height = h + "px"; st.fontSize = Math.max(9, 13 * sc) + "px";
+      el.dataset.cx = cx; el.dataset.cy = cy;
+    }
+    touchEl.style.setProperty("--to", TS.opacity);
+    touchEl.classList.toggle("nolabels", !TS.labels);
+    touchEl.classList.toggle("nohints", !TS.hints);
+    if (stickEl) stickEl.style.transform = "translate(-0px,-0px) scale(" + TS.size + ")";
+  }
   const STICK_R = 56;
   function setStick(dx, dy) {
-    const m = Math.hypot(dx, dy) || 1, r = Math.min(1, m / STICK_R);
+    const R = STICK_R * TS.size;
+    const m = Math.hypot(dx, dy) || 1, r = Math.min(1, m / R);
     const nx = dx / m * r, ny = dy / m * r;
     const set = (k, on) => { if (on) keys.add(k); else keys.delete(k); };
     set(87, ny < -0.28); set(83, ny > 0.28); set(65, nx < -0.28); set(68, nx > 0.28);
-    set(17, ny < -0.9);                                   // push all the way forward to sprint
+    set(17, TS.sprint && ny < -0.9);                      // push all the way forward to sprint
     if (knobEl) knobEl.style.transform = "translate(" + (nx * STICK_R) + "px," + (ny * STICK_R) + "px)";
   }
   function clearStick() { for (const k of [87, 83, 65, 68, 17]) keys.delete(k); if (knobEl) knobEl.style.transform = ""; if (stickEl) stickEl.style.display = "none"; }
   function setTouchPlay(on, keepOverlay) {
-    if (!keepOverlay) document.body.classList.toggle("touchplay", !!(isTouch && on));
+    if (!keepOverlay) { matchUI = !!on; document.body.classList.toggle("touchplay", !!(isTouch && (on || editing))); }
     if (!on) { clearStick(); tpt.clear(); held[0] = held[1] = false; keys.delete(32); }
   }
-  function layoutTouch() { const t = $("touch"); if (t) t.style.setProperty("--uik", uiK); }
+  function layoutTouch() { if (touchEl) { touchEl.style.setProperty("--uik", uiK); applyTouchLayout(); } }
+  function setTouch(on) {
+    if (quality === "auto" && drsFrames < 150) drs = on ? 0.8 : 1;
+    if (isTouch === on) return;
+    isTouch = on;
+    document.body.classList.toggle("touch", on);
+    if (on) bindTouch();
+    if (!on) { clearStick(); tpt.clear(); document.body.classList.remove("touchplay"); }
+    else document.body.classList.toggle("touchplay", matchUI || editing);
+    applyTouchLayout();
+  }
   function bindBtn(id, down, up) {
     const el = $(id); if (!el) return;
-    el.addEventListener("pointerdown", (e) => { e.preventDefault(); e.stopPropagation(); audioInit(); el.setPointerCapture && el.setPointerCapture(e.pointerId); el.classList.add("on"); down(); });
-    const end = (e) => { e.preventDefault(); el.classList.remove("on"); if (up) up(); };
+    el.addEventListener("pointerdown", (e) => { if (editing) return; e.preventDefault(); e.stopPropagation(); audioInit(); try { el.setPointerCapture(e.pointerId); } catch (x) {} el.classList.add("on"); down(); });
+    const end = (e) => { if (editing) return; e.preventDefault(); el.classList.remove("on"); if (up) up(); };
     el.addEventListener("pointerup", end); el.addEventListener("pointercancel", end);
   }
-  function initTouch() {
-    if (!isTouch) return;
-    document.body.classList.add("touch");
+  function bindTouch() {
+    if (touchBound) return; touchBound = true;
     touchEl = $("touch"); stickEl = $("stick"); knobEl = $("knob");
     glc.addEventListener("pointerdown", (e) => {
-      if (e.pointerType === "mouse") return;
+      if (e.pointerType === "mouse" || !isTouch || editing) return;
       e.preventDefault(); audioInit();
-      glc.setPointerCapture && glc.setPointerCapture(e.pointerId);
-      if (!(wantLock)) {                                  // menu / palette: behave like a mouse
+      try { glc.setPointerCapture(e.pointerId); } catch (x) {}
+      if (!wantLock) {                                    // menu / palette: behave like a mouse
         mx = e.clientX / uiK; my = e.clientY / uiK; clicks[0]++; held[0] = true;
         tpt.set(e.pointerId, { role: "ui" }); return;
       }
-      const left = e.clientX < window.innerWidth * 0.42;
+      const Wn = window.innerWidth;
+      const inZone = TS.lefty ? e.clientX > Wn * 0.58 : e.clientX < Wn * 0.42;
       const hasStick = [...tpt.values()].some((p) => p.role === "stick");
-      if (left && !hasStick) {
-        tpt.set(e.pointerId, { role: "stick", sx: e.clientX, sy: e.clientY });
-        stickEl.style.display = "block"; stickEl.style.left = e.clientX + "px"; stickEl.style.top = e.clientY + "px";
-        setStick(0, 0);
+      if (inZone && !hasStick) {
+        let sx = e.clientX, sy = e.clientY;
+        if (!TS.float) { const h = $("stickhint"); sx = parseFloat(h.dataset.cx); sy = parseFloat(h.dataset.cy); }
+        tpt.set(e.pointerId, { role: "stick", sx, sy });
+        stickEl.style.display = "block"; stickEl.style.left = sx + "px"; stickEl.style.top = sy + "px";
+        setStick(e.clientX - sx, e.clientY - sy);
       } else tpt.set(e.pointerId, { role: "look", lx: e.clientX, ly: e.clientY });
     });
     glc.addEventListener("pointermove", (e) => {
@@ -627,7 +735,7 @@ uniform sampler2D uPass0; uniform sampler2D uPass1; uniform sampler2D uPass2; un
       e.preventDefault();
       if (p.role === "ui") { mx = e.clientX / uiK; my = e.clientY / uiK; }
       else if (p.role === "stick") setStick(e.clientX - p.sx, e.clientY - p.sy);
-      else { mdx += (e.clientX - p.lx) * 1.9; mdy += (e.clientY - p.ly) * 1.9; p.lx = e.clientX; p.ly = e.clientY; }
+      else { mdx += (e.clientX - p.lx) * 1.9 * TS.sens; mdy += (e.clientY - p.ly) * 1.9 * TS.sens; p.lx = e.clientX; p.ly = e.clientY; }
     });
     const up = (e) => {
       const p = tpt.get(e.pointerId); if (!p) return;
@@ -644,19 +752,95 @@ uniform sampler2D uPass0; uniform sampler2D uPass1; uniform sampler2D uPass2; un
     bindBtn("tb-inv", () => { keysPressed.add(69); }, null);
     bindBtn("tb-fx", () => { keysPressed.add(117); }, null);
     bindBtn("tb-menu", () => {
-      const now = performance.now();
-      if (now < menuArm) { menuArm = 0; $("tb-menu").textContent = "Menu"; keysPressed.add(81); }
-      else { menuArm = now + 2200; $("tb-menu").textContent = "Sure?"; setTimeout(() => { if (performance.now() >= menuArm) $("tb-menu").textContent = "Menu"; }, 2300); }
+      const now = performance.now(), mb = $("tb-menu");
+      if (now < menuArm) { menuArm = 0; mb.textContent = "Menu"; keysPressed.add(81); }
+      else { menuArm = now + 2200; mb.textContent = "Sure?"; setTimeout(() => { if (performance.now() >= menuArm) mb.textContent = "Menu"; }, 2300); }
     }, null);
-    const fs = $("fsbtn");
-    if (fs) {
-      if (document.documentElement.requestFullscreen) fs.addEventListener("click", () => { H.gfx_fullscreen(); try { screen.orientation.lock("landscape").catch(() => {}); } catch (e) {} });
-      else fs.style.display = "none";
-    }
+    bindEditor();
+    applyTouchLayout();
   }
 
+  // ---- layout editor
+  function selectBtn(k) {
+    selId = k;
+    for (const n in TB) { const el = $(TB[n].id); if (el) el.classList.toggle("sel", n === k); }
+    const lab = $("te-sel"), sl = $("te-selsize");
+    if (lab) lab.textContent = k ? TB[k].name : "none";
+    if (sl) { sl.disabled = !k; sl.value = k ? ((TS.pos[k] && TS.pos[k].s) || 1) : 1; }
+  }
+  function bindEditor() {
+    let drag = null;
+    touchEl.addEventListener("pointerdown", (e) => {
+      if (!editing) return;
+      const el = e.target.closest && e.target.closest(".tb, #stickhint"); if (!el) return;
+      let k = null; for (const n in TB) if (TB[n].id === el.id) k = n;
+      if (!k) return;
+      e.preventDefault(); e.stopPropagation();
+      selectBtn(k);
+      drag = { k, id: e.pointerId, ox: e.clientX - parseFloat(el.dataset.cx), oy: e.clientY - parseFloat(el.dataset.cy) };
+      try { el.setPointerCapture(e.pointerId); } catch (x) {}
+    }, true);
+    touchEl.addEventListener("pointermove", (e) => {
+      if (!editing || !drag || e.pointerId !== drag.id) return;
+      e.preventDefault(); e.stopPropagation();
+      const Wn = window.innerWidth, Hn = window.innerHeight;
+      const o = TS.pos[drag.k] || (TS.pos[drag.k] = {});
+      o.x = clampN((e.clientX - drag.ox) / Wn, 0.02, 0.98); o.y = clampN((e.clientY - drag.oy) / Hn, 0.03, 0.97);
+      applyTouchLayout();
+    }, true);
+    const end = (e) => { if (!editing || !drag || e.pointerId !== drag.id) return; drag = null; saveTS(); };
+    touchEl.addEventListener("pointerup", end, true); touchEl.addEventListener("pointercancel", end, true);
+    const bind = (id, fn) => { const el = $(id); if (el) el.addEventListener("input", () => { fn(el); applyTouchLayout(); saveTS(); }); };
+    bind("te-size", (el) => { TS.size = parseFloat(el.value); });
+    bind("te-opacity", (el) => { TS.opacity = parseFloat(el.value); });
+    bind("te-sens", (el) => { TS.sens = parseFloat(el.value); });
+    bind("te-selsize", (el) => { if (!selId) return; const o = TS.pos[selId] || (TS.pos[selId] = {}); o.s = parseFloat(el.value); });
+    for (const [id, key] of [["te-lefty", "lefty"], ["te-float", "float"], ["te-sprint", "sprint"], ["te-labels", "labels"], ["te-hints", "hints"]]) {
+      const el = $(id); if (el) el.addEventListener("change", () => { TS[key] = el.checked; if (key === "lefty") { for (const n in TS.pos) { delete TS.pos[n].x; delete TS.pos[n].y; } } applyTouchLayout(); saveTS(); });
+    }
+    const reset = $("te-reset"); if (reset) reset.addEventListener("click", () => { TS = Object.assign({}, TS_DEF, { pos: {} }); saveTS(); syncEditor(); applyTouchLayout(); });
+    const done = $("te-done"); if (done) done.addEventListener("click", endEdit);
+    const fold = $("te-fold"); if (fold) fold.addEventListener("click", () => { const b = $("te-body"); const h = b.style.display === "none"; b.style.display = h ? "block" : "none"; fold.textContent = h ? "Hide" : "Show"; });
+  }
+  function syncEditor() {
+    const set = (id, v) => { const el = $(id); if (el) el.value = v; };
+    set("te-size", TS.size); set("te-opacity", TS.opacity); set("te-sens", TS.sens);
+    for (const [id, key] of [["te-lefty", "lefty"], ["te-float", "float"], ["te-sprint", "sprint"], ["te-labels", "labels"], ["te-hints", "hints"]]) { const el = $(id); if (el) el.checked = !!TS[key]; }
+    selectBtn(selId);
+  }
+  function startEdit() {
+    if (!touchBound) { document.body.classList.add("touch"); bindTouch(); }
+    editing = true; clearStick(); tpt.clear();
+    document.body.classList.add("touchplay", "touchedit");
+    $("tedit").style.display = "block";
+    for (const k in TB) { const el = $(TB[k].id); if (el) el.dataset.label = TB[k].name; }
+    syncEditor(); applyTouchLayout();
+  }
+  function endEdit() {
+    editing = false;
+    document.body.classList.remove("touchedit");
+    document.body.classList.toggle("touchplay", isTouch && matchUI);
+    $("tedit").style.display = "none";
+    if (!isTouch) { document.body.classList.remove("touch"); }
+    selectBtn(null);
+  }
+  H.gfx_touch = () => isTouch;
+  window.__vulcanBack = () => {             // Android back button / browser hook; returns true if it was handled
+    if (editing) { endEdit(); return true; }
+    const hp = $("help"), op = $("opts");
+    if (hp && hp.classList.contains("open")) { hp.classList.remove("open"); try { localStorage.setItem("vchelp", "1"); } catch (e) { /* ignore */ } return true; }
+    if (op && op.classList.contains("open")) { op.classList.remove("open"); return true; }
+    if (matchUI) { keysPressed.add(81); return true; }
+    keysPressed.add(27);
+    return false;
+  };
+
   function initInput() {
-    initTouch();
+    setTouch((UA_MOBILE || ((navigator.maxTouchPoints > 0) && window.matchMedia && window.matchMedia("(pointer: coarse)").matches)));
+    window.addEventListener("pointerdown", (e) => {
+      if (e.pointerType === "touch" && !isTouch) setTouch(true);
+      else if (e.pointerType === "mouse" && isTouch && !UA_MOBILE && !editing) setTouch(false);
+    }, true);
     window.addEventListener("keydown", (e) => {
       if (e.target && (e.target.tagName === "TEXTAREA" || e.target.tagName === "INPUT")) return;
       const k = keyCode(e); if (!k) return;
@@ -693,7 +877,6 @@ uniform sampler2D uPass0; uniform sampler2D uPass1; uniform sampler2D uPass2; un
   H.gfx_mouse_held = (b) => !!held[b];
   H.gfx_wheel = () => { const v = wheel; wheel = 0; return v; };
   H.gfx_locked = () => !!document.pointerLockElement || (isTouch && wantLock);
-  H.gfx_touch = () => isTouch;
   H.gfx_set_lock = (on) => {
     wantLock = on;
     if (!on) setTouchPlay(false, true);
@@ -853,7 +1036,7 @@ uniform sampler2D uPass0; uniform sampler2D uPass1; uniform sampler2D uPass2; un
   window.addEventListener("DOMContentLoaded", () => {
     const btn = $("importbtn"), inp = $("importfile");
     if (btn && inp) {
-      btn.onclick = () => inp.click();
+      btn.onclick = () => { closeOpts(); inp.click(); };
       inp.onchange = async () => {
         let n = 0;
         for (const f of inp.files) {
@@ -866,6 +1049,73 @@ uniform sampler2D uPass0; uniform sampler2D uPass1; uniform sampler2D uPass2; un
         inp.value = "";
       };
     }
+    // ---- options dropdown, help, quality, fullscreen, copy
+    const opts = $("opts"), optbtn = $("optbtn");
+    const closeOpts = () => { if (opts) opts.classList.remove("open"); };
+    if (optbtn) optbtn.onclick = (e) => { e.stopPropagation(); opts.classList.toggle("open"); };
+    document.addEventListener("pointerdown", (e) => { if (opts && !e.target.closest("#barwrap")) closeOpts(); }, true);
+    const HELP = {
+      "Quick start": `<h4>Quick start</h4><ul>
+        <li>Pick a mode in the main menu: <b>Practice</b> (vs bot), <b>1v1 Online</b> (vs a friend) or <b>Sandbox</b>.</li>
+        <li>Pick a <b>modpack</b> (Classic is the default) and a <b>shader</b>. Phones start on the fast Vanilla shader; switch to Lumina or Cinematic if your device is fast.</li>
+        <li>Win a duel by defeating the other player. Mine blocks, build cover, and use special blocks from mods.</li>
+        <li>Open <b>Options</b> (top right) any time in menus for Quality, imports and this help.</li></ul>`,
+      "Touch": `<h4>Touch controls</h4><ul>
+        <li><b>Move:</b> touch and drag on the left side of the screen. Push the stick fully forward to sprint.</li>
+        <li><b>Look:</b> drag on the right side of the screen.</li>
+        <li><b>HIT</b> mines or attacks (hold to keep mining). <b>PLACE</b> puts a block. <b>JUMP</b> jumps (hold to swim or fly up).</li>
+        <li><b>&lt; &gt;</b> change the hotbar slot. <b>Blocks</b> opens the block palette. <b>FX</b> switches to the next shader. <b>Menu</b> asks for a second tap to leave the match.</li>
+        <li><b>Customize:</b> Options &gt; Customize touch controls. Drag any button, change sizes, opacity, look speed, left-handed mode, floating stick and auto-sprint. Settings are saved on the device.</li></ul>`,
+      "Keyboard and mouse": `<h4>Keyboard and mouse</h4><ul>
+        <li><kbd>W A S D</kbd> move, <kbd>Space</kbd> jump, <kbd>Shift</kbd> sneak or descend, <kbd>Ctrl</kbd> sprint.</li>
+        <li>Mouse: left click mine or attack, right click place, wheel or <kbd>1</kbd>-<kbd>9</kbd> hotbar.</li>
+        <li><kbd>E</kbd> block palette, <kbd>Q</kbd> leave match, <kbd>Esc</kbd> release mouse, <kbd>F3</kbd> stats, <kbd>F6</kbd> next shader.</li></ul>`,
+      "Mods and shaders": `<h4>Mods, modpacks and shaders</h4><ul>
+        <li>Built in: mods Core, Crystals, Colors, Moon, Hardcore; modpacks Classic, Moon Duel, Gem Caves, Builder Arena, Hardcore; shaders Lumina, Vanilla, Retro, Cinematic.</li>
+        <li>Import your own <code>.vmod</code> (mod), <code>.modpack</code> (list of mods) or <code>.vshader</code> (shader pack) files with Options &gt; Import. They appear in the menu straight away and are kept on this device.</li>
+        <li>Options &gt; Clear imports removes them again.</li></ul>`,
+      "1v1 online": `<h4>1v1 online</h4><ul>
+        <li>No server needed: it is a direct peer-to-peer link.</li>
+        <li>One player picks <b>1v1 Online &gt; Host</b>, copies their code and sends it to the friend (chat, text).</li>
+        <li>The friend picks <b>Join</b>, pastes the code, then copies their reply code back to the host. The host pastes it and presses Connect.</li>
+        <li>Both players need the same modpack. Use Cancel on the waiting screen to go back.</li></ul>`,
+    };
+    const helpEl = $("help"), tabsEl = $("help-tabs"), bodyEl = $("help-body");
+    function showTab(name) {
+      bodyEl.innerHTML = HELP[name];
+      for (const b of tabsEl.children) b.classList.toggle("on", b.textContent === name);
+    }
+    if (helpEl) {
+      for (const name of Object.keys(HELP)) { const b = document.createElement("button"); b.textContent = name; b.onclick = () => showTab(name); tabsEl.appendChild(b); }
+      const openHelp = (tab) => { closeOpts(); showTab(tab || "Quick start"); helpEl.classList.add("open"); };
+      const closeHelp = () => { helpEl.classList.remove("open"); try { localStorage.setItem("vchelp", "1"); } catch (e) { /* ignore */ } };
+      $("helpbtn").onclick = () => openHelp(isTouch ? "Touch" : "Quick start");
+      $("help-close").onclick = closeHelp;
+      helpEl.addEventListener("pointerdown", (e) => { e.stopPropagation(); if (e.target === helpEl) closeHelp(); });
+      window.addEventListener("keydown", (e) => { if (!helpEl.classList.contains("open")) return; e.stopImmediatePropagation(); if (e.key === "Escape") closeHelp(); }, true);
+      window.addEventListener("keyup", (e) => { if (helpEl.classList.contains("open")) e.stopImmediatePropagation(); }, true);
+      let seen = false; try { seen = !!localStorage.getItem("vchelp"); } catch (e) { /* ignore */ }
+      if (!seen) setTimeout(() => openHelp(isTouch ? "Touch" : "Quick start"), 600);
+    }
+    const cz = $("customizebtn"); if (cz) cz.onclick = () => { closeOpts(); startEdit(); };
+    const qs = $("qualsel"); if (qs) { qs.value = quality; qs.onchange = () => applyQuality(qs.value); }
+    const fs = $("fsbtn");
+    if (fs) fs.onclick = () => {
+      closeOpts();
+      const el = document.documentElement;
+      try {
+        if (document.fullscreenElement) document.exitFullscreen();
+        else if (el.requestFullscreen) el.requestFullscreen({ navigationUI: "hide" }).catch(() => {});
+        else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen();
+      } catch (e) { /* ignore */ }
+    };
+    const cp = $("vc-copy");
+    if (cp) cp.onclick = () => {
+      const t = $("vc-out"); const txt = t.value;
+      const fallback = () => { t.removeAttribute("readonly"); t.focus(); t.select(); try { document.execCommand("copy"); } catch (e) { /* ignore */ } t.setAttribute("readonly", ""); };
+      if (navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(txt).catch(fallback); else fallback();
+      cp.textContent = "Copied"; setTimeout(() => { cp.textContent = "Copy my code"; }, 1500);
+    };
     const clr = $("clearbtn");
     if (clr) clr.onclick = () => {
       for (const k of [...vfs.keys()]) if (k.startsWith("user/")) { vfs.delete(k); try { localStorage.removeItem("vc:" + k); } catch (e) {} }

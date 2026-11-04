@@ -22,7 +22,17 @@ WASD move, Shift sprint, Space jump (hold to swim), mouse look, left click hit /
 
 ## Mobile and touch
 
-The page detects touch devices and shows on-screen controls (landscape): drag on the left half to move (push the stick all the way forward to sprint), drag on the right half to look, HIT (hold to mine), PLACE, JUMP, the < > buttons to change hotbar slot, Blocks for the palette, FX to cycle shader packs and Menu (tap twice) to leave the match. Touch devices default to the Vanilla shader and a render distance of 4; raise them in the menu if your phone can take it. The UI scales down automatically on small screens, and the Fullscreen button appears where the browser supports it (not on iPhone Safari; use Share, Add to Home Screen there).
+The page detects touch (on load, and again on the first finger touch) and shows on-screen controls in landscape: drag on the left to move (push all the way forward to sprint), drag on the right to look, HIT (hold to mine), PLACE, JUMP, the < > buttons for the hotbar, Blocks for the palette, FX for the next shader and Menu (tap twice) to leave the match. Touch devices start on the Vanilla shader and a render distance of 4.
+
+Customize: Options > Customize touch controls. Drag any button to move it, tap it to select and resize it, and use the sliders for overall size, opacity and look speed. Switches: left-handed, floating stick, auto-sprint, button labels, stick hint. Settings are saved on the device; Reset restores defaults.
+
+Options (top right, in menus) also holds How to play, Quality (Auto adapts the render resolution to your device; Low, Medium, High are fixed), Import and Fullscreen.
+
+## Android APK
+
+    vulcan package games/vulcancraft/src/main.vulcan --platform android --assets games/vulcancraft/assets --name Vulcancraft
+
+Builds `package-Vulcancraft-android/Vulcancraft.apk` (debug-signed, minSdk 24) in a few seconds when `ANDROID_HOME` and a JDK are available. Copy it to the phone, allow installs from unknown sources and open it, or use `adb install`.
 
 ## Mod packs
 

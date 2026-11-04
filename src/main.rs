@@ -23,7 +23,7 @@ USAGE (single file):
   vulcan emit <file.vulcan>   show generated code
   vulcan bench <file.vulcan>  compile, run, time it
   vulcan package <file.vulcan> --platform <p>   ship it: web, desktop,
-                               mobile (iOS+Android), linux, windows, macos
+                               mobile (Capacitor), android (.apk), linux, windows, macos
   vulcan test <file.vulcan>   run every fn test_*() in the file
 
 add --target js or --target py to run/emit/bench for the JavaScript
@@ -109,13 +109,14 @@ fn main() {
     }
     if cmd == "package" {
         let file = args.get(2).map(|s| s.as_str())
-            .unwrap_or_else(|| { eprintln!("usage: vulcan package <file.vulcan> --platform <web|web3d|desktop|mobile|linux|windows|macos> [--assets dir]"); std::process::exit(1); });
+            .unwrap_or_else(|| { eprintln!("usage: vulcan package <file.vulcan> --platform <web|web3d|android|desktop|mobile|linux|windows|macos> [--assets dir] [--name n]"); std::process::exit(1); });
         if !Path::new(file).exists() {
             eprintln!("error: file not found: {file}");
             std::process::exit(1);
         }
         let assets = args.iter().position(|a| a == "--assets").and_then(|i| args.get(i + 1)).cloned();
-        package::package(file, &platform, assets.as_deref());
+        let name = args.iter().position(|a| a == "--name").and_then(|i| args.get(i + 1)).cloned();
+        package::package(file, &platform, assets.as_deref(), name.as_deref());
         return;
     }
     if !matches!(cmd.as_str(), "run" | "build" | "emit" | "bench" | "test") {

@@ -13,6 +13,13 @@ fn main() {
 }
 ```
 
+## Vulcan 0.6.1 — Android, custom touch controls, faster
+
+- **Android APK**: `vulcan package game.vulcan --platform android [--assets dir] [--name Name]` writes a Gradle-free Android project (WebView shell, landscape, immersive, file picker for imports, Back button hook) and, if an Android SDK (`ANDROID_HOME`) and JDK are found, builds a debug-signed `.apk` with aapt2, javac, d8, zipalign and apksigner in about two seconds. Without the SDK it leaves `build.sh` for you to run. `--platform mobile` and `desktop` now wrap 3D programs correctly too (they used to wrap the terminal runtime, which is why a 3D game looked broken on a phone). iOS still needs Xcode on a Mac.
+- **Editable touch controls**: Options > Customize touch controls lets you drag every button, resize all or one, change opacity and look speed, and toggle left-handed layout, floating stick, auto-sprint, labels and stick hint. Settings persist per device. Touch is detected on the first touch, not only at load.
+- **Built-in help and Options menu**: first-run How to play (touch, keyboard, mods, 1v1) and a single Options dropdown (help, customize, quality, import, clear, fullscreen).
+- **Quality and speed**: Auto quality adapts render resolution to hold about 60 fps (Low, Medium and High are fixed presets with smaller shadow maps). F3 shows JS time, GL submit time and render resolution. Packaging itself takes milliseconds.
+
 ## Vulcan 0.6.0 — what's new
 
 - **A 3D web platform**: `vulcan package game.vulcan --platform web3d [--assets dir]` emits a single `index.html` with a WebGL2 host runtime (shadow pass, sky pass, opaque and transparent layers, user-defined post-processing chain), keyboard/mouse/pointer-lock input, a 2D HUD layer, sound, a persistent virtual filesystem and WebRTC/BroadcastChannel networking. The program itself is compiled to JavaScript. `--assets` embeds a folder of files that the program reads with `file_read` / `file_list`.

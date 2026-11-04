@@ -117,6 +117,11 @@ fn begin_net(g: Game, mode: string) {
 }
 
 fn menu_frame(g: Game, dt: f64) {
+    if gfx_touch() && g.touch == 0 {
+        g.touch = 1
+        g.rd = 4
+        apply_shader(g, pick_default_shader(g))
+    }
     g.time += dt * 0.004
     if g.time > 0.7 { g.time = 0.3 }
     stream(g, 8.0, 8.0, 7.0)
@@ -247,7 +252,6 @@ fn main() {
     g.name = "Player" + f"{rand_int(10, 99)}"
     apply_shader(g, pick_default_shader(g))
     g.time = 0.42
-    if gfx_touch() { g.rd = 4 }
     loop {
         let dt = gfx_frame()
         frame(g, dt)

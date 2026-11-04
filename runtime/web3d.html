@@ -28,32 +28,56 @@
 
   #bar { flex-wrap: wrap; justify-content: flex-end; max-width: calc(100vw - 20px); }
   @media (max-width: 640px) { #bar { font-size: 11px; right: 6px; top: 6px; gap: 6px; } #bar button { padding: 5px 8px; } #importmsg { display: none; } }
-  #fsbtn { display: none; }
-  body.touch #fsbtn { display: inline-block; }
   /* ---- touch controls ---- */
   #touch { display: none; position: fixed; inset: 0; z-index: 4; pointer-events: none; --uik: 1; }
   body.touchplay #touch { display: block; }
-  #touch .tb { position: absolute; pointer-events: auto; touch-action: none; display: flex; align-items: center; justify-content: center;
+  #touch .tb { box-sizing: border-box; position: absolute; pointer-events: auto; touch-action: none; display: flex; align-items: center; justify-content: center;
     border-radius: 50%; background: rgba(20,24,34,.45); border: 2px solid rgba(255,255,255,.35); color: #fff; font: bold 13px ui-monospace, Menlo, monospace;
     text-shadow: 0 1px 2px #000; -webkit-backdrop-filter: blur(2px); backdrop-filter: blur(2px); }
   #touch .tb.on { background: rgba(120,170,255,.6); border-color: #fff; }
   #touch .sq { border-radius: 10px; }
-  #tb-hit { right: calc(20px + env(safe-area-inset-right)); bottom: calc(24px + env(safe-area-inset-bottom)); width: 88px; height: 88px; background: rgba(220,70,70,.45); font-size: 15px; }
-  #tb-jump { right: calc(30px + env(safe-area-inset-right)); bottom: calc(126px + env(safe-area-inset-bottom)); width: 68px; height: 68px; }
-  #tb-place { right: calc(124px + env(safe-area-inset-right)); bottom: calc(58px + env(safe-area-inset-bottom)); width: 62px; height: 62px; }
-  #tb-menu, #tb-inv, #tb-fx { top: calc(8px + env(safe-area-inset-top)); width: 52px; height: 34px; font-size: 12px; }
-  #tb-menu { right: calc(8px + env(safe-area-inset-right)); }
-  #tb-inv { right: calc(68px + env(safe-area-inset-right)); }
-  #tb-fx { right: calc(128px + env(safe-area-inset-right)); }
-  #tb-prev, #tb-next { bottom: calc(18px * var(--uik) + env(safe-area-inset-bottom)); width: 42px; height: 42px; font-size: 18px; }
-  #tb-prev { left: calc(50% - 266px * var(--uik) - 48px); }
-  #tb-next { left: calc(50% + 266px * var(--uik) + 6px); }
+  #tb-hit { background: rgba(220,70,70,.45); font-size: 15px; }
+  #touch .tb { opacity: var(--to, .8); }
+  #touch.nolabels .tb:not(.sq) { font-size: 0 !important; }
+  #touch.nohints #stickhint { display: none; }
+  #tb-prev, #tb-next { font-size: 18px; }
   #stick { display: none; position: absolute; width: 0; height: 0; pointer-events: none; }
   #stick::before { content: ""; position: absolute; left: -56px; top: -56px; width: 108px; height: 108px; border-radius: 50%; border: 2px solid rgba(255,255,255,.4); background: rgba(255,255,255,.08); }
   #knob { position: absolute; left: -24px; top: -24px; width: 48px; height: 48px; border-radius: 50%; background: rgba(255,255,255,.45); border: 2px solid rgba(255,255,255,.8); }
-  #stickhint { position: absolute; left: calc(40px + env(safe-area-inset-left)); bottom: calc(40px + env(safe-area-inset-bottom)); width: 100px; height: 100px; border-radius: 50%; border: 2px dashed rgba(255,255,255,.22); display: flex; align-items: center; justify-content: center; color: rgba(255,255,255,.35); font-size: 11px; pointer-events: none; }
+  #stickhint { position: absolute; border-radius: 50%; border: 2px dashed rgba(255,255,255,.28); display: flex; align-items: center; justify-content: center; color: rgba(255,255,255,.4); font-size: 11px; pointer-events: none; opacity: var(--to, .8); }
+  body.touchedit #touch .tb, body.touchedit #stickhint { pointer-events: auto; touch-action: none; outline: 2px dashed rgba(255,230,120,.7); outline-offset: 2px; cursor: move; }
+  body.touchedit #stickhint { display: flex !important; }
+  body.touchedit #touch .tb.sel, body.touchedit #stickhint.sel { outline: 3px solid #ffd54a; background: rgba(255,213,74,.35); }
+  body.touchedit #bar { display: none; }
+  #tedit { display: none; position: fixed; left: 8px; top: 8px; z-index: 40; width: 230px; max-height: calc(100vh - 16px); overflow: auto; background: rgba(12,15,24,.94); border: 1px solid #3a4258; border-radius: 10px; padding: 8px 10px; color: #dfe5f2; font-size: 12px; }
+  #tedit .hd { display: flex; justify-content: space-between; align-items: center; font-weight: bold; }
+  #tedit label { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin: 6px 0 0; color: #b6c0d6; }
+  #tedit input[type=range] { width: 120px; }
+  #tedit .tip { color: #ffd27a; margin: 4px 0; }
+  #tedit button { background: #2a3350; color: #fff; border: 1px solid #44507a; border-radius: 6px; padding: 6px 10px; font: inherit; cursor: pointer; }
+  #tedit button.pri { background: #2f6bff; border-color: #2f6bff; }
+  #tedit .btns { display: flex; gap: 6px; margin-top: 8px; }
+  #optbtn { font-weight: bold; }
+  #opts { display: none; position: absolute; right: 0; top: 100%; margin-top: 6px; min-width: 230px; background: rgba(14,17,26,.97); border: 1px solid #3a4258; border-radius: 10px; padding: 6px; flex-direction: column; gap: 4px; z-index: 8; }
+  #opts.open { display: flex; }
+  #opts button, #opts .qrow { text-align: left; width: 100%; box-sizing: border-box; }
+  #opts .qrow { display: flex; align-items: center; gap: 6px; padding: 4px 6px; color: #9aa5bd; }
+  #opts .qrow select { flex: 1; background: #0a0c12; color: #e7ecf7; border: 1px solid #3a4258; border-radius: 6px; padding: 4px; font: inherit; }
+  #barwrap { position: relative; }
+  #help { display: none; position: fixed; inset: 0; z-index: 50; background: rgba(0,0,0,.72); align-items: center; justify-content: center; }
+  #help.open { display: flex; }
+  #help .card { width: min(640px, 94vw); max-height: 92vh; display: flex; flex-direction: column; background: #0f1320; border: 1px solid #3a4258; border-radius: 12px; color: #dfe5f2; font-size: 13px; line-height: 1.45; }
+  #help .tabs { display: flex; gap: 4px; padding: 8px 8px 0; overflow-x: auto; }
+  #help .tabs button { background: #1a2036; color: #b6c0d6; border: 1px solid #2b3347; border-bottom: 0; border-radius: 8px 8px 0 0; padding: 6px 10px; font: inherit; cursor: pointer; white-space: nowrap; }
+  #help .tabs button.on { background: #2f6bff; color: #fff; border-color: #2f6bff; }
+  #help .body { padding: 12px 16px; overflow: auto; flex: 1; min-height: 120px; }
+  #help .body h4 { margin: 0 0 6px; font-size: 15px; }
+  #help .body ul { margin: 6px 0; padding-left: 18px; }
+  #help .body kbd { background: #222a44; border: 1px solid #3a4258; border-radius: 4px; padding: 0 5px; }
+  #help .foot { padding: 8px 16px 12px; display: flex; justify-content: flex-end; gap: 8px; }
+  #help .foot button { background: #2f6bff; color: #fff; border: 0; border-radius: 6px; padding: 8px 16px; font: inherit; cursor: pointer; }
   #rotate { display: none; position: fixed; inset: 0; z-index: 30; background: rgba(0,0,0,.88); color: #fff; align-items: center; justify-content: center; text-align: center; font-size: 16px; padding: 30px; }
-  @media (orientation: portrait) { body.touchplay #rotate { display: flex; } }
+  @media (orientation: portrait) { body.touch #rotate { display: flex; } }
   #err { display: none; position: fixed; left: 10px; bottom: 10px; right: 10px; z-index: 20; background: rgba(120,20,20,.92); color: #fff; padding: 10px 14px; border-radius: 8px; font: 12px ui-monospace, monospace; white-space: pre-wrap; max-height: 40vh; overflow: auto; }
 </style>
 </head>
@@ -61,10 +85,18 @@
 <canvas id="gl"></canvas>
 <canvas id="hud"></canvas>
 <div id="bar"><span id="importmsg"></span>
-  <button id="importbtn" title="Import .vmod mods, .modpack lists or .vshader shader packs">Import mods / shader packs</button>
-  <button id="clearbtn">Clear imports</button>
-  <button id="fsbtn">Fullscreen</button>
-  <input id="importfile" type="file" multiple accept=".vmod,.vshader,.modpack,.txt" style="display:none">
+  <div id="barwrap">
+    <button id="optbtn" aria-haspopup="true">Options</button>
+    <div id="opts">
+      <button id="helpbtn">How to play</button>
+      <button id="customizebtn">Customize touch controls</button>
+      <div class="qrow"><span>Quality</span><select id="qualsel"><option value="auto">Auto (recommended)</option><option value="low">Low (fastest)</option><option value="medium">Medium</option><option value="high">High</option></select></div>
+      <button id="importbtn" title="Import .vmod mods, .modpack lists or .vshader shader packs">Import mods / shader packs</button>
+      <button id="clearbtn">Clear imports</button>
+      <button id="fsbtn">Fullscreen</button>
+    </div>
+  </div>
+  <input id="importfile" type="file" multiple accept=".vmod,.vshader,.modpack,.txt,text/plain,application/octet-stream" style="display:none">
 </div>
 <div id="touch">
   <div id="stickhint">move</div>
@@ -78,6 +110,27 @@
   <div class="tb" id="tb-prev">&lt;</div>
   <div class="tb" id="tb-next">&gt;</div>
 </div>
+<div id="tedit">
+  <div class="hd"><span>Touch layout</span><button id="te-fold" style="padding:2px 8px">Hide</button></div>
+  <div id="te-body">
+    <div class="tip">Drag any button to move it. Tap one to select it, then use Selected size.</div>
+    <label>All sizes <input id="te-size" type="range" min="0.6" max="1.6" step="0.05"></label>
+    <label>Selected: <b id="te-sel">none</b> <input id="te-selsize" type="range" min="0.5" max="2" step="0.05" disabled></label>
+    <label>Opacity <input id="te-opacity" type="range" min="0.2" max="1" step="0.05"></label>
+    <label>Look speed <input id="te-sens" type="range" min="0.3" max="2.5" step="0.05"></label>
+    <label>Left-handed <input id="te-lefty" type="checkbox"></label>
+    <label>Floating stick <input id="te-float" type="checkbox"></label>
+    <label>Auto-sprint <input id="te-sprint" type="checkbox"></label>
+    <label>Button labels <input id="te-labels" type="checkbox"></label>
+    <label>Stick hint <input id="te-hints" type="checkbox"></label>
+    <div class="btns"><button id="te-reset">Reset</button><button id="te-done" class="pri">Done</button></div>
+  </div>
+</div>
+<div id="help"><div class="card">
+  <div class="tabs" id="help-tabs"></div>
+  <div class="body" id="help-body"></div>
+  <div class="foot"><button id="help-close">Got it</button></div>
+</div></div>
 <div id="rotate">Rotate your device to landscape to play.</div>
 <div id="netpanel">
   <h3 id="vc-title">1v1</h3>
@@ -85,7 +138,7 @@
   <label id="vc-in-l">Code</label><textarea id="vc-in" spellcheck="false"></textarea>
   <label id="vc-out-l">Your code</label>
   <div class="row"><textarea id="vc-out" readonly spellcheck="false"></textarea></div>
-  <div class="row"><button id="vc-go">Connect</button><button id="vc-copy" onclick="navigator.clipboard.writeText(document.getElementById('vc-out').value)">Copy my code</button></div>
+  <div class="row"><button id="vc-go">Connect</button><button id="vc-copy">Copy my code</button></div>
 </div>
 <div id="err"></div>
 <script>window.__VULCAN_ASSETS__ = __ASSETS_JSON__;</script>
