@@ -1,0 +1,15 @@
+// Recursive Fibonacci — classic CPU benchmark.
+fn fib(n: i64) -> i64 {
+    if n < 2 {
+        return n
+    }
+    return fib(n - 1) + fib(n - 2)
+}
+
+fn main() -> void {
+    let t0 = clock()
+    let result = fib(35)
+    let t1 = clock()
+    print("fib(35) =", result)
+    print("elapsed:", (t1 - t0) * 1000.0, "ms")
+}

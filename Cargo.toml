@@ -1,0 +1,8 @@
+[package]
+name = "vulcan"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "vulcan"
+path = "src/main.rs"
