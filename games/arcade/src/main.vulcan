@@ -1,0 +1,96 @@
+// Vulcan Arcade — four small 3D games written in Vulcan (web3d platform).
+import "util.vulcan"
+import "shaders.vulcan"
+import "gx.vulcan"
+import "runner.vulcan"
+import "towers.vulcan"
+import "flyer.vulcan"
+import "stack.vulcan"
+
+fn hub_build() {
+    theme(1)
+    for i in 0 .. 8 {
+        let tile = 1 + i % 7
+        set_box(50 + i, 1.4, 1.4, 1.4, tile, 4.0)
+    }
+    set_box(60, 120.0, 0.4, 120.0, T_NAVY, 0.0)
+}
+
+fn hub_frame(t: f64) -> i64 {
+    let W = sw_()
+    let H = sh_()
+    for i in 0 .. 8 {
+        let a = t * 0.3 + i * 0.785
+        plc(50 + i, sin(a) * 9.0, 1.0 + sin(t * 0.8 + i) * 0.8, -14.0 + cos(a) * 5.0, t * 0.7 + i)
+    }
+    plc(60, 0.0, -0.2, -14.0, 0.0)
+    gfx_camera(0.0, 3.5, 0.0, 0.0, -0.12, 70.0)
+    ctext(W / 2.0, 22.0, 24.0, 1.0, 0.85, 0.3, 1.0, "VULCAN ARCADE")
+    ctext(W / 2.0, 54.0, 10.0, 0.9, 0.95, 1.0, 1.0, "pick a game - tap, click or press 1 to 4")
+    let names = ["Sky Runner", "Tower Guard", "Star Dodge", "Stack Tower"]
+    let info = ["dodge and jump", "defend the base", "fly and shoot", "build it high"]
+    let keys = ["runner", "towers", "flyer", "stack"]
+    let bw = min(W * 0.44, 250.0)
+    let bh = min(H * 0.26, 74.0)
+    let gx = (W - bw * 2.0 - 14.0) / 2.0
+    let gy = 84.0
+    let pick = 0
+    for i in 0 .. 4 {
+        let x = gx + (i % 2) * (bw + 14.0)
+        let y = gy + (i / 2) * (bh + 14.0)
+        if button(x, y, bw, bh, names[i]) { pick = i + 1 }
+        ctext(x + bw / 2.0, y + bh - 22.0, 9.0, 0.7, 0.85, 1.0, 1.0, info[i] + "  best " + f"{hi_get(keys[i])}")
+    }
+    for i in 0 .. 4 { if gfx_key_pressed(49 + i) { pick = i + 1 } }
+    return pick
+}
+
+fn main() {
+    gfx_open("Vulcan Arcade")
+    gfx_texture(256, 256, make_atlas())
+    let err = apply_shader_file("shaders/arcade.vshader")
+    if err.len() > 0 { print(err) }
+    gfx_chrome(true)
+    gfx_set_lock(false)
+    let mode = 0
+    let t = 0.0
+    let run = runner_new()
+    let tw = towers_new()
+    let fl = flyer_new()
+    let sk = stack_new()
+    hub_build()
+    loop {
+        let dt = gfx_frame()
+        t += dt
+        if mode == 0 {
+            let p = hub_frame(t)
+            if p > 0 {
+                kill_range(50, 61)
+                mode = p
+                if mode == 1 { run = runner_new() runner_build() }
+                if mode == 2 { tw = towers_new() towers_build(tw) }
+                if mode == 3 { fl = flyer_new() flyer_build() }
+                if mode == 4 { sk = stack_new() stack_build(sk) }
+            }
+        } else {
+            let r = 0
+            if mode == 1 { r = runner_frame(run, dt) }
+            if mode == 2 { r = towers_frame(tw, dt) }
+            if mode == 3 { r = flyer_frame(fl, dt) }
+            if mode == 4 { r = stack_frame(sk, dt) }
+            if r > 0 {
+                if mode == 1 { runner_cleanup() }
+                if mode == 2 { towers_cleanup() }
+                if mode == 3 { flyer_cleanup() }
+                if mode == 4 { stack_cleanup() }
+                if r == 1 { mode = 0 hub_build() }
+                if r == 2 {
+                    if mode == 1 { run = runner_new() runner_build() }
+                    if mode == 2 { tw = towers_new() towers_build(tw) }
+                    if mode == 3 { fl = flyer_new() flyer_build() }
+                    if mode == 4 { sk = stack_new() stack_build(sk) }
+                }
+            }
+        }
+    }
+}

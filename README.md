@@ -13,9 +13,17 @@ fn main() {
 }
 ```
 
+## Vulcan 0.6.3 — lighter on phones, and the Arcade
+
+- **Packed vertices**: the web3d host now uploads meshes as 20 bytes per vertex (16-bit positions relative to each mesh, 8-bit normals and light, 16-bit UVs) instead of 48. Shader sources do not change; `aPos` is decoded by the host prelude. Per-frame meshes (hand, opponent, particles) are only re-uploaded when their data changes.
+- **Shadow pass only when used**: a scene shader that never samples `uShadow` (Vanilla, Retro, Cinematic, the Arcade shader) no longer pays for the shadow map pass.
+- **Smaller targets**: scene and post targets use `R11F_G11F_B10F` when available (half the bandwidth of RGBA16F), the HUD canvas is skipped when nothing changed, and touch devices cap the canvas pixel ratio at 1.25 (HUD 1.5).
+- **Vulcancraft on touch**: full-detail radius 4 chunks, smaller per-frame stream budgets (2.5 ms) so chunk work cannot cause long hitches.
+- **Vulcan Arcade**: four small games in `games/arcade/` (Sky Runner, Tower Guard, Star Dodge, Stack Tower) built from one shared toolkit, packaged as one HTML file or one APK. See its README.
+
 ## Vulcan 0.6.2 — horizon terrain and unchecked arrays
 
-- **Render distance 20+ on phones**: Vulcancraft now meshes only a small full-detail radius (5 chunks on touch, 8 on desktop) and draws everything beyond it as coarse height columns ("horizon terrain", `games/vulcancraft/src/lod.vulcan`) built straight from the terrain functions, with trees, water and skirts. Slider range is 4 to 32; touch devices default to 20, desktop to 16. Typical cost at 20: about 180 draw calls and 0.3M triangles, with script time under 1 ms per frame once loaded.
+- **Render distance 20+ on phones**: Vulcancraft now meshes only a small full-detail radius (4 chunks on touch, 8 on desktop) and draws everything beyond it as coarse height columns ("horizon terrain", `games/vulcancraft/src/lod.vulcan`) built straight from the terrain functions, with trees, water and skirts. Slider range is 4 to 32; touch devices default to 20, desktop to 16. Typical cost at 20: about 180 draw calls and 0.3M triangles, with script time under 1 ms per frame once loaded.
 - **`vulcan package --fast`** (default for `web3d` and `android`; `--checked` turns it off): the JS backend emits plain `a[i]` instead of bounds-checked helper calls, which removed the helper cost from the hot meshing and terrain loops.
 
 ## Vulcan 0.6.1 — Android, custom touch controls, faster

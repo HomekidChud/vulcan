@@ -1,0 +1,359 @@
+// towers.vulcan — Tower Guard: place towers on the grass, stop the cubes reaching the base.
+// Tap a tile to build the selected tower. Arrow = fast, Cannon = slow heavy hit.
+
+const TCOLS = 12
+const TROWS = 8
+const NE = 40
+const NT = 60
+const NB = 24
+
+struct Towers {
+    cell: [i64],          // 0 grass, 1 path, 2 tower
+    tkind: [i64], tx: [f64], tz: [f64], tcool: [f64], tn: i64,
+    ex: [f64], ez: [f64], ehp: [f64], emax: [f64], eseg: [f64], espd: [f64], elive: [i64],
+    qx: [f64], qy: [f64], qz: [f64], btarget: [i64], bdmg: [f64], blive: [i64],
+    px: [f64], pz: [f64],
+    money: i64, lives: i64, wave: i64, spawn_left: i64, spawn_t: f64, wave_pause: f64,
+    sel: i64, t: f64, over: bool, hi: i64, kills: i64, msg: string, msg_t: f64, hx: i64, hz: i64
+}
+
+fn tcx(c: i64) -> f64 { return (c - TCOLS / 2.0 + 0.5) * 2.0 }
+fn tcz(r: i64) -> f64 { return (r - TROWS / 2.0 + 0.5) * 2.0 }
+
+fn towers_new() -> Towers {
+    // path through the grid as (col,row) waypoints
+    let wc = [0, 3, 3, 8, 8, 5, 5, 11]
+    let wr = [1, 1, 6, 6, 2, 2, 4, 4]
+    let cell: [i64] = []
+    for i in 0 .. TCOLS * TROWS { cell.push(0) }
+    let px: [f64] = []
+    let pz: [f64] = []
+    for k in 0 .. wc.len() - 1 {
+        let x0 = wc[k]
+        let z0 = wr[k]
+        let x1 = wc[k + 1]
+        let z1 = wr[k + 1]
+        let n = max(abs(x1 - x0), abs(z1 - z0))
+        for s in 0 .. n + 1 {
+            let cx = x0
+            let cz = z0
+            if x1 > x0 { cx = x0 + s } elif x1 < x0 { cx = x0 - s }
+            if z1 > z0 { cz = z0 + s } elif z1 < z0 { cz = z0 - s }
+            cell[cz * TCOLS + cx] = 1
+        }
+    }
+    for k in 0 .. wc.len() {
+        px.push(tcx(wc[k]))
+        pz.push(tcz(wr[k]))
+    }
+    let t = Towers { cell: cell, tkind: [], tx: [], tz: [], tcool: [], tn: 0,
+        ex: [], ez: [], ehp: [], emax: [], eseg: [], espd: [], elive: [],
+        qx: [], qy: [], qz: [], btarget: [], bdmg: [], blive: [], px: px, pz: pz,
+        money: 130, lives: 12, wave: 0, spawn_left: 0, spawn_t: 0.0, wave_pause: 4.0,
+        sel: 0, t: 0.0, over: false, hi: hi_get("towers"), kills: 0, msg: "", msg_t: 0.0, hx: -1, hz: -1 }
+    for i in 0 .. NE {
+        t.ex.push(0.0)
+        t.ez.push(0.0)
+        t.ehp.push(0.0)
+        t.emax.push(1.0)
+        t.eseg.push(0.0)
+        t.espd.push(2.0)
+        t.elive.push(0)
+    }
+    for i in 0 .. NT {
+        t.tkind.push(0)
+        t.tx.push(0.0)
+        t.tz.push(0.0)
+        t.tcool.push(0.0)
+    }
+    for i in 0 .. NB {
+        t.qx.push(0.0)
+        t.qy.push(0.0)
+        t.qz.push(0.0)
+        t.btarget.push(0)
+        t.bdmg.push(1.0)
+        t.blive.push(0)
+    }
+    return t
+}
+
+fn towers_build(t: Towers) {
+    theme(0)
+    let v: [f64] = []
+    for r in 0 .. TROWS {
+        for c in 0 .. TCOLS {
+            let tile = T_GREEN
+            if (r + c) % 2 == 1 { tile = T_MINT }
+            if t.cell[r * TCOLS + c] == 1 { tile = T_SAND }
+            add_box(v, tcx(c), -0.15, tcz(r), 1.96, 0.3, 1.96, tile, 0.0)
+        }
+    }
+    gfx_mesh_set(300, 0, v)
+    set_box(301, 300.0, 0.4, 300.0, T_FOREST, 0.0)
+    plc(301, 0.0, -0.9, 0.0, 0.0)
+    // base at the end of the path
+    let b: [f64] = []
+    add_box(b, 0.0, 0.8, 0.0, 1.6, 1.6, 1.6, T_BLUE, 0.0)
+    add_box(b, 0.0, 1.9, 0.0, 0.8, 0.6, 0.8, T_CYAN, 4.0)
+    gfx_mesh_set(302, 0, b)
+    plc(302, tcx(11) + 2.0, 0.0, tcz(4), 0.0)
+    set_box(303, 1.9, 0.12, 1.9, T_YELLOW, 4.0)
+    hide(303)
+    for i in 0 .. NE { hide(400 + i) }
+    for i in 0 .. NT { hide(500 + i) }
+    for i in 0 .. NB {
+        set_box(450 + i, 0.3, 0.3, 0.3, T_YELLOW, 4.0)
+        hide(450 + i)
+    }
+}
+
+fn tower_cost(k: i64) -> i64 { if k == 0 { return 50 } return 100 }
+
+fn tower_mesh(id: i64, k: i64) {
+    let v: [f64] = []
+    if k == 0 {
+        add_box(v, 0.0, 0.35, 0.0, 1.2, 0.7, 1.2, T_GREY, 0.0)
+        add_box(v, 0.0, 1.1, 0.0, 0.7, 0.8, 0.7, T_CYAN, 0.0)
+        add_box(v, 0.0, 1.6, -0.35, 0.18, 0.18, 0.7, T_DARK, 0.0)
+    } else {
+        add_box(v, 0.0, 0.4, 0.0, 1.5, 0.8, 1.5, T_DARK, 0.0)
+        add_box(v, 0.0, 1.2, 0.0, 1.0, 0.8, 1.0, T_ORANGE, 0.0)
+        add_box(v, 0.0, 1.75, -0.45, 0.4, 0.4, 0.9, T_BLACK, 0.0)
+    }
+    gfx_mesh_set(id, 0, v)
+}
+
+fn enemy_mesh(id: i64, kind: i64) {
+    let tile = T_RED
+    let s = 0.9
+    if kind == 1 { tile = T_PURPLE s = 1.2 }
+    if kind == 2 { tile = T_PINK s = 0.6 }
+    set_box(id, s, s, s, tile, 0.0)
+}
+
+fn towers_wave(t: Towers) {
+    t.wave += 1
+    t.spawn_left = 6 + t.wave * 2
+    t.spawn_t = 0.0
+    t.msg = f"wave {t.wave}"
+    t.msg_t = 2.0
+}
+
+fn towers_spawn(t: Towers) {
+    for i in 0 .. NE {
+        if t.elive[i] == 0 {
+            let kind = 0
+            if t.wave >= 3 && rand_int(0, 4) == 0 { kind = 1 }
+            if t.wave >= 2 && rand_int(0, 5) == 0 { kind = 2 }
+            let hp = 3.0 + t.wave * 1.6
+            let sp = 2.0 + t.wave * 0.08
+            if kind == 1 { hp = hp * 3.0 sp = sp * 0.7 }
+            if kind == 2 { hp = hp * 0.5 sp = sp * 1.7 }
+            t.elive[i] = 1
+            t.ehp[i] = hp
+            t.emax[i] = hp
+            t.eseg[i] = 0.0
+            t.espd[i] = min(sp, 5.5)
+            t.ex[i] = t.px[0] - 2.0
+            t.ez[i] = t.pz[0]
+            enemy_mesh(400 + i, kind)
+            return
+        }
+    }
+}
+
+// returns 0 = playing, 1 = back to menu, 2 = restart
+fn towers_frame(t: Towers, dt: f64) -> i64 {
+    let W = sw_()
+    let H = sh_()
+    if gfx_key_pressed(27) { return 1 }
+    if !t.over {
+        t.t += dt
+        // wave control
+        if t.spawn_left == 0 {
+            let alive = 0
+            for i in 0 .. NE { if t.elive[i] == 1 { alive += 1 } }
+            if alive == 0 {
+                t.wave_pause -= dt
+                if t.wave_pause <= 0.0 { towers_wave(t) t.wave_pause = 5.0 t.money += 20 + t.wave * 3 }
+            }
+        } else {
+            t.spawn_t -= dt
+            if t.spawn_t <= 0.0 { towers_spawn(t) t.spawn_left -= 1 t.spawn_t = max(0.35, 1.0 - t.wave * 0.04) }
+        }
+        // enemies walk the path
+        let np = t.px.len()
+        for i in 0 .. NE {
+            if t.elive[i] == 0 { hide(400 + i) continue }
+            let k = to_int(f"{floor(t.eseg[i])}")
+            if k >= np - 1 {
+                t.elive[i] = 0
+                hide(400 + i)
+                t.lives -= 1
+                snd(3, 0.6)
+                if t.lives <= 0 { t.over = true snd(5, 0.9) hi_set("towers", t.wave) t.hi = hi_get("towers") }
+                continue
+            }
+            let ax = t.px[k]
+            let az = t.pz[k]
+            let bx = t.px[k + 1]
+            let bz = t.pz[k + 1]
+            let len = max(0.1, abs(bx - ax) + abs(bz - az))
+            t.eseg[i] += t.espd[i] * dt / len
+            let f = t.eseg[i] - floor(t.eseg[i])
+            if t.eseg[i] < 0.0 { f = 0.0 }
+            t.ex[i] = ax + (bx - ax) * f
+            t.ez[i] = az + (bz - az) * f
+            plc(400 + i, t.ex[i], 0.0 + abs(sin(t.t * 8.0 + i)) * 0.18, t.ez[i], t.t * 2.0)
+        }
+        // towers shoot
+        for j in 0 .. t.tn {
+            t.tcool[j] -= dt
+            if t.tcool[j] > 0.0 { continue }
+            let range = 5.2
+            let dmg = 1.0
+            let cd = 0.45
+            if t.tkind[j] == 1 { range = 6.4 dmg = 5.0 cd = 1.5 }
+            let best = -1
+            for i in 0 .. NE {
+                if t.elive[i] == 0 { continue }
+                let dx = t.ex[i] - t.tx[j]
+                let dz = t.ez[i] - t.tz[j]
+                let d = sqrt(dx * dx + dz * dz)
+                if d < range { if best < 0 || t.eseg[i] > t.eseg[best] { best = i } }
+            }
+            if best >= 0 {
+                t.tcool[j] = cd
+                for b in 0 .. NB {
+                    if t.blive[b] == 0 {
+                        t.blive[b] = 1
+                        t.qx[b] = t.tx[j]
+                        t.qy[b] = 1.6
+                        t.qz[b] = t.tz[j]
+                        t.btarget[b] = best
+                        t.bdmg[b] = dmg
+                        break
+                    }
+                }
+                plc(500 + j, t.tx[j], 0.0, t.tz[j], atan2(t.tx[j] - t.ex[best], t.tz[j] - t.ez[best]) + 3.1416)
+            }
+        }
+        // bolts
+        for b in 0 .. NB {
+            if t.blive[b] == 0 { hide(450 + b) continue }
+            let e = t.btarget[b]
+            if t.elive[e] == 0 { t.blive[b] = 0 hide(450 + b) continue }
+            let dx = t.ex[e] - t.qx[b]
+            let dy = 0.5 - t.qy[b]
+            let dz = t.ez[e] - t.qz[b]
+            let d = max(0.001, sqrt(dx * dx + dy * dy + dz * dz))
+            let st = 20.0 * dt
+            if d < st + 0.3 {
+                t.blive[b] = 0
+                hide(450 + b)
+                t.ehp[e] -= t.bdmg[b]
+                snd(4, 0.3)
+                if t.ehp[e] <= 0.0 {
+                    t.elive[e] = 0
+                    hide(400 + e)
+                    t.money += 9
+                    t.kills += 1
+                    snd(6, 0.25)
+                }
+            } else {
+                t.qx[b] += dx / d * st
+                t.qy[b] += dy / d * st
+                t.qz[b] += dz / d * st
+                plc(450 + b, t.qx[b], t.qy[b], t.qz[b], 0.0)
+            }
+        }
+    }
+    // camera: fixed angled overview
+    let zs = clampf(1.7 / (W / H), 1.0, 2.6)
+    gfx_camera(0.0, 17.0 * zs, 13.5 * zs, 0.0, -0.9, 56.0)
+    // tapping
+    t.hx = -1
+    t.hz = -1
+    let mxp = gfx_mouse_x()
+    let myp = gfx_mouse_y()
+    let bd2 = 1000000000.0
+    if myp > 80.0 && !t.over {
+        for r in 0 .. TROWS {
+            for c in 0 .. TCOLS {
+                let p = gfx_project(tcx(c), 0.0, tcz(r))
+                if p[2] < 0.0 { continue }
+                let dx = p[0] - mxp
+                let dy = p[1] - myp
+                let d2 = dx * dx + dy * dy
+                if d2 < bd2 && d2 < 900.0 { bd2 = d2 t.hx = c t.hz = r }
+            }
+        }
+    }
+    if t.hx >= 0 {
+        plc(303, tcx(t.hx), 0.02, tcz(t.hz), 0.0)
+        if gfx_click(0) > 0 {
+            let idx = t.hz * TCOLS + t.hx
+            let cost = tower_cost(t.sel)
+            if t.cell[idx] != 0 { t.msg = "cannot build there" t.msg_t = 1.2 }
+            elif t.money < cost { t.msg = "not enough money" t.msg_t = 1.2 }
+            elif t.tn >= NT { t.msg = "tower limit" t.msg_t = 1.2 } else {
+                t.cell[idx] = 2
+                let j = t.tn
+                t.tn += 1
+                t.tkind[j] = t.sel
+                t.tx[j] = tcx(t.hx)
+                t.tz[j] = tcz(t.hz)
+                t.tcool[j] = 0.0
+                tower_mesh(500 + j, t.sel)
+                plc(500 + j, t.tx[j], 0.0, t.tz[j], 0.0)
+                t.money -= cost
+                snd(0, 0.5)
+            }
+        }
+    } else { hide(303) }
+    if gfx_key_pressed(49) { t.sel = 0 }
+    if gfx_key_pressed(50) { t.sel = 1 }
+    // HUD
+    top_bar("TOWER GUARD", f"wave {t.wave}   lives {t.lives}   gold {t.money}", t.hi)
+    let bw = min(150.0, W * 0.3)
+    let byy = H - 54.0
+    let c0 = 0.3
+    if t.sel == 0 { c0 = 1.0 }
+    hud_rect(W / 2.0 - bw - 8.0 - 3.0, byy - 3.0, bw + 6.0, 50.0, c0, c0, 0.2, 0.9 * c0)
+    if button(W / 2.0 - bw - 8.0, byy, bw, 44.0, "Arrow 50") { t.sel = 0 }
+    let c1 = 0.3
+    if t.sel == 1 { c1 = 1.0 }
+    hud_rect(W / 2.0 + 8.0 - 3.0, byy - 3.0, bw + 6.0, 50.0, c1, c1, 0.2, 0.9 * c1)
+    if button(W / 2.0 + 8.0, byy, bw, 44.0, "Cannon 100") { t.sel = 1 }
+    if t.msg_t > 0.0 {
+        t.msg_t -= dt
+        ctext(W / 2.0, 44.0, 14.0, 1.0, 0.9, 0.4, 1.0, t.msg)
+    }
+    // health bars
+    for i in 0 .. NE {
+        if t.elive[i] == 1 {
+            let p = gfx_project(t.ex[i], 1.3, t.ez[i])
+            if p[2] > 0.0 {
+                let f = clampf(t.ehp[i] / t.emax[i], 0.0, 1.0)
+                hud_rect(p[0] - 14.0, p[1], 28.0, 4.0, 0.0, 0.0, 0.0, 0.7)
+                hud_rect(p[0] - 14.0, p[1], 28.0 * f, 4.0, 0.3, 1.0, 0.3, 1.0)
+            }
+        }
+    }
+    if t.wave == 0 && t.tn == 0 {
+        ctext(W / 2.0, H * 0.22, 13.0, 1.0, 1.0, 1.0, 1.0, "tap a tile to build a tower")
+    }
+    if t.over {
+        let a = end_panel("BASE LOST", f"reached wave {t.wave}", f"enemies destroyed {t.kills}")
+        if a == 1 { return 2 }
+        if a == 2 { return 1 }
+    }
+    return 0
+}
+
+fn towers_cleanup() {
+    kill_range(300, 304)
+    kill_range(400, 400 + NE)
+    kill_range(450, 450 + NB)
+    kill_range(500, 500 + NT)
+}

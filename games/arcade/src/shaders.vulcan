@@ -1,0 +1,63 @@
+// shaders.vulcan — .vshader pack loader.
+//
+// A shader pack is a text file made of sections introduced by '@' lines:
+//   @name My Pack            display name
+//   @desc One line text      description
+//   @common                  GLSL prepended to every stage (functions/consts only)
+//   @scene.vs / @scene.fs    world geometry (vertex attrs: aPos aNormal aUV aLight aMat)
+//   @shadow.vs / @shadow.fs  depth-only pass from the sun
+//   @sky.fs                  fullscreen sky (optional)
+//   @post0.fs [scale=0.5]    fullscreen post-process passes, run in order post0..post9
+// Uniforms such as uViewProj, uSunDir, uTime and samplers uAtlas/uScene/uDepth/uColor/
+// uShadow/uPass0..3 are declared automatically by the engine.
+
+struct Section { name: string, scale: f64, text: string }
+
+fn parse_sections(text: string) -> [Section] {
+    let out: [Section] = []
+    let cur = Section { name: "", scale: 1.0, text: "" }
+    for line in text_lines(text) {
+        if line.starts_with("@") {
+            let p = words(line)
+            let nm = p[0].substring(1, p[0].len())
+            if nm == "name" || nm == "desc" {
+                cur = Section { name: "", scale: 1.0, text: "" }
+            } else {
+                cur = Section { name: nm, scale: kvf(p, "scale", 1.0), text: "" }
+                out.push(cur)
+            }
+        } elif cur.name.len() > 0 {
+            cur.text = cur.text + line + "\n"
+        }
+    }
+    return out
+}
+
+fn find_section(ss: [Section], name: string) -> i64 {
+    for i in 0 .. ss.len() { if ss[i].name == name { return i } }
+    return -1
+}
+
+// compile every stage of a pack; returns "" on success or the compiler log
+fn apply_shader_file(file: string) -> string {
+    let ss = parse_sections(file_read(file))
+    let common = ""
+    let ci = find_section(ss, "common")
+    if ci >= 0 { common = ss[ci].text }
+    gfx_shader_clear()
+    let errs = ""
+    let slots = ["scene", "shadow", "sky", "post0", "post1", "post2", "post3", "post4", "post5", "post6", "post7", "post8", "post9"]
+    for sl in slots {
+        let fi = find_section(ss, sl + ".fs")
+        if fi < 0 { continue }
+        let vi = find_section(ss, sl + ".vs")
+        let vs = ""
+        if vi >= 0 { vs = common + ss[vi].text }
+        let name = sl
+        if ss[fi].scale != 1.0 { name = sl + "@" + f"{ss[fi].scale}" }
+        let e = gfx_shader(name, vs, common + ss[fi].text)
+        if e.len() > 0 { errs = errs + e + "\n" }
+    }
+    return errs
+}
+

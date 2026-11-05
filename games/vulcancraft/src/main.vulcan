@@ -125,8 +125,12 @@ fn menu_frame(g: Game, dt: f64) {
     }
     g.time += dt * 0.004
     if g.time > 0.7 { g.time = 0.3 }
-    stream(g, 8.0, 8.0, 7.0)
-    lod_update(g, 8.0, 8.0, 4.0)
+    let mb = 7.0
+    let ml = 4.0
+    if g.touch == 1 { mb = 3.0
+        ml = 2.0 }
+    stream(g, 8.0, 8.0, mb)
+    lod_update(g, 8.0, 8.0, ml)
     set_sky_uniforms(g)
     menu_camera(g)
     if g.net_phase == 1 {
@@ -192,8 +196,12 @@ fn play_frame(g: Game, dt: f64) {
     update_parts(g, dt)
     g.time += dt / g.ct.rules.daylen
     if g.time > 1.0 { g.time -= 1.0 }
-    stream(g, g.me.x, g.me.z, 5.0)
-    lod_update(g, g.me.x, g.me.z, 3.5)
+    let pb = 5.0
+    let pl = 3.5
+    if g.touch == 1 { pb = 2.5
+        pl = 1.5 }
+    stream(g, g.me.x, g.me.z, pb)
+    lod_update(g, g.me.x, g.me.z, pl)
     render_world(g)
     draw_hud(g)
     if g.mode == 2 { draw_palette(g) }

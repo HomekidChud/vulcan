@@ -1,0 +1,159 @@
+// stack.vulcan — Stack Tower: tap to stop the sliding slab on top of the tower. Whatever hangs
+// over is cut off, so the tower gets thinner. Perfect drops keep the full width.
+
+struct Stack {
+    cx: f64, cz: f64, w: f64, d: f64, level: i64, axis: i64, ph: f64, spd: f64,
+    mx: f64, mz: f64, over: bool, score: i64, hi: i64, combo: i64, t: f64, cam: f64,
+    dx: f64, dy: f64, dz: f64, dv: f64, dlive: bool, started: bool, flash: f64, perfect: i64
+}
+
+fn stack_tile(l: i64) -> i64 {
+    let cyc = [T_RED, T_ORANGE, T_YELLOW, T_GREEN, T_CYAN, T_BLUE, T_PURPLE, T_PINK]
+    return cyc[l % 8]
+}
+
+fn stack_new() -> Stack {
+    return Stack { cx: 0.0, cz: 0.0, w: 4.0, d: 4.0, level: 0, axis: 0, ph: 0.0, spd: 1.7,
+        mx: 0.0, mz: 0.0, over: false, score: 0, hi: hi_get("stack"), combo: 0, t: 0.0, cam: 0.0,
+        dx: 0.0, dy: 0.0, dz: 0.0, dv: 0.0, dlive: false, started: false, flash: 0.0, perfect: 0 }
+}
+
+fn stack_slab(id: i64, level: i64, w: f64, d: f64, mat: f64) {
+    set_box(id, w, 0.8, d, stack_tile(level), mat)
+}
+
+fn stack_build(s: Stack) {
+    theme(0)
+    set_box(797, 16.0, 1.0, 16.0, T_ICE, 0.0)
+    plc(797, 0.0, -1.0, 0.0, 0.0)
+    // base slab is level 0
+    stack_slab(700, 0, s.w, s.d, 0.0)
+    plc(700, 0.0, 0.0, 0.0, 0.0)
+    stack_slab(799, 1, s.w, s.d, 4.0)
+    hide(798)
+}
+
+fn stack_frame(s: Stack, dt: f64) -> i64 {
+    let W = sw_()
+    let H = sh_()
+    if gfx_key_pressed(27) { return 1 }
+    s.t += dt
+    let tap = gfx_key_pressed(32) || gfx_click(0) > 0
+    if tap && gfx_mouse_y() < 40.0 && gfx_click(0) > 0 { tap = false }
+    if !s.over {
+        if s.started { s.ph += dt * s.spd }
+        let off = sin(s.ph) * 5.2
+        if s.axis == 0 { s.mx = s.cx + off s.mz = s.cz } else { s.mx = s.cx s.mz = s.cz + off }
+        if tap {
+            if !s.started { s.started = true }
+            else {
+                // overlap with the slab below
+                let delta = 0.0
+                let size = 0.0
+                let other = 0.0
+                if s.axis == 0 { delta = s.mx - s.cx size = s.w other = s.d } else { delta = s.mz - s.cz size = s.d other = s.w }
+                let ad = abs(delta)
+                if ad < 0.18 {
+                    s.combo += 1
+                    s.perfect += 1
+                    snd(6, 0.5)
+                    s.flash = 1.0
+                    if s.combo >= 4 {
+                        if s.axis == 0 { s.w = min(4.0, s.w + 0.25) } else { s.d = min(4.0, s.d + 0.25) }
+                    }
+                } elif ad >= size {
+                    s.over = true
+                    snd(5, 0.9)
+                    s.dlive = true
+                    s.dx = s.mx
+                    s.dz = s.mz
+                    s.dy = (s.level + 1) * 0.8
+                    s.dv = 0.0
+                } else {
+                    s.combo = 0
+                    snd(2, 0.5)
+                    let ns = size - ad
+                    // debris
+                    let dsz = ad
+                    if s.axis == 0 {
+                        let nx = (s.mx + s.cx) / 2.0
+                        let sign = 1.0
+                        if delta < 0.0 { sign = -1.0 }
+                        s.dx = nx + sign * (ns / 2.0 + dsz / 2.0)
+                        s.dz = s.mz
+                        s.dy = (s.level + 1) * 0.8
+                        s.dlive = true
+                        s.dv = 0.0
+                        set_box(798, dsz, 0.8, s.d, stack_tile(s.level + 1), 0.0)
+                        s.cx = nx
+                        s.w = ns
+                    } else {
+                        let nz = (s.mz + s.cz) / 2.0
+                        let sign = 1.0
+                        if delta < 0.0 { sign = -1.0 }
+                        s.dz = nz + sign * (ns / 2.0 + dsz / 2.0)
+                        s.dx = s.mx
+                        s.dy = (s.level + 1) * 0.8
+                        s.dlive = true
+                        s.dv = 0.0
+                        set_box(798, s.w, 0.8, dsz, stack_tile(s.level + 1), 0.0)
+                        s.cz = nz
+                        s.d = ns
+                    }
+                    snd(3, 0.3)
+                }
+                if !s.over {
+                    // place the slab permanently
+                    s.level += 1
+                    let id = 700 + s.level % 60
+                    stack_slab(id, s.level, s.w, s.d, 0.0)
+                    plc(id, s.cx, s.level * 0.8, s.cz, 0.0)
+                    s.score += 1 + s.combo
+                    s.axis = 1 - s.axis
+                    s.ph = 0.0 - 1.5708
+                    s.spd = min(4.2, 1.7 + s.level * 0.05)
+                    stack_slab(799, s.level + 1, s.w, s.d, 4.0)
+                }
+            }
+        }
+        if s.over {
+            hi_set("stack", s.score)
+            s.hi = hi_get("stack")
+        }
+    }
+    // debris physics
+    if s.dlive {
+        s.dv -= 24.0 * dt
+        s.dy += s.dv * dt
+        plc(798, s.dx, s.dy, s.dz, 0.0)
+        if s.dy < s.cam - 14.0 { s.dlive = false hide(798) }
+    } else { hide(798) }
+    if s.over { plc(799, s.mx, (s.level + 1) * 0.8 - 0.0 - s.dv * 0.0, s.mz, 0.0) }
+    else { plc(799, s.mx, (s.level + 1) * 0.8, s.mz, 0.0) }
+    // camera glides up
+    let target = s.level * 0.8
+    s.cam += (target - s.cam) * min(1.0, dt * 4.0)
+    let ang = 0.7 + s.t * 0.0
+    gfx_camera(sin(ang) * 15.0, s.cam + 11.0, cos(ang) * 15.0, ang, -0.62, 54.0)
+    // HUD
+    top_bar("STACK TOWER", f"{s.score}", s.hi)
+    if !s.started {
+        ctext(W / 2.0, H * 0.28, 18.0, 1.0, 1.0, 1.0, 1.0, "tap to start")
+        ctext(W / 2.0, H * 0.28 + 30.0, 11.0, 0.9, 0.95, 1.0, 1.0, "tap again to drop the slab")
+    } elif s.flash > 0.0 {
+        s.flash -= dt
+        ctext(W / 2.0, H * 0.28, 22.0, 1.0, 0.9, 0.3, s.flash, "PERFECT")
+    }
+    if s.combo >= 2 { ctext(W / 2.0, 44.0, 11.0, 0.7, 1.0, 0.8, 1.0, f"combo x{s.combo}") }
+    if s.over {
+        let a = end_panel("TOPPLED", f"height {s.score}", f"perfect drops {s.perfect}")
+        if a == 1 { return 2 }
+        if a == 2 { return 1 }
+    }
+    return 0
+}
+
+fn stack_cleanup() {
+    kill_range(700, 760)
+    kill_range(797, 800)
+}

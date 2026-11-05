@@ -32,7 +32,7 @@ fn lod_order() -> [i64] {
 
 // voxel (full detail) radius in chunks: render distance is capped here, LOD covers the rest
 fn vrad(g: Game) -> i64 {
-    if g.touch == 1 { return min(g.rd, 5) }
+    if g.touch == 1 { return min(g.rd, 4) }
     return min(g.rd, 8)
 }
 

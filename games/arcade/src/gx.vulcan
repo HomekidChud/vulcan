@@ -1,0 +1,214 @@
+// gx.vulcan — tiny 3D toolkit shared by the Arcade games: colour palette atlas, box meshes,
+// theme (sky) presets, HUD helpers, persistent high scores.
+
+const TUV = 0.0615
+
+// tile index -> colour (every tile of the 16x16 atlas is one flat colour)
+fn pal() -> [i64] {
+    return [0xf4f4f4, 0xe84a4a, 0xff9a2e, 0xffd93d, 0x48c95a, 0x32d2e6, 0x3a6df0, 0x9b5de5,
+            0xff6fb5, 0x3a3f4b, 0x9aa3b2, 0x8a5a36, 0xe8d49a, 0x1f7a3a, 0x16224a, 0x0c0f18,
+            0x6ee7a0, 0xa8e6ff, 0xffe9a8, 0xc9c2ff]
+}
+const T_WHITE = 0
+const T_RED = 1
+const T_ORANGE = 2
+const T_YELLOW = 3
+const T_GREEN = 4
+const T_CYAN = 5
+const T_BLUE = 6
+const T_PURPLE = 7
+const T_PINK = 8
+const T_DARK = 9
+const T_GREY = 10
+const T_BROWN = 11
+const T_SAND = 12
+const T_FOREST = 13
+const T_NAVY = 14
+const T_BLACK = 15
+const T_MINT = 16
+const T_ICE = 17
+const T_CREAM = 18
+const T_LILAC = 19
+
+fn make_atlas() -> [i64] {
+    let a: [i64] = []
+    for i in 0 .. 262144 { a.push(255) }
+    let p = pal()
+    for t in 0 .. p.len() {
+        let tx = t % 16
+        let ty = t / 16
+        for y in 0 .. 16 {
+            for x in 0 .. 16 {
+                let idx = ((ty * 16 + y) * 256 + tx * 16 + x) * 4
+                a[idx] = col_r(p[t])
+                a[idx + 1] = col_g(p[t])
+                a[idx + 2] = col_b(p[t])
+                a[idx + 3] = 255
+            }
+        }
+    }
+    return a
+}
+
+fn tu(t: i64) -> f64 { return (t % 16) / 16.0 + 0.0008 }
+fn tv(t: i64) -> f64 { return (t / 16) / 16.0 + 0.0008 }
+
+fn pv(v: [f64], x: f64, y: f64, z: f64, nx: f64, ny: f64, nz: f64, u: f64, t: f64, ao: f64, mat: f64) {
+    v.push(x)
+    v.push(y)
+    v.push(z)
+    v.push(nx)
+    v.push(ny)
+    v.push(nz)
+    v.push(u)
+    v.push(t)
+    v.push(1.0)
+    v.push(0.0)
+    v.push(ao)
+    v.push(mat)
+}
+
+// append an axis aligned box (centre + size) with one tile; mat 0 solid, 4 glow
+fn add_box(v: [f64], cx: f64, cy: f64, cz: f64, w: f64, h: f64, d: f64, tile: i64, mat: f64) {
+    let x0 = cx - w / 2.0
+    let x1 = cx + w / 2.0
+    let y0 = cy - h / 2.0
+    let y1 = cy + h / 2.0
+    let z0 = cz - d / 2.0
+    let z1 = cz + d / 2.0
+    let xs = [x0, x1, x1, x0, x0, x1, x1, x0]
+    let ys = [y0, y0, y1, y1, y0, y0, y1, y1]
+    let zs = [z0, z0, z0, z0, z1, z1, z1, z1]
+    let faces = [1, 2, 6, 5,  4, 7, 3, 0,  3, 7, 6, 2,  0, 1, 5, 4,  5, 6, 7, 4,  0, 3, 2, 1]
+    let nrm = [1.0, 0.0, 0.0,  -1.0, 0.0, 0.0,  0.0, 1.0, 0.0,  0.0, -1.0, 0.0,  0.0, 0.0, 1.0,  0.0, 0.0, -1.0]
+    let shade = [0.8, 0.8, 1.0, 0.5, 0.88, 0.88]
+    let u = tu(tile)
+    let t = tv(tile)
+    for f in 0 .. 6 {
+        let a = faces[f * 4]
+        let b = faces[f * 4 + 1]
+        let c = faces[f * 4 + 2]
+        let e = faces[f * 4 + 3]
+        let ao = shade[f]
+        let nx = nrm[f * 3]
+        let ny = nrm[f * 3 + 1]
+        let nz = nrm[f * 3 + 2]
+        pv(v, xs[a], ys[a], zs[a], nx, ny, nz, u, t + TUV, ao, mat)
+        pv(v, xs[b], ys[b], zs[b], nx, ny, nz, u + TUV, t + TUV, ao, mat)
+        pv(v, xs[c], ys[c], zs[c], nx, ny, nz, u + TUV, t, ao, mat)
+        pv(v, xs[a], ys[a], zs[a], nx, ny, nz, u, t + TUV, ao, mat)
+        pv(v, xs[c], ys[c], zs[c], nx, ny, nz, u + TUV, t, ao, mat)
+        pv(v, xs[e], ys[e], zs[e], nx, ny, nz, u, t, ao, mat)
+    }
+}
+
+// single-box mesh whose base sits at y = 0 (centred in x and z)
+fn set_box(id: i64, w: f64, h: f64, d: f64, tile: i64, mat: f64) {
+    let v: [f64] = []
+    add_box(v, 0.0, h / 2.0, 0.0, w, h, d, tile, mat)
+    gfx_mesh_set(id, 0, v)
+}
+
+fn plc(id: i64, x: f64, y: f64, z: f64, yaw: f64) {
+    gfx_mesh_at(id, x, y, z)
+    gfx_mesh_yaw(id, yaw)
+}
+fn hide(id: i64) { gfx_mesh_at(id, 0.0, -900.0, 0.0) }
+fn hide_range(a: i64, b: i64) { for i in a .. b { hide(i) } }
+fn kill_range(a: i64, b: i64) { for i in a .. b { gfx_mesh_free(i) } }
+
+// ---- scene themes: 0 sunny day, 1 dusk, 2 space
+fn theme(k: i64) {
+    if k == 0 {
+        gfx_uniform("uSunDir", [0.45, 0.8, 0.35])
+        gfx_uniform("uSunColor", [2.3, 2.15, 1.9])
+        gfx_uniform("uSkyTop", [0.25, 0.5, 0.95])
+        gfx_uniform("uSkyHorizon", [0.75, 0.88, 1.0])
+        gfx_uniform("uAmbient", [0.62, 0.72, 0.92])
+        gfx_uniform("uFog", [0.012])
+        gfx_uniform("uDay", [1.0])
+    } elif k == 1 {
+        gfx_uniform("uSunDir", [-0.5, 0.25, -0.6])
+        gfx_uniform("uSunColor", [2.4, 1.2, 0.6])
+        gfx_uniform("uSkyTop", [0.16, 0.12, 0.42])
+        gfx_uniform("uSkyHorizon", [1.0, 0.55, 0.38])
+        gfx_uniform("uAmbient", [0.55, 0.45, 0.62])
+        gfx_uniform("uFog", [0.016])
+        gfx_uniform("uDay", [1.0])
+    } else {
+        gfx_uniform("uSunDir", [0.3, 0.6, 0.5])
+        gfx_uniform("uSunColor", [1.6, 1.6, 2.0])
+        gfx_uniform("uSkyTop", [0.001, 0.002, 0.012])
+        gfx_uniform("uSkyHorizon", [0.012, 0.008, 0.045])
+        gfx_uniform("uAmbient", [0.5, 0.52, 0.75])
+        gfx_uniform("uFog", [0.009])
+        gfx_uniform("uDay", [0.0])
+    }
+}
+
+// ---- HUD helpers
+fn sw_() -> f64 { return gfx_size_w() }
+fn sh_() -> f64 { return gfx_size_h() }
+
+fn ctext(cx: f64, y: f64, size: f64, r: f64, gg: f64, b: f64, a: f64, s: string) {
+    hud_text(cx - hud_text_w(size, s) / 2.0, y, size, r, gg, b, a, s)
+}
+
+fn hit_rect(x: f64, y: f64, w: f64, h: f64) -> bool {
+    let mx = gfx_mouse_x()
+    let my = gfx_mouse_y()
+    return mx >= x && mx <= x + w && my >= y && my <= y + h
+}
+
+fn button(x: f64, y: f64, w: f64, h: f64, label: string) -> bool {
+    let over = hit_rect(x, y, w, h)
+    let a = 0.62
+    if over { a = 0.88 }
+    hud_rect(x, y, w, h, 0.05, 0.06, 0.1, a)
+    let bc = 0.28
+    if over { bc = 0.75 }
+    hud_rect(x, y, w, 2.0, bc, bc * 1.1, bc * 1.5, 1.0)
+    hud_rect(x, y + h - 2.0, w, 2.0, bc * 0.5, bc * 0.55, bc * 0.75, 1.0)
+    ctext(x + w / 2.0, y + h / 2.0 - 7.0, 14.0, 0.95, 0.97, 1.0, 1.0, label)
+    return over && gfx_click(0) > 0
+}
+
+fn clampf(x: f64, lo: f64, hi: f64) -> f64 {
+    if x < lo { return lo }
+    if x > hi { return hi }
+    return x
+}
+fn rf() -> f64 { return rand_int(0, 10000) / 10000.0 }
+fn rr(a: f64, b: f64) -> f64 { return a + (b - a) * rf() }
+
+// ---- high scores (persisted by the host under user/)
+fn hi_get(name: string) -> i64 {
+    let s = file_read("user/hi_" + name)
+    if s.len() == 0 { return 0 }
+    return to_int(s)
+}
+fn hi_set(name: string, v: i64) {
+    if v > hi_get(name) { host_store("user/hi_" + name, f"{v}") }
+}
+
+// shared end-of-run panel; returns 1 = again, 2 = menu, 0 = nothing
+fn end_panel(title: string, line1: string, line2: string) -> i64 {
+    let W = sw_()
+    let H = sh_()
+    hud_rect(0.0, 0.0, W, H, 0.0, 0.0, 0.05, 0.55)
+    ctext(W / 2.0, H / 2.0 - 92.0, 26.0, 1.0, 0.85, 0.3, 1.0, title)
+    ctext(W / 2.0, H / 2.0 - 52.0, 14.0, 0.95, 0.97, 1.0, 1.0, line1)
+    ctext(W / 2.0, H / 2.0 - 28.0, 12.0, 0.7, 0.85, 1.0, 1.0, line2)
+    let r = 0
+    if button(W / 2.0 - 150.0, H / 2.0 + 6.0, 140.0, 44.0, "Again") { r = 1 }
+    if button(W / 2.0 + 10.0, H / 2.0 + 6.0, 140.0, 44.0, "Menu") { r = 2 }
+    if gfx_key_pressed(13) { r = 1 }
+    return r
+}
+
+fn top_bar(game: string, score: string, hi: i64) {
+    let W = sw_()
+    hud_rect(0.0, 0.0, W, 30.0, 0.0, 0.0, 0.05, 0.45)
+    hud_text(10.0, 8.0, 12.0, 1.0, 1.0, 1.0, 1.0, game)
+    ctext(W / 2.0, 8.0, 12.0, 1.0, 0.9, 0.4, 1.0, score + "   best " + f"{hi}")
+}

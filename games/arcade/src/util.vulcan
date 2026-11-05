@@ -1,0 +1,193 @@
+// util.vulcan — math, noise, and text helpers shared by every Vulcancraft module.
+
+const TAU = 6.283185307179586
+
+fn clampf(x: f64, lo: f64, hi: f64) -> f64 {
+    if x < lo { return lo }
+    if x > hi { return hi }
+    return x
+}
+
+fn clampi(x: i64, lo: i64, hi: i64) -> i64 {
+    if x < lo { return lo }
+    if x > hi { return hi }
+    return x
+}
+
+fn lerpf(a: f64, b: f64, t: f64) -> f64 { return a + (b - a) * t }
+
+fn smoothf(t: f64) -> f64 { return t * t * (3.0 - 2.0 * t) }
+
+fn floori(x: f64) -> i64 {
+    let f = floor(x)
+    return f as i64
+}
+
+// floor division / modulo (correct for negatives)
+fn fdiv(a: i64, b: i64) -> i64 {
+    let q = a / b
+    if a % b < 0 { q -= 1 }
+    return q
+}
+
+fn fmod(a: i64, b: i64) -> i64 {
+    let r = a % b
+    if r < 0 { r += b }
+    return r
+}
+
+// ---------------------------------------------------------------- hashing + noise
+// All world generation goes through hash3 (a 32-bit integer hash) and +,-,*,/ on
+// floats only, so both players of a 1v1 match build bit-identical worlds in any browser.
+fn rnd(x: i64, y: i64, z: i64, seed: i64) -> f64 {
+    let h = hash3(x + seed * 131, y + seed * 17, z + seed * 7)
+    let m = h % 16777216
+    return m / 16777216.0
+}
+
+fn noise2(x: f64, z: f64, seed: i64) -> f64 {
+    let fx = floor(x)
+    let fz = floor(z)
+    let ix = fx as i64
+    let iz = fz as i64
+    let tx = smoothf(x - fx)
+    let tz = smoothf(z - fz)
+    let a = rnd(ix, 0, iz, seed)
+    let b = rnd(ix + 1, 0, iz, seed)
+    let c = rnd(ix, 0, iz + 1, seed)
+    let d = rnd(ix + 1, 0, iz + 1, seed)
+    return lerpf(lerpf(a, b, tx), lerpf(c, d, tx), tz)
+}
+
+fn fbm2(x: f64, z: f64, seed: i64, oct: i64) -> f64 {
+    let amp = 0.5
+    let freq = 1.0
+    let sum = 0.0
+    let norm = 0.0
+    for i in 0 .. oct {
+        sum += noise2(x * freq, z * freq, seed + i * 101) * amp
+        norm += amp
+        amp = amp * 0.5
+        freq = freq * 2.0
+    }
+    return sum / norm
+}
+
+fn noise3(x: f64, y: f64, z: f64, seed: i64) -> f64 {
+    let fx = floor(x)
+    let fy = floor(y)
+    let fz = floor(z)
+    let ix = fx as i64
+    let iy = fy as i64
+    let iz = fz as i64
+    let tx = smoothf(x - fx)
+    let ty = smoothf(y - fy)
+    let tz = smoothf(z - fz)
+    let a = lerpf(rnd(ix, iy, iz, seed), rnd(ix + 1, iy, iz, seed), tx)
+    let b = lerpf(rnd(ix, iy, iz + 1, seed), rnd(ix + 1, iy, iz + 1, seed), tx)
+    let c = lerpf(rnd(ix, iy + 1, iz, seed), rnd(ix + 1, iy + 1, iz, seed), tx)
+    let d = lerpf(rnd(ix, iy + 1, iz + 1, seed), rnd(ix + 1, iy + 1, iz + 1, seed), tx)
+    return lerpf(lerpf(a, b, tz), lerpf(c, d, tz), ty)
+}
+
+// ---------------------------------------------------------------- text helpers
+fn hexval(c: i64) -> i64 {
+    if c >= 48 && c <= 57 { return c - 48 }
+    if c >= 97 && c <= 102 { return c - 87 }
+    if c >= 65 && c <= 70 { return c - 55 }
+    return 0
+}
+
+// "#rrggbb" -> 0xRRGGBB
+fn parse_color(s: string) -> i64 {
+    if s.len() < 7 { return 0x808080 }
+    let v = 0
+    for i in 1 .. 7 { v = v * 16 + hexval(s[i]) }
+    return v
+}
+
+fn col_r(c: i64) -> i64 { return c / 65536 }
+fn col_g(c: i64) -> i64 { return (c / 256) % 256 }
+fn col_b(c: i64) -> i64 { return c % 256 }
+
+fn mix_col(a: i64, b: i64, t: f64) -> i64 {
+    let r = lerpf(col_r(a) * 1.0, col_r(b) * 1.0, t) as i64
+    let g = lerpf(col_g(a) * 1.0, col_g(b) * 1.0, t) as i64
+    let bl = lerpf(col_b(a) * 1.0, col_b(b) * 1.0, t) as i64
+    return r * 65536 + g * 256 + bl
+}
+
+fn scale_col(a: i64, f: f64) -> i64 {
+    let r = clampi((col_r(a) * f) as i64, 0, 255)
+    let g = clampi((col_g(a) * f) as i64, 0, 255)
+    let b = clampi((col_b(a) * f) as i64, 0, 255)
+    return r * 65536 + g * 256 + b
+}
+
+fn kv(parts: [string], key: string, def: string) -> string {
+    let pre = key + "="
+    for p in parts {
+        if p.starts_with(pre) { return p.substring(pre.len(), p.len()) }
+    }
+    return def
+}
+
+fn kvf(parts: [string], key: string, def: f64) -> f64 {
+    let s = kv(parts, key, "")
+    if s.len() == 0 { return def }
+    return to_float(s)
+}
+
+fn kvi(parts: [string], key: string, def: i64) -> i64 {
+    let s = kv(parts, key, "")
+    if s.len() == 0 { return def }
+    return to_int(s)
+}
+
+fn kvc(parts: [string], key: string, def: i64) -> i64 {
+    let s = kv(parts, key, "")
+    if s.len() == 0 { return def }
+    return parse_color(s)
+}
+
+// "Foo_Bar" -> "Foo Bar"
+fn unscore(s: string) -> string {
+    let out = ""
+    for i in 0 .. s.len() {
+        if s[i] == 95 { out = out + " " } else { out = out + s.substring(i, i + 1) }
+    }
+    return out
+}
+
+// non-empty, trimmed, comment-free lines of a text file
+fn text_lines(text: string) -> [string] {
+    let out: [string] = []
+    for raw in text.split("\n") {
+        let l = raw.trim()
+        if l.len() == 0 { continue }
+        if l[0] == 35 { continue }
+        out.push(l)
+    }
+    return out
+}
+
+fn words(line: string) -> [string] {
+    let out: [string] = []
+    for p in line.split(" ") {
+        if p.len() > 0 { out.push(p) }
+    }
+    return out
+}
+
+fn str_hash(s: string, h0: i64) -> i64 {
+    let h = h0
+    for i in 0 .. s.len() { h = (h * 31 + s[i]) % 1000000007 }
+    return h
+}
+
+fn fmt1(x: f64) -> string {
+    let n = floor(x * 10.0 + 0.5) as i64
+    let a = n / 10
+    let b = abs(n % 10)
+    return f"{a}.{b}"
+}

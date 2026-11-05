@@ -1,0 +1,200 @@
+// flyer.vulcan — Star Dodge: pilot a ship through an asteroid field. The ship follows your finger
+// or mouse (or WASD / arrows) and fires by itself. Shoot rocks for points, dodge the big ones.
+
+const NA = 30
+const NS = 16
+struct Flyer {
+    x: f64, y: f64, tx: f64, ty: f64, lives: i64, score: i64, t: f64, over: bool, hi: i64,
+    ax: [f64], ay: [f64], az: [f64], ahp: [f64], asz: [f64], alive: [i64], aspin: [f64],
+    sx: [f64], sy: [f64], sz: [f64], slive: [i64],
+    fire: f64, spawn: f64, hurt: f64, shake: f64, started: bool, kills: i64
+}
+
+fn flyer_new() -> Flyer {
+    let f = Flyer { x: 0.0, y: 0.0, tx: 0.0, ty: 0.0, lives: 3, score: 0, t: 0.0, over: false, hi: hi_get("flyer"),
+        ax: [], ay: [], az: [], ahp: [], asz: [], alive: [], aspin: [], sx: [], sy: [], sz: [], slive: [],
+        fire: 0.0, spawn: 1.0, hurt: 0.0, shake: 0.0, started: false, kills: 0 }
+    for i in 0 .. NA {
+        f.ax.push(0.0)
+        f.ay.push(0.0)
+        f.az.push(0.0)
+        f.ahp.push(1.0)
+        f.asz.push(1.0)
+        f.alive.push(0)
+        f.aspin.push(0.0)
+    }
+    for i in 0 .. NS {
+        f.sx.push(0.0)
+        f.sy.push(0.0)
+        f.sz.push(0.0)
+        f.slive.push(0)
+    }
+    return f
+}
+
+fn flyer_build() {
+    theme(2)
+    let v: [f64] = []
+    add_box(v, 0.0, 0.0, 0.0, 0.5, 0.35, 1.8, T_ICE, 0.0)
+    add_box(v, 0.0, 0.0, 0.0, 2.2, 0.1, 0.7, T_BLUE, 0.0)
+    add_box(v, 0.0, 0.2, 0.2, 0.3, 0.25, 0.6, T_CYAN, 4.0)
+    add_box(v, 0.0, 0.0, 1.0, 0.3, 0.3, 0.4, T_ORANGE, 4.0)
+    gfx_mesh_set(600, 0, v)
+    for i in 0 .. NS {
+        set_box(620 + i, 0.14, 0.14, 1.2, T_MINT, 4.0)
+        hide(620 + i)
+    }
+    for i in 0 .. NA { hide(640 + i) }
+    // star dust: thin streaks
+    for i in 0 .. 24 { set_box(680 + i, 0.05, 0.05, 2.0, T_WHITE, 4.0) }
+}
+
+fn flyer_spawn(f: Flyer) {
+    for i in 0 .. NA {
+        if f.alive[i] == 0 {
+            let big = rand_int(0, 5) == 0
+            let sz = rr(1.0, 1.8)
+            let hp = 1.0
+            let tile = T_GREY
+            if big { sz = rr(2.4, 3.4) hp = 4.0 tile = T_BROWN }
+            elif rand_int(0, 3) == 0 { tile = T_PURPLE hp = 2.0 }
+            f.alive[i] = 1
+            f.ax[i] = rr(-9.0, 9.0)
+            f.ay[i] = rr(-4.5, 4.5)
+            f.az[i] = -130.0
+            f.ahp[i] = hp
+            f.asz[i] = sz
+            f.aspin[i] = rr(-2.0, 2.0)
+            set_box(640 + i, sz, sz, sz, tile, 0.0)
+            return
+        }
+    }
+}
+
+fn flyer_frame(f: Flyer, dt: f64) -> i64 {
+    let W = sw_()
+    let H = sh_()
+    if gfx_key_pressed(27) { return 1 }
+    // input
+    let kx = 0.0
+    let ky = 0.0
+    if gfx_key(65) || gfx_key(37) { kx = -1.0 }
+    if gfx_key(68) || gfx_key(39) { kx = 1.0 }
+    if gfx_key(87) || gfx_key(38) { ky = 1.0 }
+    if gfx_key(83) || gfx_key(40) { ky = -1.0 }
+    if kx != 0.0 || ky != 0.0 { f.tx = clampf(f.tx + kx * dt * 14.0, -9.0, 9.0) f.ty = clampf(f.ty + ky * dt * 9.0, -4.5, 4.5) f.started = true }
+    let follow = gfx_mouse_held(0)
+    if !gfx_touch() && gfx_mouse_y() > 40.0 && gfx_mouse_x() > 0.0 { follow = true }
+    if follow && gfx_mouse_y() > 36.0 {
+        f.tx = clampf((gfx_mouse_x() / W - 0.5) * 2.0 * 10.0, -9.0, 9.0)
+        f.ty = clampf((0.5 - (gfx_mouse_y() + 40.0) / H) * 2.0 * 6.0, -4.5, 4.5)
+        if gfx_mouse_held(0) || gfx_click(0) > 0 { f.started = true }
+    }
+    if !f.over && f.started {
+        f.t += dt
+        f.x += (f.tx - f.x) * min(1.0, dt * 9.0)
+        f.y += (f.ty - f.y) * min(1.0, dt * 9.0)
+        // auto fire
+        f.fire -= dt
+        if f.fire <= 0.0 {
+            f.fire = 0.17
+            for s in 0 .. NS {
+                if f.slive[s] == 0 {
+                    f.slive[s] = 1
+                    f.sx[s] = f.x
+                    f.sy[s] = f.y
+                    f.sz[s] = -1.5
+                    snd(4, 0.15)
+                    break
+                }
+            }
+        }
+        // spawn
+        f.spawn -= dt
+        if f.spawn <= 0.0 {
+            flyer_spawn(f)
+            f.spawn = max(0.22, 0.9 - f.t * 0.012)
+        }
+    }
+    let sp = 38.0 + min(30.0, f.t * 0.5)
+    if !f.started { sp = 20.0 }
+    if f.over { sp = 6.0 }
+    f.hurt = max(0.0, f.hurt - dt)
+    f.shake = max(0.0, f.shake - dt * 3.0)
+    // shots
+    for s in 0 .. NS {
+        if f.slive[s] == 0 { continue }
+        f.sz[s] -= 90.0 * dt
+        if f.sz[s] < -140.0 { f.slive[s] = 0 hide(620 + s) continue }
+        plc(620 + s, f.sx[s], f.sy[s], f.sz[s], 0.0)
+    }
+    // rocks
+    for i in 0 .. NA {
+        if f.alive[i] == 0 { hide(640 + i) continue }
+        f.az[i] += sp * dt
+        if f.az[i] > 8.0 { f.alive[i] = 0 hide(640 + i) continue }
+        plc(640 + i, f.ax[i], f.ay[i] - f.asz[i] / 2.0, f.az[i], f.az[i] * 0.05 * f.aspin[i] + f.aspin[i])
+        let r = f.asz[i] * 0.62
+        // bullets
+        for s in 0 .. NS {
+            if f.slive[s] == 1 && abs(f.sx[s] - f.ax[i]) < r && abs(f.sy[s] - f.ay[i]) < r && abs(f.sz[s] - f.az[i]) < r + 1.2 {
+                f.slive[s] = 0
+                hide(620 + s)
+                f.ahp[i] -= 1.0
+                if f.ahp[i] <= 0.0 {
+                    f.alive[i] = 0
+                    hide(640 + i)
+                    f.score += 10 + to_int(f"{floor(f.asz[i] * 4.0)}")
+                    f.kills += 1
+                    snd(8, 0.4)
+                    break
+                } else { snd(4, 0.2) }
+            }
+        }
+        if f.alive[i] == 1 && !f.over && f.hurt <= 0.0 && abs(f.az[i]) < r + 0.9 && abs(f.ax[i] - f.x) < r + 0.8 && abs(f.ay[i] - f.y) < r + 0.5 {
+            f.alive[i] = 0
+            hide(640 + i)
+            f.lives -= 1
+            f.hurt = 1.2
+            f.shake = 1.0
+            snd(9, 0.8)
+            if f.lives <= 0 { f.over = true hi_set("flyer", f.score) f.hi = hi_get("flyer") }
+        }
+    }
+    // streaks
+    for i in 0 .. 24 {
+        let q = i * 13 + f.t * sp * 0.9 + i * 7.7
+        let zz = 20.0 - (q - floor(q / 150.0) * 150.0)
+        let a = i * 2.4
+        plc(680 + i, sin(a) * 18.0, cos(a * 1.7) * 9.0, zz, 0.0)
+    }
+    // ship
+    if f.over { hide(600) } else {
+        let vis = true
+        if f.hurt > 0.0 && ((to_int(f"{floor(f.t * 20.0)}")) % 2 == 0) { vis = false }
+        if vis { plc(600, f.x, f.y, 0.0, 0.0) } else { hide(600) }
+    }
+    gfx_mesh_at(600, f.x, f.y, 0.0)
+    let sh = (rf() - 0.5) * f.shake * 0.4
+    gfx_camera(f.x * 0.45 + sh, f.y * 0.45 + 2.2, 9.0, 0.0, -0.12, 72.0)
+    // HUD
+    top_bar("STAR DODGE", f"score {f.score}   lives {f.lives}", f.hi)
+    if !f.started && !f.over {
+        ctext(W / 2.0, H * 0.3, 18.0, 1.0, 1.0, 1.0, 1.0, "touch and drag to fly")
+        ctext(W / 2.0, H * 0.3 + 30.0, 11.0, 0.9, 0.95, 1.0, 1.0, "ship fires automatically")
+    }
+    if f.hurt > 0.0 { hud_rect(0.0, 0.0, W, H, 1.0, 0.1, 0.1, f.hurt * 0.25) }
+    if f.over {
+        let a = end_panel("SHIP LOST", f"score {f.score}", f"rocks destroyed {f.kills}")
+        if a == 1 { return 2 }
+        if a == 2 { return 1 }
+    }
+    return 0
+}
+
+fn flyer_cleanup() {
+    kill_range(600, 601)
+    kill_range(620, 620 + NS)
+    kill_range(640, 640 + NA)
+    kill_range(680, 704)
+}

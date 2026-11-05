@@ -1,0 +1,171 @@
+// runner.vulcan — Sky Runner: endless three lane runner. Tap left / right to change lane, tap the
+// middle (or press Space) to jump. Keyboard: A/D or arrows, Space.
+
+const RN = 24
+struct Runner {
+    lane: i64, px: f64, py: f64, vy: f64, speed: f64, dist: f64, coins: i64, alive: bool,
+    ox: [f64], oz: [f64], ok: [i64], live: [i64], next_z: f64, flash: f64, t: f64, started: bool, hi: i64
+}
+
+fn runner_new() -> Runner {
+    let ox: [f64] = []
+    let oz: [f64] = []
+    let ok: [i64] = []
+    let live: [i64] = []
+    for i in 0 .. RN {
+        ox.push(0.0)
+        oz.push(0.0)
+        ok.push(0)
+        live.push(0)
+    }
+    return Runner { lane: 1, px: 0.0, py: 0.0, vy: 0.0, speed: 14.0, dist: 0.0, coins: 0, alive: true,
+        ox: ox, oz: oz, ok: ok, live: live, next_z: -40.0, flash: 0.0, t: 0.0, started: false, hi: hi_get("runner") }
+}
+
+fn runner_build() {
+    theme(0)
+    // player: little robot
+    let v: [f64] = []
+    add_box(v, 0.0, 0.55, 0.0, 0.7, 0.8, 0.5, T_ORANGE, 0.0)
+    add_box(v, 0.0, 1.15, 0.0, 0.5, 0.45, 0.45, T_CREAM, 0.0)
+    add_box(v, 0.13, 1.2, -0.23, 0.1, 0.1, 0.05, T_BLACK, 0.0)
+    add_box(v, -0.13, 1.2, -0.23, 0.1, 0.1, 0.05, T_BLACK, 0.0)
+    add_box(v, 0.0, 0.1, 0.0, 0.55, 0.2, 0.4, T_DARK, 0.0)
+    gfx_mesh_set(100, 0, v)
+    // road slabs (alternating) and grass sides
+    for k in 0 .. 14 {
+        let tile = T_GREY
+        if k % 2 == 1 { tile = T_DARK }
+        set_box(110 + k, 6.6, 0.4, 8.0, tile, 0.0)
+    }
+    set_box(129, 300.0, 0.3, 500.0, T_GREEN, 0.0)
+    plc(129, 0.0, -0.6, -150.0, 0.0)
+    for k in 0 .. 12 { set_box(140 + k, 0.3, 0.3, 16.0, T_YELLOW, 4.0) }
+    // pillars both sides
+    for k in 0 .. 16 {
+        let tile = T_CYAN
+        if k % 2 == 1 { tile = T_PINK }
+        set_box(160 + k, 0.8, 3.5 + (k % 3), 0.8, tile, 4.0)
+    }
+    // obstacles: low barrier / tall block / coin (ids by slot, rebuilt on spawn)
+    for i in 0 .. RN { hide(200 + i) }
+}
+
+fn runner_spawn(r: Runner) {
+    let row = rand_int(0, 5)
+    let free = rand_int(0, 2)
+    for l in 0 .. 3 {
+        let kind = -1
+        if l == free {
+            if row >= 2 { kind = 2 }
+        } else {
+            if row <= 2 { kind = 0 } else { kind = 1 }
+        }
+        if kind < 0 { continue }
+        for i in 0 .. RN {
+            if r.live[i] == 0 {
+                r.live[i] = 1
+                r.ok[i] = kind
+                r.ox[i] = (l - 1) * 2.2
+                r.oz[i] = r.next_z
+                if kind == 0 { set_box(200 + i, 1.8, 0.9, 0.8, T_RED, 0.0) }
+                if kind == 1 { set_box(200 + i, 1.8, 3.0, 1.0, T_PURPLE, 0.0) }
+                if kind == 2 { set_box(200 + i, 0.6, 0.6, 0.15, T_YELLOW, 4.0) }
+                break
+            }
+        }
+    }
+    r.next_z = r.next_z - rr(13.0, 20.0) - r.speed * 0.25
+}
+
+// returns 0 = keep playing, 1 = back to menu
+fn runner_frame(r: Runner, dt: f64) -> i64 {
+    let W = sw_()
+    let H = sh_()
+    r.t += dt
+    if gfx_key_pressed(27) { return 1 }
+    // input
+    let go_l = gfx_key_pressed(65) || gfx_key_pressed(37)
+    let go_r = gfx_key_pressed(68) || gfx_key_pressed(39)
+    let jump = gfx_key_pressed(32) || gfx_key_pressed(87) || gfx_key_pressed(38)
+    if gfx_click(0) > 0 && r.alive && gfx_mouse_y() > 40.0 {
+        let mx = gfx_mouse_x()
+        if mx < W * 0.34 { go_l = true } elif mx > W * 0.66 { go_r = true } else { jump = true }
+    }
+    if r.alive {
+        if !r.started && (go_l || go_r || jump) { r.started = true }
+        if r.started {
+            if go_l && r.lane > 0 { r.lane -= 1 snd(4, 0.5) }
+            if go_r && r.lane < 2 { r.lane += 1 snd(4, 0.5) }
+            if jump && r.py <= 0.01 { r.vy = 11.5 snd(7, 0.4) }
+            r.speed = min(34.0, 14.0 + r.dist * 0.012)
+            r.dist += r.speed * dt
+        }
+    }
+    let tx = (r.lane - 1) * 2.2
+    r.px += (tx - r.px) * min(1.0, dt * 14.0)
+    r.vy -= 34.0 * dt
+    r.py += r.vy * dt
+    if r.py < 0.0 { r.py = 0.0 r.vy = 0.0 }
+    // spawn + move
+    let mv = 0.0
+    if r.started && r.alive { mv = r.speed * dt }
+    r.next_z += mv
+    while r.next_z > -120.0 { runner_spawn(r) }
+    for i in 0 .. RN {
+        if r.live[i] == 0 { hide(200 + i) continue }
+        r.oz[i] += mv
+        if r.oz[i] > 5.0 { r.live[i] = 0 hide(200 + i) continue }
+        let y = 0.0
+        let yaw = 0.0
+        if r.ok[i] == 2 { y = 1.0 + sin(r.t * 4.0) * 0.15 yaw = r.t * 3.0 }
+        plc(200 + i, r.ox[i], y, r.oz[i], yaw)
+        if r.alive && r.started && abs(r.ox[i] - r.px) < 1.0 && abs(r.oz[i]) < 0.7 {
+            if r.ok[i] == 2 { r.live[i] = 0 hide(200 + i) r.coins += 1 snd(6, 0.5) }
+            elif r.ok[i] == 0 && r.py < 0.75 { r.alive = false }
+            elif r.ok[i] == 1 && r.py < 2.8 { r.alive = false }
+            if !r.alive { snd(5, 0.9) r.flash = 1.0 hi_set("runner", runner_score(r)) r.hi = hi_get("runner") }
+        }
+    }
+    // scenery scroll
+    let sc = r.dist - floor(r.dist / 16.0) * 16.0
+    for k in 0 .. 14 { plc(110 + k, 0.0, -0.2, 4.0 - k * 8.0 + sc, 0.0) }
+    for k in 0 .. 6 {
+        let z = 0.0 - k * 16.0 + sc
+        plc(140 + k, -3.45, 0.02, z, 0.0)
+        plc(146 + k, 3.45, 0.02, z, 0.0)
+    }
+    for k in 0 .. 16 {
+        let side = 1.0
+        if k < 8 { side = -1.0 }
+        let kk = k % 8
+        plc(160 + k, side * 5.2, 0.0, 6.0 - kk * 16.0 + sc, 0.0)
+    }
+    // player + camera
+    if r.alive { plc(100, r.px, r.py, 0.0, 0.0) } else { plc(100, r.px, r.py, 0.0, r.t * 6.0) }
+    gfx_camera(r.px * 0.55, 3.6 + r.py * 0.4, 7.5, 0.0, -0.28, 74.0)
+    // HUD
+    top_bar("SKY RUNNER", f"{runner_score(r)}", r.hi)
+    if !r.started {
+        ctext(W / 2.0, H * 0.3, 18.0, 1.0, 1.0, 1.0, 1.0, "tap to start")
+        ctext(W / 2.0, H * 0.3 + 30.0, 11.0, 0.9, 0.95, 1.0, 1.0, "left side / right side = change lane")
+        ctext(W / 2.0, H * 0.3 + 50.0, 11.0, 0.9, 0.95, 1.0, 1.0, "middle = jump")
+    }
+    if !r.alive {
+        let a = end_panel("CRASHED", f"score {runner_score(r)}", f"coins {r.coins}   distance {floori(r.dist)} m")
+        if a == 1 { return 2 }
+        if a == 2 { return 1 }
+    }
+    return 0
+}
+
+fn runner_score(r: Runner) -> i64 { return floori(r.dist / 3.0) + r.coins * 10 }
+
+fn runner_cleanup() {
+    kill_range(100, 101)
+    kill_range(110, 124)
+    kill_range(129, 130)
+    kill_range(140, 152)
+    kill_range(160, 176)
+    kill_range(200, 200 + RN)
+}

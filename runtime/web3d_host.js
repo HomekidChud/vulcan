@@ -129,8 +129,8 @@
   let cam = { x: 0, y: 0, z: 0, yaw: 0, pitch: 0, fov: 70 };
   let shadowArea = 70, shadowSize = 2048, shadowRT = null;
   let rts = { key: "", scene: null, passes: new Map() };
-  let hudCmds = [];
-  let frameT = 0, lastT = 0, hasHalf = false;
+  let hudCmds = [], hudPrev = null;
+  let frameT = 0, lastT = 0, hasHalf = false, hasR11 = false;
   let stats = "";
   let sceneMats = null;                  // last computed matrices
 
@@ -142,7 +142,7 @@
     glc = $("gl"); hudc = $("hud");
     gl = glc.getContext("webgl2", { antialias: false, alpha: false, powerPreference: "high-performance", preserveDrawingBuffer: false });
     if (!gl) { showError("WebGL2 is not available in this browser."); throw new Error("no webgl2"); }
-    hasHalf = !!gl.getExtension("EXT_color_buffer_float") || !!gl.getExtension("EXT_color_buffer_half_float");
+    hasR11 = !!gl.getExtension("EXT_color_buffer_float"); hasHalf = hasR11 || !!gl.getExtension("EXT_color_buffer_half_float");
     gl.getExtension("OES_texture_float_linear");
     hctx = hudc.getContext("2d");
     dummyTex = gl.createTexture();
@@ -158,11 +158,12 @@
   };
 
   function resize() {
-    dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+    const coarse = !!(window.matchMedia && matchMedia("(pointer:coarse)").matches);
+    dpr = Math.min(window.devicePixelRatio || 1, coarse ? 1.25 : 1.5);
     const cw = Math.max(2, Math.floor(window.innerWidth)), ch = Math.max(2, Math.floor(window.innerHeight));
     W = Math.floor(cw * dpr); Hh = Math.floor(ch * dpr);
     glc.width = W; glc.height = Hh; glc.style.width = cw + "px"; glc.style.height = ch + "px";
-    const hd = Math.min(window.devicePixelRatio || 1, 2);
+    const hd = Math.min(window.devicePixelRatio || 1, coarse ? 1.5 : 2); hudPrev = null;
     hudc.width = Math.floor(cw * hd); hudc.height = Math.floor(ch * hd);
     hudc.style.width = cw + "px"; hudc.style.height = ch + "px";
     uiK = Math.max(0.5, Math.min(1, cw / 560, ch / 470));
@@ -214,11 +215,11 @@ uniform sampler2D uPass0; uniform sampler2D uPass1; uniform sampler2D uPass2; un
 `;
   const HEAD = "#version 300 es\nprecision highp float;\nprecision highp int;\nprecision highp sampler2D;\n" + UNIFORMS_DECL;
   const HEAD_LINES = HEAD.split("\n").length - 1;
-  const VS_ATTR = "layout(location=0) in vec3 aPos; layout(location=1) in vec3 aNormal; layout(location=2) in vec2 aUV; layout(location=3) in vec3 aLight; layout(location=4) in float aMat;\n";
+  const VS_ATTR = "uniform vec3 uPQS; uniform vec3 uPQO; layout(location=0) in vec3 aPosQ; layout(location=1) in vec3 aNormal; layout(location=2) in vec2 aUV; layout(location=3) in vec3 aLight; layout(location=4) in float aMat;\n#define aPos (aPosQ*uPQS+uPQO)\n";
   const FS_OUT = "layout(location=0) out vec4 fragColor;\n";
   const FULL_VS = HEAD + "out vec2 vUV;\nvoid main(){ vec2 p = vec2(float((gl_VertexID<<1)&2), float(gl_VertexID&2)); vUV = p; gl_Position = vec4(p*2.0-1.0, 0.0, 1.0); }\n";
   const BLIT_FS = HEAD + FS_OUT + "in vec2 vUV;\nvoid main(){ vec3 c = texture(uColor, vUV).rgb; c = c/(1.0+c*0.35); fragColor = vec4(pow(c, vec3(1.0/2.2)), 1.0); }\n";
-  const names = ["uViewProj", "uView", "uProj", "uInvViewProj", "uShadowMat", "uCamPos", "uResolution", "uTime", "uNear", "uFar", "uOrigin", "uYaw", "uLayer", "uSunScreen", "uShadowOn", "uShadowTexel",
+  const names = ["uPQS", "uPQO", "uViewProj", "uView", "uProj", "uInvViewProj", "uShadowMat", "uCamPos", "uResolution", "uTime", "uNear", "uFar", "uOrigin", "uYaw", "uLayer", "uSunScreen", "uShadowOn", "uShadowTexel",
     "uSunDir", "uSunColor", "uSkyTop", "uSkyHorizon", "uAmbient", "uFog", "uDay", "uAtlas", "uScene", "uDepth", "uColor", "uShadow", "uPass0", "uPass1", "uPass2", "uPass3"];
   const UNIT = { uAtlas: 0, uScene: 1, uDepth: 2, uColor: 3, uShadow: 4, uPass0: 5, uPass1: 6, uPass2: 7, uPass3: 8 };
 
@@ -258,9 +259,10 @@ uniform sampler2D uPass0; uniform sampler2D uPass1; uniform sampler2D uPass2; un
       fsrc = HEAD + FS_OUT + "in vec2 vUV;\n" + fs;
     }
     const r = buildProgram(vsrc, fsrc);
-    if (r.err) return slot + ": " + r.err.replace(/ERROR: 0:(\d+)/g, (_, n) => "line " + (parseInt(n) - HEAD_LINES - (kind === "scene" || kind === "shadow" ? 1 : 0)));
+    if (r.err) return slot + ": " + r.err.replace(/ERROR: 0:(\d+)/g, (_, n) => "line " + (parseInt(n) - HEAD_LINES - (kind === "scene" || kind === "shadow" ? 2 : 0)));
     if (progs.has(key)) gl.deleteProgram(progs.get(key).prog);
-    progs.set(key, { prog: r.prog, locs: r.locs, kind, scale, order: kind === "post" ? parseInt(m[2]) : 0 });
+    r.usesShadow = kind === "scene" && /\buShadow\b/.test(vs + fs);
+    progs.set(key, { prog: r.prog, locs: r.locs, usesShadow: r.usesShadow, kind, scale, order: kind === "post" ? parseInt(m[2]) : 0 });
     rts.key = "";
     return "";
   };
@@ -315,7 +317,8 @@ uniform sampler2D uPass0; uniform sampler2D uPass1; uniform sampler2D uPass2; un
     gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
     const tex = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, tex);
-    if (hasHalf) gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, w, h, 0, gl.RGBA, gl.HALF_FLOAT, null);
+    if (hasR11) gl.texImage2D(gl.TEXTURE_2D, 0, gl.R11F_G11F_B10F, w, h, 0, gl.RGB, gl.UNSIGNED_INT_10F_11F_11F_REV, null);
+    else if (hasHalf) gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, w, h, 0, gl.RGBA, gl.HALF_FLOAT, null);
     else gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
@@ -346,7 +349,7 @@ uniform sampler2D uPass0; uniform sampler2D uPass1; uniform sampler2D uPass2; un
     for (const [k, p] of progs) if (p.kind === "post") {
       rts.passes.set(k, makeColorRT(Math.max(2, Math.floor(sw * p.scale)), Math.max(2, Math.floor(sh * p.scale)), false));
     }
-    if (progs.has("shadow") && !shadowRT) {
+    if (progs.has("shadow") && progs.get("scene") && progs.get("scene").usesShadow && !shadowRT) {
       const fb = gl.createFramebuffer();
       gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
       const dt = gl.createTexture();
@@ -363,34 +366,56 @@ uniform sampler2D uPass0; uniform sampler2D uPass1; uniform sampler2D uPass2; un
   }
 
   // ------------------------------------------------------------------ meshes
-  const STRIDE = 12;
+  const STRIDE = 12, QB = 20; // input floats per vertex, packed bytes per vertex
+  const clamp8 = (v) => (v < 0 ? 0 : v > 1 ? 255 : (v * 255 + 0.5) | 0);
   H.gfx_mesh_set = (id, layer, data) => {
     let m = meshes.get(id);
     if (!data.length) { if (m) H.gfx_mesh_free(id); return; }
+    const dyn = id >= 4000 && id < 10000;
+    const n = (data.length / STRIDE) | 0;
+    if (m && dyn && m.src && m.src.length === data.length) {
+      let same = true; const sr = m.src;
+      for (let i = 0; i < sr.length; i++) if (sr[i] !== data[i]) { same = false; break; }
+      if (same) { m.layer = layer; return; }
+    }
     if (!m) {
       const vao = gl.createVertexArray(), vbo = gl.createBuffer();
       gl.bindVertexArray(vao); gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
-      const f = 4, s = STRIDE * f;
-      gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 3, gl.FLOAT, false, s, 0);
-      gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1, 3, gl.FLOAT, false, s, 3 * f);
-      gl.enableVertexAttribArray(2); gl.vertexAttribPointer(2, 2, gl.FLOAT, false, s, 6 * f);
-      gl.enableVertexAttribArray(3); gl.vertexAttribPointer(3, 3, gl.FLOAT, false, s, 8 * f);
-      gl.enableVertexAttribArray(4); gl.vertexAttribPointer(4, 1, gl.FLOAT, false, s, 11 * f);
-      m = { vao, vbo, count: 0, layer, ox: 0, oy: 0, oz: 0, yaw: 0, bb: [0, 0, 0, 0, 0, 0], r: 0 };
+      gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 3, gl.SHORT, false, QB, 0);
+      gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1, 3, gl.BYTE, true, QB, 6);
+      gl.enableVertexAttribArray(2); gl.vertexAttribPointer(2, 2, gl.UNSIGNED_SHORT, true, QB, 10);
+      gl.enableVertexAttribArray(3); gl.vertexAttribPointer(3, 3, gl.UNSIGNED_BYTE, true, QB, 14);
+      gl.enableVertexAttribArray(4); gl.vertexAttribPointer(4, 1, gl.UNSIGNED_BYTE, false, QB, 17);
+      m = { vao, vbo, count: 0, layer, ox: 0, oy: 0, oz: 0, yaw: 0, bb: [0, 0, 0, 0, 0, 0], r: 0, qs: [1, 1, 1], qo: [0, 0, 0], src: null };
       meshes.set(id, m);
     }
     m.layer = layer;
-    const arr = new Float32Array(data);
-    gl.bindVertexArray(m.vao); gl.bindBuffer(gl.ARRAY_BUFFER, m.vbo);
-    gl.bufferData(gl.ARRAY_BUFFER, arr, gl.DYNAMIC_DRAW);
-    m.count = (arr.length / STRIDE) | 0;
     let x0 = 1e9, y0 = 1e9, z0 = 1e9, x1 = -1e9, y1 = -1e9, z1 = -1e9;
-    for (let i = 0; i < arr.length; i += STRIDE) {
-      const x = arr[i], y = arr[i + 1], z = arr[i + 2];
+    for (let i = 0, o = 0; i < n; i++, o += STRIDE) {
+      const x = data[o], y = data[o + 1], z = data[o + 2];
       if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; if (z < z0) z0 = z; if (z > z1) z1 = z;
     }
     m.bb = [x0, y0, z0, x1, y1, z1];
     m.r = Math.hypot(Math.max(Math.abs(x0), Math.abs(x1)), Math.max(Math.abs(y0), Math.abs(y1)), Math.max(Math.abs(z0), Math.abs(z1)));
+    const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2, cz = (z0 + z1) / 2;
+    const hx = Math.max((x1 - x0) / 2, 1e-4) / 32000, hy = Math.max((y1 - y0) / 2, 1e-4) / 32000, hz = Math.max((z1 - z0) / 2, 1e-4) / 32000;
+    m.qs = [hx, hy, hz]; m.qo = [cx, cy, cz];
+    const buf = new ArrayBuffer(n * QB);
+    const i16 = new Int16Array(buf), u16 = new Uint16Array(buf), i8 = new Int8Array(buf), u8 = new Uint8Array(buf);
+    const ix = 1 / hx, iy = 1 / hy, iz = 1 / hz;
+    for (let i = 0, o = 0, b = 0; i < n; i++, o += STRIDE, b += QB) {
+      const h = b >> 1;
+      i16[h] = Math.round((data[o] - cx) * ix); i16[h + 1] = Math.round((data[o + 1] - cy) * iy); i16[h + 2] = Math.round((data[o + 2] - cz) * iz);
+      i8[b + 6] = Math.round(data[o + 3] * 127); i8[b + 7] = Math.round(data[o + 4] * 127); i8[b + 8] = Math.round(data[o + 5] * 127);
+      let u = data[o + 6], v = data[o + 7]; u = u < 0 ? 0 : u > 1 ? 1 : u; v = v < 0 ? 0 : v > 1 ? 1 : v;
+      u16[h + 5] = (u * 65535 + 0.5) | 0; u16[h + 6] = (v * 65535 + 0.5) | 0;
+      u8[b + 14] = clamp8(data[o + 8]); u8[b + 15] = clamp8(data[o + 9]); u8[b + 16] = clamp8(data[o + 10]);
+      u8[b + 17] = data[o + 11] | 0;
+    }
+    gl.bindVertexArray(m.vao); gl.bindBuffer(gl.ARRAY_BUFFER, m.vbo);
+    gl.bufferData(gl.ARRAY_BUFFER, buf, dyn ? gl.DYNAMIC_DRAW : gl.STATIC_DRAW);
+    m.count = n;
+    m.src = dyn ? Float64Array.from(data) : null;
   };
   H.gfx_mesh_free = (id) => { const m = meshes.get(id); if (!m) return; gl.deleteVertexArray(m.vao); gl.deleteBuffer(m.vbo); meshes.delete(id); };
   H.gfx_mesh_at = (id, x, y, z) => { const m = meshes.get(id); if (m) { m.ox = x; m.oy = y; m.oz = z; } };
@@ -416,6 +441,7 @@ uniform sampler2D uPass0; uniform sampler2D uPass1; uniform sampler2D uPass2; un
       if (filter && !filter(m)) continue;
       if (P.locs.uOrigin) gl.uniform3f(P.locs.uOrigin, m.ox, m.oy, m.oz);
       if (P.locs.uYaw) gl.uniform1f(P.locs.uYaw, m.yaw);
+      gl.uniform3f(P.locs.uPQS, m.qs[0], m.qs[1], m.qs[2]); gl.uniform3f(P.locs.uPQO, m.qo[0], m.qo[1], m.qo[2]);
       gl.bindVertexArray(m.vao);
       gl.drawArrays(gl.TRIANGLES, 0, m.count);
       drawCalls++; tris += m.count / 3;
@@ -451,7 +477,7 @@ uniform sampler2D uPass0; uniform sampler2D uPass1; uniform sampler2D uPass2; un
 
     // ---- shadow pass
     const shP = progs.get("shadow");
-    if (shP && shadowRT && sun[1] > 0.02) {
+    if (shP && shadowRT && progs.get("scene") && progs.get("scene").usesShadow && sun[1] > 0.02) {
       const texel = (shadowArea * 2) / shadowSize;
       const cx = Math.round(cam.x / texel) * texel, cy = Math.round(cam.y / texel) * texel, cz = Math.round(cam.z / texel) * texel;
       const lv = M.lookAt([cx + sun[0] * 200, cy + sun[1] * 200, cz + sun[2] * 200], [cx, cy, cz], Math.abs(sun[1]) > 0.98 ? [0, 0, 1] : [0, 1, 0]);
@@ -554,7 +580,18 @@ uniform sampler2D uPass0; uniform sampler2D uPass1; uniform sampler2D uPass2; un
   const FONT = "'Press Start 2P','Courier New',ui-monospace,Menlo,Consolas,monospace";
   H.hud_text_w = (size, s) => { if (!hctx) return s.length * size * 0.6; hctx.font = "bold " + size + "px " + FONT; return hctx.measureText(s).width; };
   const rgba = (r, g, b, a) => `rgba(${(r * 255) | 0},${(g * 255) | 0},${(b * 255) | 0},${a})`;
+  function hudSame(a, b) {
+    if (!b || a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) {
+      const x = a[i], y = b[i];
+      if (x.length !== y.length) return false;
+      for (let j = 0; j < x.length; j++) if (x[j] !== y[j]) return false;
+    }
+    return true;
+  }
   function flushHud() {
+    if (hudSame(hudCmds, hudPrev)) { hudCmds = []; return; }
+    hudPrev = hudCmds;
     const k = hudc._k;
     hctx.setTransform(k * uiK, 0, 0, k * uiK, 0, 0);
     hctx.clearRect(0, 0, hudc._cw, hudc._ch);
@@ -574,6 +611,8 @@ uniform sampler2D uPass0; uniform sampler2D uPass1; uniform sampler2D uPass2; un
   // ------------------------------------------------------------------ frame loop
   let tResumed = 0, jsMs = 0, jsMax = 0, rdMs = 0, jsWin = [];
   window.__vcStats = () => stats;
+  window.__vcTris = () => { const o = { solid: 0, trans: 0, ent: 0, lodSolid: 0, lodWater: 0, n: 0 }; for (const [id, m] of meshes) { const t = m.count / 3; o.n++; if (id < 2000) o.solid += t; else if (id < 4000) o.trans += t; else if (id < 10000) o.ent += t; else if (id % 2 === 0) o.lodSolid += t; else o.lodWater += t; } return o; };
+  window.__vcMeshes = () => [...meshes].map(([id, m]) => [id, m.count, +m.ox.toFixed(1), +m.oy.toFixed(1), +m.oz.toFixed(1), m.layer, m.bb.map((v) => +v.toFixed(1)).join("/")].join(",")).join(" | ");
   window.__vcPerf = () => { const a = jsWin.slice().sort((x, y) => x - y); return { n: a.length, median: a[a.length >> 1], p95: a[Math.floor(a.length * 0.95)], max: a[a.length - 1], scale: renderScale, q: quality }; };
   H.gfx_frame = () => new Promise((resolve) => {
     const t0 = performance.now();
