@@ -5,6 +5,7 @@ import "blocks.vulcan"
 import "mods.vulcan"
 import "world.vulcan"
 import "mesh.vulcan"
+import "lod.vulcan"
 import "game.vulcan"
 import "shaders.vulcan"
 import "player.vulcan"
@@ -119,12 +120,13 @@ fn begin_net(g: Game, mode: string) {
 fn menu_frame(g: Game, dt: f64) {
     if gfx_touch() && g.touch == 0 {
         g.touch = 1
-        g.rd = 4
+        g.rd = 20
         apply_shader(g, pick_default_shader(g))
     }
     g.time += dt * 0.004
     if g.time > 0.7 { g.time = 0.3 }
     stream(g, 8.0, 8.0, 7.0)
+    lod_update(g, 8.0, 8.0, 4.0)
     set_sky_uniforms(g)
     menu_camera(g)
     if g.net_phase == 1 {
@@ -191,13 +193,15 @@ fn play_frame(g: Game, dt: f64) {
     g.time += dt / g.ct.rules.daylen
     if g.time > 1.0 { g.time -= 1.0 }
     stream(g, g.me.x, g.me.z, 5.0)
+    lod_update(g, g.me.x, g.me.z, 3.5)
     render_world(g)
     draw_hud(g)
     if g.mode == 2 { draw_palette(g) }
 }
 
 fn load_frame(g: Game, dt: f64) {
-    stream(g, g.me.x, g.me.z, 22.0)
+    stream(g, g.me.x, g.me.z, 18.0)
+    lod_update(g, g.me.x, g.me.z, 10.0)
     let have = meshed_count(g, g.me.x, g.me.z, 3)
     let frac = have / 29.0
     set_sky_uniforms(g)

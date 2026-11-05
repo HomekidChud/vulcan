@@ -147,7 +147,7 @@ fn draw_hud(g: Game) {
         hud_text(14.0, H - 104.0, 12.0, 0.9, 1.0, 0.9, 1.0, f"pack {g.ct.pack} ({g.ct.reg.n - 1} blocks)  shader {g.shaders[g.sh_i].name}")
         hud_text(14.0, H - 86.0, 12.0, 0.9, 1.0, 0.9, 1.0, gfx_info())
         hud_text(14.0, H - 68.0, 12.0, 0.9, 1.0, 0.9, 1.0, f"opp {fmt1(g.opp.x)} {fmt1(g.opp.y)} {fmt1(g.opp.z)} hp {fmt1(g.ohp)} vis {g.opp_vis}")
-        hud_text(14.0, H - 50.0, 12.0, 0.9, 1.0, 0.9, 1.0, f"time {fmt1(g.time * 24.0)}h   render {g.rd} chunks   net {net_state()}")
+        hud_text(14.0, H - 50.0, 12.0, 0.9, 1.0, 0.9, 1.0, f"time {fmt1(g.time * 24.0)}h   render {g.rd} chunks (full detail {vrad(g)})   net {net_state()}")
     }
     // pause overlay
     if g.mode == 1 && !gfx_locked() && g.dead_t <= 0.0 {
@@ -263,10 +263,10 @@ fn draw_menu(g: Game) -> i64 {
     }
     ctext(cx, y, 12.0, 0.7, 0.8, 1.0, 1.0, f"RENDER DISTANCE  {g.rd}")
     y += 18.0 * s
-    if button(cx - 220.0, y, 44.0, 34.0 * s, "-") { g.rd = max(3, g.rd - 1) act = 7 }
-    if button(cx + 176.0, y, 44.0, 34.0 * s, "+") { g.rd = min(10, g.rd + 1) act = 7 }
+    if button(cx - 220.0, y, 44.0, 34.0 * s, "-") { g.rd = max(4, g.rd - 2) act = 7 }
+    if button(cx + 176.0, y, 44.0, 34.0 * s, "+") { g.rd = min(32, g.rd + 2) act = 7 }
     hud_rect(cx - 170.0, y + 14.0, 340.0, 6.0, 0.2, 0.22, 0.3, 1.0)
-    hud_rect(cx - 170.0, y + 14.0, 340.0 * (g.rd - 3) / 7.0, 6.0, 0.4, 0.7, 1.0, 1.0)
+    hud_rect(cx - 170.0, y + 14.0, 340.0 * (g.rd - 4) / 28.0, 6.0, 0.4, 0.7, 1.0, 1.0)
     if g.status.len() > 0 { ctext(cx, top + 506.0 * s, 13.0, 1.0, 0.82, 0.4, 1.0, g.status) }
     if !cmp { ctext(cx, H - 20.0, 11.0, 0.8, 0.85, 0.95, 0.8, "Add your own .vmod mods, .modpack lists and .vshader packs with the Import button (top right).") }
     return act

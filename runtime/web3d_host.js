@@ -573,6 +573,7 @@ uniform sampler2D uPass0; uniform sampler2D uPass1; uniform sampler2D uPass2; un
 
   // ------------------------------------------------------------------ frame loop
   let tResumed = 0, jsMs = 0, jsMax = 0, rdMs = 0, jsWin = [];
+  window.__vcStats = () => stats;
   window.__vcPerf = () => { const a = jsWin.slice().sort((x, y) => x - y); return { n: a.length, median: a[a.length >> 1], p95: a[Math.floor(a.length * 0.95)], max: a[a.length - 1], scale: renderScale, q: quality }; };
   H.gfx_frame = () => new Promise((resolve) => {
     const t0 = performance.now();

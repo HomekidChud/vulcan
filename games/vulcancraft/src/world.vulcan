@@ -17,7 +17,9 @@ struct World {
     pb: [i64], ps: [i64], pl: [i64], lb: [i64], lb_used: i64, q: [i64],
     vs: [f64], vt: [f64], ed: [i64],
     i_stone: i64, i_bed: i64, i_water: i64, i_poppy: i64, i_dandelion: i64,
-    da: [i64], db: [i64], dn: [i64]
+    da: [i64], db: [i64], dn: [i64],
+    lt_x: [i64], lt_z: [i64], lt_cs: [i64], lt_bx: [i64], lt_bz: [i64], lt_st: [i64],
+    lt_gh: [i64], lt_gb: [i64], lt_ord: [i64], lt_cfg: i64, lt_pc: i64
 }
 
 fn chunk_empty(slot: i64) -> Chunk {
@@ -39,7 +41,9 @@ fn world_new(seed: i64, ct: Content) -> World {
         vs: [], vt: [], ed: [],
         i_stone: bid(ct.reg, "stone"), i_bed: bid(ct.reg, "bedrock"), i_water: bid(ct.reg, "water"),
         i_poppy: bid(ct.reg, "poppy"), i_dandelion: bid(ct.reg, "dandelion"),
-        da: [1, 18, 18, 1, 324, 18, 324], db: [], dn: []
+        da: [1, 18, 18, 1, 324, 18, 324], db: [], dn: [],
+        lt_x: zeros(LG * LG), lt_z: zeros(LG * LG), lt_cs: zeros(LG * LG), lt_bx: zeros(LG * LG), lt_bz: zeros(LG * LG), lt_st: zeros(LG * LG),
+        lt_gh: zeros(LG * LG * 324), lt_gb: zeros(LG * LG * 324), lt_ord: lod_order(), lt_cfg: -1, lt_pc: -999999999
     }
     for i in 0 .. GRID * GRID { w.slots.push(chunk_empty(i)) }
     // per-direction index deltas in the padded mesh arrays (x=1, z=18, y=324)

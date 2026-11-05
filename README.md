@@ -13,6 +13,11 @@ fn main() {
 }
 ```
 
+## Vulcan 0.6.2 — horizon terrain and unchecked arrays
+
+- **Render distance 20+ on phones**: Vulcancraft now meshes only a small full-detail radius (5 chunks on touch, 8 on desktop) and draws everything beyond it as coarse height columns ("horizon terrain", `games/vulcancraft/src/lod.vulcan`) built straight from the terrain functions, with trees, water and skirts. Slider range is 4 to 32; touch devices default to 20, desktop to 16. Typical cost at 20: about 180 draw calls and 0.3M triangles, with script time under 1 ms per frame once loaded.
+- **`vulcan package --fast`** (default for `web3d` and `android`; `--checked` turns it off): the JS backend emits plain `a[i]` instead of bounds-checked helper calls, which removed the helper cost from the hot meshing and terrain loops.
+
 ## Vulcan 0.6.1 — Android, custom touch controls, faster
 
 - **Android APK**: `vulcan package game.vulcan --platform android [--assets dir] [--name Name]` writes a Gradle-free Android project (WebView shell, landscape, immersive, file picker for imports, Back button hook) and, if an Android SDK (`ANDROID_HOME`) and JDK are found, builds a debug-signed `.apk` with aapt2, javac, d8, zipalign and apksigner in about two seconds. Without the SDK it leaves `build.sh` for you to run. `--platform mobile` and `desktop` now wrap 3D programs correctly too (they used to wrap the terminal runtime, which is why a 3D game looked broken on a phone). iOS still needs Xcode on a Mac.

@@ -1,0 +1,247 @@
+// lod.vulcan — horizon terrain. Beyond the voxel radius the world is drawn as coarse height columns
+// (one flat-topped column per 4x4 or 8x8 blocks, with skirts), generated straight from the terrain
+// functions without ever allocating chunk voxel data. This is what makes render distances of 20+
+// cheap on phones: ~1 draw call per 64x64 block tile and no per-block meshing.
+
+const LG = 24
+const LTS = 64
+
+fn lod_order() -> [i64] {
+    let ds: [i64] = []
+    let out: [i64] = []
+    let R = 10
+    for dz in -R ..= R {
+        for dx in -R ..= R { ds.push((dx * dx + dz * dz) * 4096 + (dx + 32) * 64 + (dz + 32)) }
+    }
+    for i in 1 .. ds.len() {
+        let v = ds[i]
+        let j = i - 1
+        while j >= 0 && ds[j] > v {
+            ds[j + 1] = ds[j]
+            j -= 1
+        }
+        ds[j + 1] = v
+    }
+    for i in 0 .. ds.len() {
+        let k = ds[i] % 4096
+        out.push(k / 64 - 32)
+        out.push(k % 64 - 32)
+    }
+    return out
+}
+
+// voxel (full detail) radius in chunks: render distance is capped here, LOD covers the rest
+fn vrad(g: Game) -> i64 {
+    if g.touch == 1 { return min(g.rd, 5) }
+    return min(g.rd, 8)
+}
+
+fn lq(v: [f64], ax: f64, ay: f64, az: f64, au: f64, at: f64, bx: f64, byy: f64, bz: f64, bu: f64, bt: f64, cx: f64, cy: f64, cz: f64, cu: f64, ct: f64, dx: f64, dy: f64, dz: f64, du: f64, dt: f64, nx: f64, ny: f64, nz: f64, ao: f64, mat: f64) {
+    pv(v, ax, ay, az, nx, ny, nz, au, at, 1.0, 0.0, ao, mat)
+    pv(v, bx, byy, bz, nx, ny, nz, bu, bt, 1.0, 0.0, ao, mat)
+    pv(v, cx, cy, cz, nx, ny, nz, cu, ct, 1.0, 0.0, ao, mat)
+    pv(v, ax, ay, az, nx, ny, nz, au, at, 1.0, 0.0, ao, mat)
+    pv(v, cx, cy, cz, nx, ny, nz, cu, ct, 1.0, 0.0, ao, mat)
+    pv(v, dx, dy, dz, nx, ny, nz, du, dt, 1.0, 0.0, ao, mat)
+}
+
+fn lod_skirt(v: [f64], d: i64, x0: f64, z0: f64, x1: f64, z1: f64, yb: f64, yt: f64, u0: f64, t0: f64, u1: f64, t1: f64) {
+    if d == 0 {
+        lq(v, x1, yb, z1, u0, t1, x1, yb, z0, u1, t1, x1, yt, z0, u1, t0, x1, yt, z1, u0, t0, 1.0, 0.0, 0.0, 0.8, 0.0)
+    } elif d == 1 {
+        lq(v, x0, yb, z0, u0, t1, x0, yb, z1, u1, t1, x0, yt, z1, u1, t0, x0, yt, z0, u0, t0, -1.0, 0.0, 0.0, 0.8, 0.0)
+    } elif d == 2 {
+        lq(v, x0, yb, z1, u0, t1, x1, yb, z1, u1, t1, x1, yt, z1, u1, t0, x0, yt, z1, u0, t0, 0.0, 0.0, 1.0, 0.7, 0.0)
+    } else {
+        lq(v, x1, yb, z0, u0, t1, x0, yb, z0, u1, t1, x0, yt, z0, u1, t0, x1, yt, z0, u0, t0, 0.0, 0.0, -1.0, 0.7, 0.0)
+    }
+}
+
+// sample the height/biome grid of a tile (cells of size cs, plus a 1-cell border for skirts)
+fn lod_sample(g: Game, tx: i64, tz: i64, cs: i64, slot: i64) {
+    let w = g.w
+    let sea = g.ct.gen.sea
+    let n = LTS / cs
+    let m = n + 2
+    let base = slot * 324
+    let half = cs / 2
+    for j in 0 .. m {
+        for i in 0 .. m {
+            let wx = tx * LTS + (i - 1) * cs + half
+            let wz = tz * LTS + (j - 1) * cs + half
+            let h = height_at(w, wx, wz)
+            w.lt_gh[base + j * m + i] = h
+            if i >= 1 && i <= n && j >= 1 && j <= n { w.lt_gb[base + j * m + i] = biome_of(w, wx, wz, h, sea) }
+        }
+    }
+}
+
+fn lod_emit(g: Game, tx: i64, tz: i64, cs: i64, slot: i64, pcx: i64, pcz: i64, vr: i64) {
+    let w = g.w
+    let ct = g.ct
+    let rg = ct.reg
+    let gn = ct.gen
+    let sea = gn.sea
+    let n = LTS / cs
+    let m = n + 2
+    let base = slot * 324
+    let land: [f64] = []
+    let water: [f64] = []
+    let wt = rg.t_top[w.i_water]
+    let wu0 = tile_u0(wt) + TILE_UV * 0.25
+    let wv0 = tile_v0(wt) + TILE_UV * 0.25
+    let vrf = vr * 1.0
+    let csf = cs * 1.0
+    for j in 1 ..= n {
+        for i in 1 ..= n {
+            let h = w.lt_gh[base + j * m + i]
+            let bi = w.lt_gb[base + j * m + i]
+            let x0 = (i - 1) * csf
+            let z0 = (j - 1) * csf
+            let x1 = x0 + csf
+            let z1 = z0 + csf
+            let ccx = fdiv(tx * LTS + (i - 1) * cs + cs / 2, 16)
+            let ccz = fdiv(tz * LTS + (j - 1) * cs + cs / 2, 16)
+            let ddx = (ccx - pcx) * 1.0
+            let ddz = (ccz - pcz) * 1.0
+            let d = sqrt(ddx * ddx + ddz * ddz)
+            if d < vrf - 2.5 { continue }
+            let ytop = h + 1.0
+            if d < vrf + 0.5 { ytop -= 0.06 }
+            let id = gn.b_top[bi]
+            let tt = rg.t_top[id]
+            let ts = rg.t_side[id]
+            let u0 = tile_u0(tt) + TILE_UV * 0.25
+            let v0 = tile_v0(tt) + TILE_UV * 0.25
+            let u1 = u0 + TILE_UV * 0.5
+            let v1 = v0 + TILE_UV * 0.5
+            lq(land, x0, ytop, z0, u0, v0, x0, ytop, z1, u0, v1, x1, ytop, z1, u1, v1, x1, ytop, z0, u1, v0, 0.0, 1.0, 0.0, 1.0, 0.0)
+            // skirts toward lower neighbours
+            let su0 = tile_u0(ts) + TILE_UV * 0.25
+            let sv0 = tile_v0(ts) + TILE_UV * 0.25
+            let su1 = su0 + TILE_UV * 0.5
+            let sv1 = sv0 + TILE_UV * 0.5
+            let nh = w.lt_gh[base + j * m + i + 1]
+            if nh < h { lod_skirt(land, 0, x0, z0, x1, z1, nh + 0.0, ytop, su0, sv0, su1, sv1) }
+            nh = w.lt_gh[base + j * m + i - 1]
+            if nh < h { lod_skirt(land, 1, x0, z0, x1, z1, nh + 0.0, ytop, su0, sv0, su1, sv1) }
+            nh = w.lt_gh[base + (j + 1) * m + i]
+            if nh < h { lod_skirt(land, 2, x0, z0, x1, z1, nh + 0.0, ytop, su0, sv0, su1, sv1) }
+            nh = w.lt_gh[base + (j - 1) * m + i]
+            if nh < h { lod_skirt(land, 3, x0, z0, x1, z1, nh + 0.0, ytop, su0, sv0, su1, sv1) }
+            if d >= vrf + 0.5 {
+                if h < sea {
+                    let wy = sea + 0.875
+                    lq(water, x0, wy, z0, wu0, wv0, x0, wy, z1, wu0, wv0, x1, wy, z1, wu0, wv0, x1, wy, z0, wu0, wv0, 0.0, 1.0, 0.0, 1.0, 1.0)
+                } else {
+                    // forests: a few canopy blocks per cell, enough to read as trees from afar
+                    let fq = gn.b_tfreq[bi]
+                    let lf = gn.b_leaf[bi]
+                    if fq > 0.0 && lf > 0 && h > sea {
+                        let k = floori(fq * csf * csf * 1.1 + rnd(tx * 16 + i, 7, tz * 16 + j, w.seed + 40))
+                        if k > 2 { k = 2 }
+                        for t in 0 .. k {
+                            let px = x0 + rnd(tx * 16 + i, t, tz * 16 + j, w.seed + 41) * (csf - 3.0)
+                            let pz = z0 + rnd(tx * 16 + i, t + 3, tz * 16 + j, w.seed + 42) * (csf - 3.0)
+                            cube_mesh(land, px, ytop + 2.0, pz, px + 3.0, ytop + 7.0, pz + 3.0, rg.t_top[lf], rg.t_side[lf], rg.t_top[lf], 1.0, 0.0, 0.0)
+                        }
+                    }
+                }
+            }
+        }
+    }
+    gfx_mesh_set(10000 + slot * 2, 0, land)
+    gfx_mesh_at(10000 + slot * 2, tx * LTS * 1.0, 0.0, tz * LTS * 1.0)
+    gfx_mesh_set(10001 + slot * 2, 1, water)
+    gfx_mesh_at(10001 + slot * 2, tx * LTS * 1.0, 0.0, tz * LTS * 1.0)
+}
+
+fn lod_free_slot(w: World, s: i64) {
+    gfx_mesh_free(10000 + s * 2)
+    gfx_mesh_free(10001 + s * 2)
+    w.lt_st[s] = 0
+}
+
+// build/refresh horizon tiles near (px, pz) within a millisecond budget; returns tiles built
+fn lod_update(g: Game, px: f64, pz: f64, budget: f64) -> i64 {
+    let w = g.w
+    let vr = vrad(g)
+    let rd = g.rd
+    let pcx = fdiv(floori(px), 16)
+    let pcz = fdiv(floori(pz), 16)
+    let ptx = fdiv(floori(px), LTS)
+    let ptz = fdiv(floori(pz), LTS)
+    let t0 = ms_now()
+    let cfg = rd * 64 + vr
+    if w.lt_cfg != cfg {
+        w.lt_cfg = cfg
+        for s in 0 .. LG * LG { if w.lt_st[s] > 0 { w.lt_st[s] = 2 } }   // 2 = needs rebuild
+    }
+    let pkey = pcx * 100003 + pcz
+    if w.lt_pc != pkey {
+        w.lt_pc = pkey
+        // free tiles that fell out of range
+        let lim = rd * 16.0 + 160.0
+        for s in 0 .. LG * LG {
+            if w.lt_st[s] > 0 {
+                let dx = w.lt_x[s] * LTS + 32.0 - px
+                let dz = w.lt_z[s] * LTS + 32.0 - pz
+                if dx * dx + dz * dz > lim * lim { lod_free_slot(w, s) }
+            }
+        }
+    }
+    let built = 0
+    let n = w.lt_ord.len() / 2
+    let reach = rd * 16.0 + 45.0
+    for k in 0 .. n {
+        let tx = ptx + w.lt_ord[k * 2]
+        let tz = ptz + w.lt_ord[k * 2 + 1]
+        let cx = tx * LTS + 32.0
+        let cz = tz * LTS + 32.0
+        let dd = sqrt((cx - px) * (cx - px) + (cz - pz) * (cz - pz))
+        if dd > reach { continue }
+        let slot = fmod(tx, LG) + fmod(tz, LG) * LG
+        let same = w.lt_st[slot] > 0 && w.lt_x[slot] == tx && w.lt_z[slot] == tz
+        let cs = 8
+        if dd < 192.0 { cs = 4 }
+        if same {
+            cs = w.lt_cs[slot]
+            if cs == 4 && dd > 224.0 { cs = 8 }
+            elif cs == 8 && dd < 160.0 { cs = 4 }
+        }
+        let need = !same || w.lt_st[slot] == 2 || cs != w.lt_cs[slot]
+        if !need && w.lt_st[slot] == 1 {
+            // tiles touching the voxel/horizon seam follow the player byy chunks
+            let tcx = (tx * 4 + 2) - pcx
+            let tcz = (tz * 4 + 2) - pcz
+            let dc = sqrt(tcx * tcx * 1.0 + tcz * tcz * 1.0)
+            if dc < vr + 4.5 && (abs(pcx - w.lt_bx[slot]) >= 1 || abs(pcz - w.lt_bz[slot]) >= 1) { need = true }
+        }
+        if !need { continue }
+        let tcx = (tx * 4 + 2) - pcx
+        let tcz = (tz * 4 + 2) - pcz
+        let dc = sqrt(tcx * tcx * 1.0 + tcz * tcz * 1.0)
+        if !same || cs != w.lt_cs[slot] || w.lt_cs[slot] == 0 {
+            // new tile for this slot: drop whatever was there and sample fresh heights
+            w.lt_x[slot] = tx
+            w.lt_z[slot] = tz
+            w.lt_cs[slot] = cs
+            lod_sample(g, tx, tz, cs, slot)
+        } elif w.lt_st[slot] == 2 && w.lt_cs[slot] != cs {
+            w.lt_cs[slot] = cs
+            lod_sample(g, tx, tz, cs, slot)
+        }
+        if dc + 2.9 < vr - 2.5 {
+            gfx_mesh_free(10000 + slot * 2)
+            gfx_mesh_free(10001 + slot * 2)
+        } else {
+            lod_emit(g, tx, tz, cs, slot, pcx, pcz, vr)
+        }
+        w.lt_bx[slot] = pcx
+        w.lt_bz[slot] = pcz
+        w.lt_st[slot] = 1
+        built += 1
+        if ms_now() - t0 > budget { break }
+    }
+    return built
+}

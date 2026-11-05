@@ -4,7 +4,10 @@
 //  - mobile:  Capacitor project wrapping the web bundle (iOS/Android)
 //  - android: a ready-to-build native Android project (WebView) and, when the SDK is found, a signed .apk
 //  - linux/windows/macos: native C cross-build scripts
-pub fn package(entry: &str, platform: &str, assets: Option<&str>, name: Option<&str>) {
+pub fn package(entry: &str, platform: &str, assets: Option<&str>, name: Option<&str>, fast: Option<bool>) {
+    // 3D games default to unchecked array access (no per-access bounds test); `--checked` restores it
+    let fast = fast.unwrap_or(matches!(platform, "web3d" | "android"));
+    crate::codegen_js::set_unchecked(fast);
     let program = crate::modules::load_program(std::path::Path::new(entry));
     let js = crate::codegen_js::generate_js(&program);
     let stem = entry.trim_end_matches(".vulcan");

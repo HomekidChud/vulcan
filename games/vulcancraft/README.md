@@ -28,6 +28,10 @@ Customize: Options > Customize touch controls. Drag any button to move it, tap i
 
 Options (top right, in menus) also holds How to play, Quality (Auto adapts the render resolution to your device; Low, Medium, High are fixed), Import and Fullscreen.
 
+## Render distance
+
+The slider goes from 4 to 32 chunks (touch default 20). Only the nearest 5 chunks (touch) or 8 chunks (desktop) are real voxels; farther terrain is drawn as horizon columns generated from the same terrain functions, so the world looks the same from afar and costs a few hundred triangles per tile instead of per-block meshing. The Options menu has a Quality setting; Auto also scales the render resolution to hold about 60 fps. Press F3 for draw calls, triangles, script time and resolution.
+
 ## Android APK
 
     vulcan package games/vulcancraft/src/main.vulcan --platform android --assets games/vulcancraft/assets --name Vulcancraft

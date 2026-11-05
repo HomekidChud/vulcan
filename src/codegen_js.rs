@@ -107,6 +107,18 @@ function __min(a, b) { return a < b ? a : b; }
 function __max(a, b) { return a > b ? a : b; }
 "#;
 
+static UNCHECKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Emit plain `a[i]` instead of bounds-checked `__get`/`__set` (faster hot loops; out-of-range
+/// reads give `undefined` instead of an error). Used by `vulcan package --fast`.
+pub fn set_unchecked(on: bool) {
+    UNCHECKED.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn unchecked() -> bool {
+    UNCHECKED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 pub fn generate_js(program: &[Item]) -> String {
     let mut g = JsGen {
         body: String::new(),
@@ -526,7 +538,7 @@ impl JsGen {
                         let elem = self.array_elem(&recv_ty);
                         let idx_c = self.cast(&idx_c, &idx_ty, &Ty::I64);
                         let cast = self.cast(&val_c, &val_ty, &elem);
-                        self.line(&format!("__set({recv_c}, {idx_c}, {cast});"));
+                        if unchecked() { self.line(&format!("{recv_c}[{idx_c}] = {cast};")); } else { self.line(&format!("__set({recv_c}, {idx_c}, {cast});")); }
                     }
                     Expr::Field(recv, fname) => {
                         // struct references mean no copy dance is needed, even through array elements
@@ -555,9 +567,9 @@ impl JsGen {
                         let (idx_c, idx_ty) = self.gen_expr(idx);
                         let idx_c = self.cast(&idx_c, &idx_ty, &Ty::I64);
                         let elem = self.array_elem(&recv_ty);
-                        let lhs = format!("__get({recv_c}, {idx_c})");
+                        let lhs = if unchecked() { format!("{recv_c}[{idx_c}]") } else { format!("__get({recv_c}, {idx_c})") };
                         let applied = self.apply_op(&lhs, &bare_op, &val_c, &val_ty, &elem);
-                        self.line(&format!("__set({recv_c}, {idx_c}, {applied});"));
+                        if unchecked() { self.line(&format!("{recv_c}[{idx_c}] = {applied};")); } else { self.line(&format!("__set({recv_c}, {idx_c}, {applied});")); }
                     }
                     _ => panic!("vulcan: invalid compound-assignment target"),
                 }
@@ -577,7 +589,7 @@ impl JsGen {
                         let (recv_c, recv_ty) = self.gen_expr(recv);
                         let (idx_c, idx_ty) = self.gen_expr(idx);
                         let idx_c = self.cast(&idx_c, &idx_ty, &Ty::I64);
-                        self.line(&format!("__set({recv_c}, {idx_c}, __get({recv_c}, {idx_c}) + {delta});"));
+                        if unchecked() { self.line(&format!("{recv_c}[{idx_c}] += {delta};")); } else { self.line(&format!("__set({recv_c}, {idx_c}, __get({recv_c}, {idx_c}) + {delta});")); }
                     }
                     _ => panic!("vulcan: invalid ++/-- target"),
                 }
@@ -1010,7 +1022,7 @@ impl JsGen {
                     (format!("__chat({recv_c}, {idx_c})"), Ty::I64)
                 } else {
                     let elem = self.array_elem(&recv_ty);
-                    (format!("__get({recv_c}, {idx_c})"), elem)
+                    (if unchecked() { format!("{recv_c}[{idx_c}]") } else { format!("__get({recv_c}, {idx_c})") }, elem)
                 }
             }
             Expr::ArrayLit(items) => {
