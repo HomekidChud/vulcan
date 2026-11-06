@@ -98,9 +98,38 @@ function __max(a, b) { return a > b ? a : b; }
 // ---- graphics: 256x144 framebuffer, presented to the IDE canvas or terminal ----
 const __FB_W = 256, __FB_H = 144;
 const __fb = new Int32Array(__FB_W * __FB_H);
+const __zbuf = new Float64Array(__FB_W * __FB_H);
 const __FONT_CHARS = " 0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ.:-!?/+%";
 const __FONT_DATA = "000007555726227717477171755711747177475771122757577571775755656567444765556746477464474557557557222711157556554444757755655557555775744755717565574717722225555755552557755525555722712470000202020007002220271302112440272051245";
-function __clear(c) { __fb.fill(c | 0); }
+function __clear(c) { __fb.fill(c | 0); __zbuf.fill(1e30); }
+// depth-buffered triangle: (x,y,z) vertices, z compared with < (near = smaller)
+function __draw_tri(x0, y0, z0, x1, y1, z1, x2, y2, z2, c) {
+    let area = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0);
+    if (area === 0) return;
+    if (area < 0) { // normalize winding so barycentric insides are >= 0
+        const tx = x1, ty = y1, tz = z1;
+        x1 = x2; y1 = y2; z1 = z2; x2 = tx; y2 = ty; z2 = tz;
+        area = -area;
+    }
+    const minx = Math.max(0, Math.ceil(Math.min(x0, x1, x2) - 0.5));
+    const maxx = Math.min(__FB_W - 1, Math.floor(Math.max(x0, x1, x2) - 0.5));
+    const miny = Math.max(0, Math.ceil(Math.min(y0, y1, y2) - 0.5));
+    const maxy = Math.min(__FB_H - 1, Math.floor(Math.max(y0, y1, y2) - 0.5));
+    for (let py = miny; py <= maxy; py++) {
+        const cy = py + 0.5;
+        for (let px = minx; px <= maxx; px++) {
+            const cx = px + 0.5;
+            const e0 = (x2 - x1) * (cy - y1) - (y2 - y1) * (cx - x1);
+            const e1 = (x0 - x2) * (cy - y2) - (y0 - y2) * (cx - x2);
+            const e2 = (x1 - x0) * (cy - y0) - (y1 - y0) * (cx - x0);
+            if (e0 >= 0 && e1 >= 0 && e2 >= 0) {
+                const z = (e0 * z0 + e1 * z1 + e2 * z2) / area;
+                const idx = py * __FB_W + px;
+                if (z < __zbuf[idx]) { __zbuf[idx] = z; __fb[idx] = c | 0; }
+            }
+        }
+    }
+}
 function __draw_rect(x, y, w, h, c) {
     const x0 = Math.ceil(x - 0.5), x1 = Math.floor(x + w - 0.5);
     const y0 = Math.ceil(y - 0.5), y1 = Math.floor(y + h - 0.5);
@@ -1078,6 +1107,12 @@ impl JsGen {
                 if t != Ty::Str { panic!("vulcan: to_float needs a string"); }
                 (format!("__to_float({c})"), Ty::F64)
             }
+            "to_string" => {
+                if args.len() != 1 { panic!("vulcan: to_string(n) takes 1 arg"); }
+                let (c, t) = self.gen_expr(&args[0]);
+                if t != Ty::I64 && t != Ty::F64 { panic!("vulcan: to_string needs i64 or f64"); }
+                (format!("String({c})"), Ty::Str)
+            }
             "file_read" => {
                 if args.len() != 1 { panic!("vulcan: file_read(path) takes 1 arg"); }
                 let (c, t) = self.gen_expr(&args[0]);
@@ -1160,6 +1195,18 @@ impl JsGen {
                 let (col, ct) = self.gen_expr(&args[4]);
                 let col = self.cast(&col, &ct, &Ty::I64);
                 (format!("(__draw_rect({}, {}, {}, {}, {col}), undefined)", cs[0], cs[1], cs[2], cs[3]), Ty::Void)
+            }
+            "draw_tri" => {
+                if args.len() != 10 { panic!("vulcan: draw_tri(x0,y0,z0, x1,y1,z1, x2,y2,z2, color) takes 10 args"); }
+                let mut cs = Vec::new();
+                for a in args.iter().take(9) {
+                    let (c, t) = self.gen_expr(a);
+                    cs.push(self.cast(&c, &t, &Ty::F64));
+                }
+                let (col, ct) = self.gen_expr(&args[9]);
+                let col = self.cast(&col, &ct, &Ty::I64);
+                (format!("(__draw_tri({}, {}, {}, {}, {}, {}, {}, {}, {}, {col}), undefined)",
+                    cs[0], cs[1], cs[2], cs[3], cs[4], cs[5], cs[6], cs[7], cs[8]), Ty::Void)
             }
             "draw_circle" => {
                 if args.len() != 4 { panic!("vulcan: draw_circle(x, y, r, color) takes 4 args"); }

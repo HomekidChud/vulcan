@@ -1,0 +1,146 @@
+// lib/render3d.vulcan — 3D math + camera projection for the Vulcan canvas.
+//
+// Pairs with the `draw_tri` builtin (depth-buffered triangles) to form a
+// software 3D renderer. Conventions:
+//   - yaw = 0 looks along +Z, pitch > 0 looks up
+//   - `project()` returns screen position, camera-space depth (larger =
+//     farther — pass it straight to draw_tri's z) and a visibility flag
+pub struct Vec3 { x: f64, y: f64, z: f64 }
+
+impl Vec3 {
+    fn add(self, o: Vec3) -> Vec3 {
+        return Vec3 { x: self.x + o.x, y: self.y + o.y, z: self.z + o.z }
+    }
+    fn sub(self, o: Vec3) -> Vec3 {
+        return Vec3 { x: self.x - o.x, y: self.y - o.y, z: self.z - o.z }
+    }
+    fn scaled(self, s: f64) -> Vec3 {
+        return Vec3 { x: self.x * s, y: self.y * s, z: self.z * s }
+    }
+    fn dot(self, o: Vec3) -> f64 {
+        return self.x * o.x + self.y * o.y + self.z * o.z
+    }
+    fn cross(self, o: Vec3) -> Vec3 {
+        return Vec3 {
+            x: self.y * o.z - self.z * o.y,
+            y: self.z * o.x - self.x * o.z,
+            z: self.x * o.y - self.y * o.x
+        }
+    }
+    fn length(self) -> f64 {
+        return sqrt(self.x * self.x + self.y * self.y + self.z * self.z)
+    }
+    fn normalized(self) -> Vec3 {
+        let l = self.length()
+        if l == 0.0 { return Vec3 { x: 0.0, y: 1.0, z: 0.0 } }
+        return Vec3 { x: self.x / l, y: self.y / l, z: self.z / l }
+    }
+}
+
+pub struct Camera { x: f64, y: f64, z: f64, yaw: f64, pitch: f64 }
+
+pub struct Projected { sx: f64, sy: f64, depth: f64, visible: i64 }
+
+pub fn cam_forward(c: Camera) -> Vec3 {
+    let cp = cos(c.pitch)
+    return Vec3 { x: sin(c.yaw) * cp, y: sin(c.pitch), z: cos(c.yaw) * cp }
+}
+
+pub fn cam_right(c: Camera) -> Vec3 {
+    return Vec3 { x: cos(c.yaw), y: 0.0, z: -sin(c.yaw) }
+}
+
+pub fn cam_up(c: Camera) -> Vec3 {
+    let f = cam_forward(c)
+    let r = cam_right(c)
+    return f.cross(r)
+}
+
+// Projects a world point to the 256x144 canvas. depth is camera-space
+// distance (use as draw_tri z: smaller = nearer); visible = 0 when behind
+// the camera (skip triangles with invisible vertices).
+pub fn project(c: Camera, p: Vec3) -> Projected {
+    let f = cam_forward(c)
+    let r = cam_right(c)
+    let u = f.cross(r)
+    let d = Vec3 { x: p.x - c.x, y: p.y - c.y, z: p.z - c.z }
+    let cz = d.dot(f)
+    let vis = 1
+    if cz < 0.5 { vis = 0 }
+    let z = cz
+    if z < 0.5 { z = 0.5 }
+    let fl = 160.0
+    return Projected {
+        sx: 128.0 + d.dot(r) * fl / z,
+        sy: 72.0 - d.dot(u) * fl / z,
+        depth: cz,
+        visible: vis
+    }
+}
+
+// ---- color helpers (0xRRGGBB) ----
+
+pub fn color_shade(c: i64, f: f64) -> i64 {
+    let ri = (c / 65536) % 256
+    let gi = (c / 256) % 256
+    let bi = c % 256
+    let r: f64 = ri
+    let g: f64 = gi
+    let b: f64 = bi
+    r = r * f
+    g = g * f
+    b = b * f
+    if r > 255.0 { r = 255.0 }
+    if g > 255.0 { g = 255.0 }
+    if b > 255.0 { b = 255.0 }
+    if r < 0.0 { r = 0.0 }
+    if g < 0.0 { g = 0.0 }
+    if b < 0.0 { b = 0.0 }
+    let ri: i64 = 0
+    let gi: i64 = 0
+    let bi: i64 = 0
+    ri = r
+    gi = g
+    bi = b
+    return ri * 65536 + gi * 256 + bi
+}
+
+pub fn color_lerp(a: i64, b: i64, t: f64) -> i64 {
+    let ari = (a / 65536) % 256
+    let agi = (a / 256) % 256
+    let abi = a % 256
+    let bri = (b / 65536) % 256
+    let bgi = (b / 256) % 256
+    let bbi = b % 256
+    let ar: f64 = ari
+    let ag: f64 = agi
+    let ab: f64 = abi
+    let br: f64 = bri
+    let bg: f64 = bgi
+    let bb: f64 = bbi
+    let r = ar + (br - ar) * t
+    let g = ag + (bg - ag) * t
+    let bl = ab + (bb - ab) * t
+    let ri: i64 = 0
+    let gi: i64 = 0
+    let bii: i64 = 0
+    ri = r
+    gi = g
+    bii = bl
+    return ri * 65536 + gi * 256 + bii
+}
+
+// Draws a 3D quad (two depth-buffered triangles). Skips if any corner is
+// behind the camera.
+pub fn draw_quad(c: Camera, a: Vec3, b: Vec3, d: Vec3, e: Vec3, color: i64) -> void {
+    let pa = project(c, a)
+    let pb = project(c, b)
+    let pd = project(c, d)
+    let pe = project(c, e)
+    if pa.visible == 0 { return }
+    if pb.visible == 0 { return }
+    if pd.visible == 0 { return }
+    if pe.visible == 0 { return }
+    draw_tri(pa.sx, pa.sy, pa.depth, pb.sx, pb.sy, pb.depth, pd.sx, pd.sy, pd.depth, color)
+    draw_tri(pa.sx, pa.sy, pa.depth, pd.sx, pd.sy, pd.depth, pe.sx, pe.sy, pe.depth, color)
+}

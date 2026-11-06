@@ -33,6 +33,40 @@ fn main() -> void {
 
 const PHYSICS_TEST_EXPECTED: &str = "bodies: 6 springs: 1\n0 128 152\n1 -6 72\n2 262 72\n3 128 -8\n4 59.1166 138.092\n5 108.806 136.102\n";
 
+// 3D renderer selftest main — concatenated after lib/render3d.vulcan
+const RENDER3D_TEST_MAIN: &str = r#"
+
+fn main() -> void {
+    let cam = Camera { x: 0.0, y: 0.0, z: -10.0, yaw: 0.0, pitch: 0.0 }
+    let p = project(cam, Vec3 { x: 0.0, y: 0.0, z: 0.0 })
+    print("p:", p.sx, p.sy, p.depth, p.visible)
+    let q = project(cam, Vec3 { x: 5.0, y: 5.0, z: 5.0 })
+    print("q:", q.sx, q.sy, q.depth, q.visible)
+    let b = project(cam, Vec3 { x: 0.0, y: 0.0, z: -20.0 })
+    print("b:", b.visible)
+    let a = Vec3 { x: 1.0, y: 2.0, z: 3.0 }
+    let c = Vec3 { x: -1.0, y: 0.5, z: 2.0 }
+    let s = a.add(c)
+    print("s:", s.x, s.y, s.z)
+    print("dot:", a.dot(c))
+    let x = a.cross(c)
+    print("cross:", x.x, x.y, x.z)
+    print("len:", a.length())
+    let n = a.normalized()
+    print("n:", n.x, n.y, n.z)
+    print("shade:", color_shade(0x8040C0, 0.5))
+    print("lerp:", color_lerp(0x000000, 0xFFFFFF, 0.5))
+    // depth-buffered triangles: draw far-then-near and near-then-far
+    clear(0x000000)
+    draw_tri(40.0, 20.0, 50.0, 200.0, 30.0, 50.0, 100.0, 110.0, 50.0, 0x0000FF)
+    draw_tri(60.0, 40.0, 10.0, 220.0, 50.0, 10.0, 120.0, 100.0, 10.0, 0xFF0000)
+    draw_quad(cam, Vec3 { x: -2.0, y: -2.0, z: 0.0 }, Vec3 { x: 2.0, y: -2.0, z: 0.0 }, Vec3 { x: 2.0, y: 2.0, z: 0.0 }, Vec3 { x: -2.0, y: 2.0, z: 0.0 }, 0x00FF00)
+    print("rendered")
+}
+"#;
+
+const RENDER3D_TEST_EXPECTED: &str = "p: 128 72 10 1\nq: 181.333 18.6667 15 1\nb: 0\ns: 0 2.5 5\ndot: 6\ncross: 2.5 -5 2.5\nlen: 3.74166\nn: 0.267261 0.534522 0.801784\nshade: 4202592\nlerp: 8355711\nrendered\n";
+
 const CASES: &[Case] = &[
     Case {
         name: "basic (0.1 feature set)",
@@ -391,6 +425,9 @@ pub fn selftest() {
     // the physics engine case: lib source + test main, verified like any other case
     let physics_src = include_str!("../lib/physics.vulcan").to_string() + PHYSICS_TEST_MAIN;
     failures += run_case("physics engine (all backends)", &physics_src, PHYSICS_TEST_EXPECTED, &dir);
+    // the 3D renderer case: lib source + test main
+    let render3d_src = include_str!("../lib/render3d.vulcan").to_string() + RENDER3D_TEST_MAIN;
+    failures += run_case("3d renderer (all backends)", &render3d_src, RENDER3D_TEST_EXPECTED, &dir);
     for case in CASES {
         failures += run_case(case.name, case.src, case.expected, &dir);
     }
@@ -398,7 +435,7 @@ pub fn selftest() {
         eprintln!("{failures} selftest case(s) failed");
         std::process::exit(1);
     }
-    println!("vulcan selftest: {} cases passed", CASES.len() + 1);
+    println!("vulcan selftest: {} cases passed", CASES.len() + 2);
 }
 
 fn run_case(name: &str, src: &str, expected: &str, dir: &std::path::Path) -> usize {

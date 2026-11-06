@@ -136,9 +136,37 @@ static void clear_screen(void){ fputs("\033[2J\033[H",stdout); }
 #define VFB_W 256
 #define VFB_H 144
 static int32_t vfb[VFB_W * VFB_H];
+static double vzbuf[VFB_W * VFB_H];
+static void vclear(int64_t color){ for(int i=0;i<VFB_W*VFB_H;i++){ vfb[i]=(int32_t)color; vzbuf[i]=1e30; } }
+// depth-buffered triangle: z compared with < (near = smaller); winding-insensitive
+static void vdraw_tri(double x0,double y0,double z0,double x1,double y1,double z1,double x2,double y2,double z2,int64_t color){
+    double area=(x1-x0)*(y2-y0)-(x2-x0)*(y1-y0);
+    if(area==0.0) return;
+    if(area<0.0){ double tx=x1,ty=y1,tz=z1; x1=x2;y1=y2;z1=z2; x2=tx;y2=ty;z2=tz; area=-area; }
+    double minx0=x0<x1?x0:x1; if(x2<minx0)minx0=x2;
+    double maxx0=x0>x1?x0:x1; if(x2>maxx0)maxx0=x2;
+    double miny0=y0<y1?y0:y1; if(y2<miny0)miny0=y2;
+    double maxy0=y0>y1?y0:y1; if(y2>maxy0)maxy0=y2;
+    int minx=(int)ceil(minx0-0.5); int maxx=(int)floor(maxx0-0.5);
+    int miny=(int)ceil(miny0-0.5); int maxy=(int)floor(maxy0-0.5);
+    if(minx<0)minx=0; if(miny<0)miny=0; if(maxx>VFB_W-1)maxx=VFB_W-1; if(maxy>VFB_H-1)maxy=VFB_H-1;
+    for(int py=miny;py<=maxy;py++){
+        double cy=py+0.5;
+        for(int px=minx;px<=maxx;px++){
+            double cx=px+0.5;
+            double e0=(x2-x1)*(cy-y1)-(y2-y1)*(cx-x1);
+            double e1=(x0-x2)*(cy-y2)-(y0-y2)*(cx-x2);
+            double e2=(x1-x0)*(cy-y0)-(y1-y0)*(cx-x0);
+            if(e0>=0&&e1>=0&&e2>=0){
+                double z=(e0*z0+e1*z1+e2*z2)/area;
+                int idx=py*VFB_W+px;
+                if(z<vzbuf[idx]){ vzbuf[idx]=z; vfb[idx]=(int32_t)color; }
+            }
+        }
+    }
+}
 static const char* vfont_chars = " 0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ.:-!?/+%";
 static const char* vfont_data = "000007555726227717477171755711747177475771122757577571775755656567444765556746477464474557557557222711157556554444757755655557555775744755717565574717722225555755552557755525555722712470000202020007002220271302112440272051245";
-static void vclear(int64_t color){ for(int i=0;i<VFB_W*VFB_H;i++) vfb[i]=(int32_t)color; }
 static void vdraw_rect(double x, double y, double w, double h, int64_t color){
     int x0=(int)ceil(x-0.5), x1=(int)floor(x+w-0.5), y0=(int)ceil(y-0.5), y1=(int)floor(y+h-0.5);
     if(x0<0)x0=0; if(y0<0)y0=0; if(x1>VFB_W-1)x1=VFB_W-1; if(y1>VFB_H-1)y1=VFB_H-1;
@@ -1479,6 +1507,18 @@ impl Codegen {
             "screen_height" => ("vscreen_h()".into(), Ty::I64),
             "canvas_width" => ("256".into(), Ty::I64),
             "canvas_height" => ("144".into(), Ty::I64),
+            "draw_tri" => {
+                if args.len() != 10 { panic!("vulcan: draw_tri(x0,y0,z0, x1,y1,z1, x2,y2,z2, color) takes 10 args"); }
+                let mut cs = Vec::new();
+                for a in args.iter().take(9) {
+                    let (c, t) = self.gen_expr(a);
+                    cs.push(self.cast(&c, &t, &Ty::F64));
+                }
+                let (col, ct) = self.gen_expr(&args[9]);
+                let col = self.cast(&col, &ct, &Ty::I64);
+                (format!("(vdraw_tri({}, {}, {}, {}, {}, {}, {}, {}, {}, {col}), (void)0)",
+                    cs[0], cs[1], cs[2], cs[3], cs[4], cs[5], cs[6], cs[7], cs[8]), Ty::Void)
+            }
             "clear" => {
                 if args.len() != 1 { panic!("vulcan: clear(color) takes 1 arg"); }
                 let (c, t) = self.gen_expr(&args[0]);
