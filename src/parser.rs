@@ -16,6 +16,17 @@ pub enum Item {
     Const(ConstDecl),
     Import(String),
     Impl(ImplDecl),
+    Extern(ExternDecl),
+    Link(String),
+}
+
+// `extern "c" { fn sigs }` — foreign function declarations (FFI).
+// `abi` is "c" (C ABI: real prototypes on the native backend, host shims
+// elsewhere) or "host" (functions provided by the embedding host).
+#[derive(Debug, Clone)]
+pub struct ExternDecl {
+    pub abi: String,
+    pub fns: Vec<FnDecl>, // signatures only — bodies must be empty
 }
 
 #[derive(Debug, Clone)]
@@ -206,6 +217,35 @@ impl Parser {
             }
             return Item::Struct(StructDecl { name, fields });
         }
+        if self.eat(&Tok::KwExtern) {
+            // extern "c" { fn sig; fn sig; }   (abi defaults to "c")
+            let abi = if let Tok::Str(s) = self.peek() {
+                let s = s.clone();
+                self.next();
+                s
+            } else {
+                "c".to_string()
+            };
+            self.expect(Tok::LBrace, "{ to open extern block");
+            let mut fns = Vec::new();
+            while !self.eat(&Tok::RBrace) {
+                self.expect(Tok::KwFn, "fn signature in extern block");
+                fns.push(self.parse_fn_sig());
+            }
+            return Item::Extern(ExternDecl { abi, fns });
+        }
+        // `link "curl"` — pass -l<name> to the C linker (native backend)
+        if let Tok::Ident(name) = self.peek() {
+            if name.as_str() == "link" {
+                self.next();
+                let lib = match self.next() {
+                    Tok::Str(s) => s,
+                    other => self.err(format!("expected library name string after link, got {other:?}")),
+                };
+                self.eat(&Tok::Semi);
+                return Item::Link(lib);
+            }
+        }
         if self.eat(&Tok::KwImpl) {
             let struct_name = self.ident("impl struct name");
             self.expect(Tok::LBrace, "{ to open impl");
@@ -250,6 +290,27 @@ impl Parser {
         self.expect(Tok::LBrace, "{ to open fn body");
         let body = self.parse_block();
         FnDecl { name, params, ret, body }
+    }
+
+    // signature-only fn (inside extern blocks): `fn name(params) -> ret;`
+    fn parse_fn_sig(&mut self) -> FnDecl {
+        let name = self.ident("extern fn name");
+        self.expect(Tok::LParen, "(");
+        let mut params = Vec::new();
+        while !self.eat(&Tok::RParen) {
+            let pname = self.ident("param name");
+            self.expect(Tok::Colon, ": after param name");
+            let pty = self.parse_ty();
+            params.push((pname, pty));
+            self.eat(&Tok::Comma);
+        }
+        let ret = if self.eat(&Tok::Arrow) {
+            self.parse_ty()
+        } else {
+            Ty::Void
+        };
+        self.eat(&Tok::Semi);
+        FnDecl { name, params, ret, body: Vec::new() }
     }
 
     fn parse_block(&mut self) -> Vec<Stmt> {

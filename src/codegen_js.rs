@@ -217,6 +217,17 @@ function __mouse_x() { const s = __input_state(); return s ? s[0] / 100 : -1.0; 
 function __mouse_y() { const s = __input_state(); return s ? s[1] / 100 : -1.0; }
 function __mouse_down() { const s = __input_state(); return s ? s[2] !== 0 : false; }
 function __key_down(c) { const s = __input_state(); return s ? s[3 + c] !== 0 : false; }
+// ---- FFI: `extern` functions resolve through the host __ffi table ----
+// Embedders/IDE plugins can extend it by defining globalThis.__vulcan_ffi
+// (an object of name -> function) before the compiled program runs.
+var __ffi = {
+    sqrt: Math.sqrt, floor: Math.floor, ceil: Math.ceil, abs: Math.abs,
+    strlen: function (s) { return String(s).length; },
+    puts: function (s) { console.log(s); return 1; },
+};
+if (typeof globalThis !== "undefined" && typeof globalThis.__vulcan_ffi !== "undefined") {
+    for (var __k in globalThis.__vulcan_ffi) __ffi[__k] = globalThis.__vulcan_ffi[__k];
+}
 "#;
 
 pub fn generate_js(program: &[Item]) -> String {
@@ -231,6 +242,7 @@ pub fn generate_js(program: &[Item]) -> String {
         consts: HashMap::new(),
         impls: HashMap::new(),
         defers: Vec::new(),
+        externs: Vec::new(),
         cur_ret: Ty::Void,
         is_main: false,
     };
@@ -247,6 +259,14 @@ pub fn generate_js(program: &[Item]) -> String {
                     g.impls.insert((i.struct_name.clone(), m.name.clone()), m.clone());
                 }
             }
+            Item::Extern(e) => {
+                for f in &e.fns {
+                    if f.body.len() > 0 { panic!("vulcan: extern fn `{}` cannot have a body", f.name); }
+                    g.fns.insert(f.name.clone(), (f.params.iter().map(|(_, t)| t.clone()).collect(), f.ret.clone()));
+                    g.externs.push(f.name.clone());
+                }
+            }
+            Item::Link(_) => {} // native-backend only (-l flags)
             Item::Import(_) => {}
         }
     }
@@ -347,6 +367,7 @@ pub struct JsGen {
     consts: HashMap<String, Ty>,
     impls: HashMap<(String, String), FnDecl>,
     defers: Vec<Vec<Stmt>>,
+    externs: Vec<String>, // extern fn names -> routed to the host __ffi table
     cur_ret: Ty,
     is_main: bool,
 }
@@ -1299,7 +1320,12 @@ impl JsGen {
                     let (ac, at) = self.gen_expr(a);
                     call_args.push(self.cast(&ac, &at, pty));
                 }
-                (format!("{callee}({})", call_args.join(", ")), ret)
+                if self.externs.iter().any(|n| n == callee) {
+                    // FFI: the host provides this function via the __ffi table
+                    (format!("__ffi.{callee}({})", call_args.join(", ")), ret)
+                } else {
+                    (format!("{callee}({})", call_args.join(", ")), ret)
+                }
             }
         }
     }

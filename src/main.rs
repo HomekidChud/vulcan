@@ -220,8 +220,9 @@ fn main() {
             }
             codegen::generate_test(&program, &tests)
         }
-        _ => codegen::generate(&program),
+        _ => codegen::generate_with_libs(&program).0,
     };
+    let link_libs = crate::codegen::last_link_libs();
 
     // output locations
     let (c_path, bin_path, stem): (String, String, String) = match (&proj_root, &pkg_name) {
@@ -247,12 +248,12 @@ fn main() {
         "emit" => print!("{c_src}"),
         "build" => {
             std::fs::write(&c_path, &c_src).unwrap();
-            compile_c(&c_path, &bin_path, safe);
+            compile_c(&c_path, &bin_path, safe, &link_libs);
             println!("built {stem} (native, -O3)");
         }
         "run" | "test" => {
             std::fs::write(&c_path, &c_src).unwrap();
-            compile_c(&c_path, &bin_path, safe);
+            compile_c(&c_path, &bin_path, safe, &link_libs);
             let status = Command::new(&run_path).args(&prog_args).status().unwrap();
             if !status.success() {
                 std::process::exit(status.code().unwrap_or(1));
@@ -260,7 +261,7 @@ fn main() {
         }
         "bench" => {
             std::fs::write(&c_path, &c_src).unwrap();
-            compile_c(&c_path, &bin_path, safe);
+            compile_c(&c_path, &bin_path, safe, &link_libs);
             let t0 = std::time::Instant::now();
             let status = Command::new(&run_path).args(&prog_args).status().unwrap();
             let dt = t0.elapsed();
@@ -270,7 +271,7 @@ fn main() {
     }
 }
 
-fn compile_c(c_path: &str, out: &str, safe: bool) {
+fn compile_c(c_path: &str, out: &str, safe: bool, libs: &[String]) {
     let t0 = std::time::Instant::now();
     let out_flag = format!("-o{out}");
     let cc = std::env::var("VULCAN_CC").unwrap_or_else(|_| pick_cc());
@@ -288,8 +289,11 @@ fn compile_c(c_path: &str, out: &str, safe: bool) {
     } else {
         flags.insert(0, "-O3");
     }
+    // `link "name"` from the program -> -l<name> (e.g. FFI libraries)
+    let lib_flags: Vec<String> = libs.iter().map(|l| format!("-l{l}")).collect();
     let status = Command::new(&cc)
         .args(&flags)
+        .args(&lib_flags)
         .status()
         .unwrap_or_else(|e| panic!("C compiler `{cc}` failed: {e}"));
     if !status.success() {

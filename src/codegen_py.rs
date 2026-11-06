@@ -33,6 +33,18 @@ _int = int
 _float = float
 _abs = abs
 _ord = ord
+
+# ---- FFI: `extern` functions resolve through the host _ffi table ----
+# Embedders can extend it by injecting a module-level `_vulcan_ffi` dict
+# (name -> callable) before the compiled program runs.
+_ffi = {
+    'sqrt': math.sqrt,
+    'floor': math.floor, 'ceil': math.ceil, 'abs': abs,
+    'strlen': lambda s: _len(s),
+    'puts': _print,
+}
+if '_vulcan_ffi' in globals():
+    _ffi.update(globals()['_vulcan_ffi'])
 _list = list
 _map = map
 _sys = sys
@@ -247,6 +259,7 @@ pub fn generate_py(program: &[Item]) -> String {
         consts: HashMap::new(),
         impls: HashMap::new(),
         defers: Vec::new(),
+        externs: Vec::new(),
         cur_ret: Ty::Void,
         is_main: false,
     };
@@ -263,6 +276,14 @@ pub fn generate_py(program: &[Item]) -> String {
                     g.impls.insert((i.struct_name.clone(), m.name.clone()), m.clone());
                 }
             }
+            Item::Extern(e) => {
+                for f in &e.fns {
+                    if f.body.len() > 0 { panic!("vulcan: extern fn `{}` cannot have a body", f.name); }
+                    g.fns.insert(f.name.clone(), (f.params.iter().map(|(_, t)| t.clone()).collect(), f.ret.clone()));
+                    g.externs.push(f.name.clone());
+                }
+            }
+            Item::Link(_) => {} // native-backend only (-l flags)
             Item::Import(_) => {}
         }
     }
@@ -396,6 +417,7 @@ pub struct PyGen {
     consts: HashMap<String, Ty>,
     impls: HashMap<(String, String), FnDecl>,
     defers: Vec<Vec<Stmt>>,
+    externs: Vec<String>, // extern fn names -> routed to the host _ffi table
     cur_ret: Ty,
     is_main: bool,
 }
@@ -1341,7 +1363,12 @@ impl PyGen {
                     let (ac, at) = self.gen_expr(a);
                     call_args.push(self.cast(&ac, &at, pty));
                 }
-                (format!("{}({})", py_name(callee), call_args.join(", ")), ret)
+                if self.externs.iter().any(|n| n == callee) {
+                    // FFI: the host provides this function via the _ffi table
+                    (format!("_ffi[{callee:?}]({})", call_args.join(", ")), ret)
+                } else {
+                    (format!("{}({})", py_name(callee), call_args.join(", ")), ret)
+                }
             }
         }
     }

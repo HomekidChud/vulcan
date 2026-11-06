@@ -17,6 +17,8 @@ pub struct Codegen {
     consts: HashMap<String, (Ty, String)>, // name -> (type, C global name)
     defers: Vec<Vec<Stmt>>, // defer stack (LIFO at scope exit / return)
     impls: HashMap<(String, String), FnDecl>, // (struct, method) -> decl
+    externs: Vec<ExternDecl>, // FFI declarations
+    link_libs: Vec<String>,          // `link "name"` -> -l<name>
     cur_ret: Ty,
     is_main: bool,
 }
@@ -239,9 +241,27 @@ pub fn generate(program: &[Item]) -> String {
     generate_inner(program, None)
 }
 
+// Like `generate`, but also returns the `link "name"` libraries the program
+// requested (native backend: passed as -l<name> to the C compiler).
+pub fn generate_with_libs(program: &[Item]) -> (String, Vec<String>) {
+    let src = generate_inner(program, None);
+    (src, last_link_libs())
+}
+
 // `tests`: when present, replaces `fn main` with a synthesized test runner.
 pub fn generate_test(program: &[Item], tests: &[String]) -> String {
     generate_inner(program, Some(tests))
+}
+
+// Side channel: the link libs collected by the most recent generate_inner
+// (avoids changing every call site for an optional feature).
+use std::sync::Mutex;
+static LAST_LINK_LIBS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+fn set_last_link_libs(libs: Vec<String>) {
+    *LAST_LINK_LIBS.lock().unwrap() = libs;
+}
+pub fn last_link_libs() -> Vec<String> {
+    LAST_LINK_LIBS.lock().unwrap().clone()
 }
 
 fn generate_inner(program: &[Item], tests: Option<&[String]>) -> String {
@@ -259,6 +279,8 @@ fn generate_inner(program: &[Item], tests: Option<&[String]>) -> String {
         consts: HashMap::new(),
         defers: Vec::new(),
         impls: HashMap::new(),
+        externs: Vec::new(),
+        link_libs: Vec::new(),
         cur_ret: Ty::Void,
         is_main: false,
     };
@@ -282,6 +304,20 @@ fn generate_inner(program: &[Item], tests: Option<&[String]>) -> String {
                     g.impls.insert((i.struct_name.clone(), m.name.clone()), m.clone());
                 }
             }
+            Item::Extern(e) => {
+                for f in &e.fns {
+                    if f.body.len() > 0 { panic!("vulcan: extern fn `{}` cannot have a body", f.name); }
+                    for (_, t) in &f.params {
+                        match t {
+                            Ty::I64 | Ty::F64 | Ty::Bool | Ty::Str => {}
+                            _ => panic!("vulcan: extern fn `{}` parameter type not allowed in FFI (use i64/f64/bool/string)", f.name),
+                        }
+                    }
+                    g.fns.insert(f.name.clone(), (f.params.iter().map(|(_, t)| t.clone()).collect(), f.ret.clone()));
+                }
+                g.externs.push(e.clone());
+            }
+            Item::Link(l) => { g.link_libs.push(l.clone()); }
             Item::Import(_) => {}
         }
     }
@@ -291,6 +327,16 @@ fn generate_inner(program: &[Item], tests: Option<&[String]>) -> String {
     }
     if let Some(tests) = tests {
         if tests.is_empty() { panic!("vulcan: no `test_*` functions found"); }
+    }
+    // ---- FFI: emit extern prototypes (native backend: real C linkage) ----
+    if !g.externs.is_empty() {
+        let _ = write!(g.out, "\n// ---- extern (FFI) ----\n");
+        for e in &g.externs {
+            for f in &e.fns {
+                let params = f.params.iter().map(|(n, t)| format!("{} {}", g.ctype(t), n)).collect::<Vec<_>>().join(", ");
+                let _ = writeln!(g.out, "extern {} {}({});", g.ctype(&f.ret), f.name, params);
+            }
+        }
     }
     let _ = write!(g.out, "\n// ---- constants ----\n");
     for item in program {
@@ -443,6 +489,7 @@ fn generate_inner(program: &[Item], tests: Option<&[String]>) -> String {
     out.push_str("\n// ---- program ----\n");
     out.push_str(&g.body);
     out.push('\n');
+    set_last_link_libs(g.link_libs.clone());
     out
 }
 

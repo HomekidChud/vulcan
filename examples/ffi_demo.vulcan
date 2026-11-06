@@ -1,0 +1,35 @@
+// Vulcan 1.2 — FFI: call C libraries, host-language functions and plugins.
+
+// 1) Native (C backend): each `fn` below becomes a real C prototype and the
+//    call links straight against libc/libm. `link "name"` adds -l<name> to the
+//    native linker, so any C library (curl, sqlite, raylib, ...) is reachable:
+//
+//        extern "c" { fn sqlite3_open(path: string) -> i64 }
+//        link "sqlite3"
+//
+//    (on the JS/Python backends `link` is simply ignored)
+
+extern "c" {
+    fn sqrt(x: f64) -> f64
+    fn sin(x: f64) -> f64
+    fn floor(x: f64) -> f64
+    fn ceil(x: f64) -> f64
+}
+
+// 2) Host language: on JS the same names resolve to the __ffi table (Math.sqrt
+//    etc.), on Python to the _ffi dict (math.sqrt etc.). Hosts can extend or
+//    override the table at runtime:
+//
+//      JS:      globalThis.__vulcan_ffi = { sqlite_open: ... }
+//      Python:  _vulcan_ffi = { "sqlite_open": ... }
+//
+//    extern-declared fns with the same name then call into the host plugin.
+
+fn main() -> void {
+    print("sqrt(16) =", sqrt(16.0))
+    print("sqrt(2)  =", sqrt(2.0))
+    print("sin(0)   =", sin(0.0))
+    print("floor(3.9) =", floor(3.9))
+    print("ceil(3.1)  =", ceil(3.1))
+    print("ffi demo done")
+}

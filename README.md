@@ -13,6 +13,39 @@ fn main() {
 }
 ```
 
+## Vulcan 1.2 — what's new
+
+Vulcan now talks to the outside world: FFI, C libraries, host-language interop and a plugin hook.
+
+- **`extern "c" { ... }`** — declare C functions and call them like ordinary Vulcan fns:
+  ```vulcan
+  extern "c" {
+      fn sqrt(x: f64) -> f64
+      fn sin(x: f64) -> f64
+  }
+  fn main() -> void { print(sqrt(2.0)) }
+  ```
+  On the native backend each declaration becomes a real C prototype and the call links
+  straight against libc/libm — no wrapper, native speed. Parameter/return types are
+  i64/f64/bool/string. Declarations must match the C header's ABI (double-returning
+  functions like sqrt/sin/cos/floor/ceil/fabs are the portable set).
+- **`link "name"`** — a top-level statement that adds `-l<name>` to the native linker,
+  so any C library is reachable (curl, sqlite, raylib, SDL...). Ignored on JS/Python.
+- **Host-language interop** — the same `extern` names resolve to a host table instead:
+  JS uses the `__ffi` table (Math.sqrt, ...), Python the `_ffi` dict (math.sqrt, ...).
+  A single Vulcan program runs identically on all three backends (verified byte-identical
+  in the selftest).
+- **Plugin hook** — hosts can extend or override the table at runtime before running
+  Vulcan code:
+  ```js
+  globalThis.__vulcan_ffi = { my_plugin_fn: (x) => x * 2 };
+  ```
+  ```python
+  _vulcan_ffi = { "my_plugin_fn": lambda x: x * 2 }
+  ```
+  `extern`-declared fns with those names then call into the host plugin.
+- New example `examples/ffi_demo.vulcan` (also in the IDE), new selftest case — 18 cases.
+
 ## Vulcan 1.1 — what's new
 
 Vulcan now has a **software 3D renderer** — and a Fortnite-style battle royale running on it:

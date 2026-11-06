@@ -416,6 +416,25 @@ fn main() -> void {
 "#,
         expected: "canvas: 256 x 144\ndrawn\n",
     },
+    Case {
+        name: "ffi extern (all backends)",
+        src: r#"
+extern "c" {
+    fn sqrt(x: f64) -> f64
+    fn sin(x: f64) -> f64
+    fn floor(x: f64) -> f64
+    fn ceil(x: f64) -> f64
+}
+
+fn main() -> void {
+    print(sqrt(16.0))
+    print(sin(0.0))
+    print(floor(3.9))
+    print(ceil(3.1))
+}
+"#,
+        expected: "4\n0\n3\n4\n",
+    },
 ];
 
 pub fn selftest() {
