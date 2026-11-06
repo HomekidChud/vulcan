@@ -127,6 +127,82 @@ def __min(a, b): return a if a < b else b
 def __max(a, b): return a if a > b else b
 def __exit(c): sys.exit(c)
 import shutil
+# ---- graphics: 256x144 framebuffer, presented to the terminal (IDE canvas via the JS backend) ----
+__FB_W, __FB_H = 256, 144
+__fb = [0] * (__FB_W * __FB_H)
+__FONT_CHARS = " 0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ.:-!?/+%"
+__FONT_DATA = "000007555726227717477171755711747177475771122757577571775755656567444765556746477464474557557557222711157556554444757755655557555775744755717565574717722225555755552557755525555722712470000202020007002220271302112440272051245"
+def __clear(c):
+    c = int(c)
+    for i in range(__FB_W * __FB_H): __fb[i] = c
+def __draw_rect(x, y, w, h, c):
+    c = int(c)
+    x0 = max(0, math.ceil(x - 0.5)); x1 = min(__FB_W - 1, math.floor(x + w - 0.5))
+    y0 = max(0, math.ceil(y - 0.5)); y1 = min(__FB_H - 1, math.floor(y + h - 0.5))
+    for py in range(y0, y1 + 1):
+        base = py * __FB_W
+        for px in range(x0, x1 + 1): __fb[base + px] = c
+def __draw_circle(x, y, r, c):
+    if r < 0: return
+    c = int(c)
+    x0 = max(0, math.ceil(x - r - 0.5)); x1 = min(__FB_W - 1, math.floor(x + r + 0.5))
+    y0 = max(0, math.ceil(y - r - 0.5)); y1 = min(__FB_H - 1, math.floor(y + r + 0.5))
+    r2 = r * r
+    for py in range(y0, y1 + 1):
+        for px in range(x0, x1 + 1):
+            dx = px + 0.5 - x; dy = py + 0.5 - y
+            if dx * dx + dy * dy <= r2: __fb[py * __FB_W + px] = c
+def __draw_line(x0, y0, x1, y1, c):
+    c = int(c)
+    px, py = round(x0), round(y0)
+    ex, ey = round(x1), round(y1)
+    dx, dy = abs(ex - px), abs(ey - py)
+    sx = 1 if px < ex else -1
+    sy = 1 if py < ey else -1
+    err = dx - dy
+    while True:
+        if 0 <= px < __FB_W and 0 <= py < __FB_H: __fb[py * __FB_W + px] = c
+        if px == ex and py == ey: break
+        e2 = 2 * err
+        if e2 > -dy:
+            err -= dy; px += sx
+        if e2 < dx:
+            err += dx; py += sy
+def __draw_text(x, y, s, c):
+    if not isinstance(s, str): s = str(int(s)) if float(s).is_integer() else __g6(s)
+    c = int(c)
+    s = s.upper()
+    bx, by = round(x), round(y)
+    for i, ch in enumerate(s):
+        gi = __FONT_CHARS.find(ch)
+        if gi < 0: continue
+        for row in range(5):
+            bits = ord(__FONT_DATA[gi * 5 + row]) - 48
+            for col in range(3):
+                if bits & (4 >> col):
+                    px, py = bx + i * 4 + col, by + row
+                    if 0 <= px < __FB_W and 0 <= py < __FB_H: __fb[py * __FB_W + px] = c
+def __present():
+    out = ["\x1b[H"]
+    for cy in range(18):
+        row = []
+        for cx in range(64):
+            ur = ug = ub = lr = lg = lb = 0
+            for sy in range(4):
+                for sx in range(4):
+                    v = __fb[(cy * 8 + sy) * __FB_W + cx * 4 + sx]
+                    ur += (v >> 16) & 255; ug += (v >> 8) & 255; ub += v & 255
+            for sy in range(4, 8):
+                for sx in range(4):
+                    v = __fb[(cy * 8 + sy) * __FB_W + cx * 4 + sx]
+                    lr += (v >> 16) & 255; lg += (v >> 8) & 255; lb += v & 255
+            row.append("\x1b[38;2;%d;%d;%dm\x1b[48;2;%d;%d;%dm\u2580" % ((ur + 8) >> 4, (ug + 8) >> 4, (ub + 8) >> 4, (lr + 8) >> 4, (lg + 8) >> 4, (lb + 8) >> 4))
+        out.append("".join(row) + "\x1b[0m\n")
+    sys.stdout.write("".join(out))
+def __mouse_x(): return -1.0
+def __mouse_y(): return -1.0
+def __mouse_down(): return False
+def __key_down(c): return False
 "#;
 
 pub fn generate_py(program: &[Item]) -> String {
@@ -227,6 +303,16 @@ fn const_ty(c: &ConstDecl) -> Ty {
             ConstVal::Bool(_) => Ty::Bool,
         },
     }
+}
+
+// Formats an f64 literal so it stays a float in Python
+// (Rust's `{}` prints 1.0 as `1`, which would be an int in Python).
+fn pyfloat(v: f64) -> String {
+    let s = format!("{v}");
+    if s.contains('.') || s.contains('e') || s.contains('E') || s.contains("inf") || s.contains("nan") {
+        return s;
+    }
+    format!("{s}.0")
 }
 
 fn escape_py(s: &str) -> String {
@@ -711,7 +797,7 @@ impl PyGen {
     fn gen_expr(&mut self, e: &Expr) -> (String, Ty) {
         match e {
             Expr::Int(v) => (v.to_string(), Ty::I64),
-            Expr::Float(v) => (v.to_string(), Ty::F64),
+            Expr::Float(v) => (pyfloat(*v), Ty::F64),
             Expr::Str(s) => (format!("\"{}\"", escape_py(s)), Ty::Str),
             Expr::Bool(b) => (if *b { "True".into() } else { "False".into() }, Ty::Bool),
             Expr::Char(c) => (c.to_string(), Ty::I64),
@@ -1097,6 +1183,63 @@ impl PyGen {
                 (format!("(__set_color({fg}, {bg}), None)[1]"), Ty::Void)
             }
             "screen_width" => ("__screen_w()".into(), Ty::I64),
+            "canvas_width" => ("256".into(), Ty::I64),
+            "canvas_height" => ("144".into(), Ty::I64),
+            "clear" => {
+                if args.len() != 1 { panic!("vulcan: clear(color) takes 1 arg"); }
+                let (c, t) = self.gen_expr(&args[0]);
+                let c = self.cast(&c, &t, &Ty::I64);
+                (format!("(__clear({c}), None)"), Ty::Void)
+            }
+            "draw_rect" => {
+                if args.len() != 5 { panic!("vulcan: draw_rect(x, y, w, h, color) takes 5 args"); }
+                let mut cs = Vec::new();
+                for a in args.iter().take(4) {
+                    let (c, t) = self.gen_expr(a);
+                    cs.push(self.cast(&c, &t, &Ty::F64));
+                }
+                let (col, ct) = self.gen_expr(&args[4]);
+                let col = self.cast(&col, &ct, &Ty::I64);
+                (format!("(__draw_rect({}, {}, {}, {}, {col}), None)", cs[0], cs[1], cs[2], cs[3]), Ty::Void)
+            }
+            "draw_circle" => {
+                if args.len() != 4 { panic!("vulcan: draw_circle(x, y, r, color) takes 4 args"); }
+                let (x, xt) = self.gen_expr(&args[0]); let x = self.cast(&x, &xt, &Ty::F64);
+                let (y, yt) = self.gen_expr(&args[1]); let y = self.cast(&y, &yt, &Ty::F64);
+                let (r, rt) = self.gen_expr(&args[2]); let r = self.cast(&r, &rt, &Ty::F64);
+                let (col, ct) = self.gen_expr(&args[3]); let col = self.cast(&col, &ct, &Ty::I64);
+                (format!("(__draw_circle({x}, {y}, {r}, {col}), None)"), Ty::Void)
+            }
+            "draw_line" => {
+                if args.len() != 5 { panic!("vulcan: draw_line(x1, y1, x2, y2, color) takes 5 args"); }
+                let mut cs = Vec::new();
+                for a in args.iter().take(4) {
+                    let (c, t) = self.gen_expr(a);
+                    cs.push(self.cast(&c, &t, &Ty::F64));
+                }
+                let (col, ct) = self.gen_expr(&args[4]);
+                let col = self.cast(&col, &ct, &Ty::I64);
+                (format!("(__draw_line({}, {}, {}, {}, {col}), None)", cs[0], cs[1], cs[2], cs[3]), Ty::Void)
+            }
+            "draw_text" => {
+                if args.len() != 4 { panic!("vulcan: draw_text(x, y, text, color) takes 4 args"); }
+                let (x, xt) = self.gen_expr(&args[0]); let x = self.cast(&x, &xt, &Ty::F64);
+                let (y, yt) = self.gen_expr(&args[1]); let y = self.cast(&y, &yt, &Ty::F64);
+                let (s, st) = self.gen_expr(&args[2]);
+                let s = if st == Ty::Str { s } else { self.fmt_val(&s, &st) };
+                let (col, ct) = self.gen_expr(&args[3]); let col = self.cast(&col, &ct, &Ty::I64);
+                (format!("(__draw_text({x}, {y}, {s}, {col}), None)"), Ty::Void)
+            }
+            "present" => ("(__present(), None)".into(), Ty::Void),
+            "mouse_x" => ("__mouse_x()".into(), Ty::F64),
+            "mouse_y" => ("__mouse_y()".into(), Ty::F64),
+            "mouse_down" => ("__mouse_down()".into(), Ty::Bool),
+            "key_down" => {
+                if args.len() != 1 { panic!("vulcan: key_down(code) takes 1 arg"); }
+                let (c, t) = self.gen_expr(&args[0]);
+                let c = self.cast(&c, &t, &Ty::I64);
+                (format!("__key_down({c})"), Ty::Bool)
+            }
             "screen_height" => ("__screen_h()".into(), Ty::I64),
             "cursor_visible" => {
                 let (c, t) = self.gen_expr(&args[0]); let c = self.cast(&c, &t, &Ty::I64);

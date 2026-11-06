@@ -7,6 +7,7 @@ pub struct Codegen {
     out: String,
     body: String,
     struct_arrs: Vec<String>,
+    vec_emitted: Vec<String>,
     indent: usize,
     locals: Vec<HashMap<String, (Ty, String)>>, // name -> (type, C name)
     counter: usize,
@@ -131,6 +132,79 @@ static int vulcan_stdin_eof = 0;
 static int64_t key_ready(void){ if(vulcan_stdin_eof) return 0; fd_set s; FD_ZERO(&s); FD_SET(STDIN_FILENO,&s); struct timeval tv={0,0}; return select(STDIN_FILENO+1,&s,NULL,NULL,&tv)>0; }
 static int64_t read_key(void){ unsigned char c=0; ssize_t r=read(STDIN_FILENO,&c,1); if(r==0){ vulcan_stdin_eof=1; return 0; } return r==1 ? (int64_t)c : 0; }
 static void clear_screen(void){ fputs("\033[2J\033[H",stdout); }
+// ---- graphics: 256x144 framebuffer, presented to the terminal (or the IDE canvas via the JS backend) ----
+#define VFB_W 256
+#define VFB_H 144
+static int32_t vfb[VFB_W * VFB_H];
+static const char* vfont_chars = " 0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ.:-!?/+%";
+static const char* vfont_data = "000007555726227717477171755711747177475771122757577571775755656567444765556746477464474557557557222711157556554444757755655557555775744755717565574717722225555755552557755525555722712470000202020007002220271302112440272051245";
+static void vclear(int64_t color){ for(int i=0;i<VFB_W*VFB_H;i++) vfb[i]=(int32_t)color; }
+static void vdraw_rect(double x, double y, double w, double h, int64_t color){
+    int x0=(int)ceil(x-0.5), x1=(int)floor(x+w-0.5), y0=(int)ceil(y-0.5), y1=(int)floor(y+h-0.5);
+    if(x0<0)x0=0; if(y0<0)y0=0; if(x1>VFB_W-1)x1=VFB_W-1; if(y1>VFB_H-1)y1=VFB_H-1;
+    for(int py=y0;py<=y1;py++) for(int px=x0;px<=x1;px++) vfb[py*VFB_W+px]=(int32_t)color;
+}
+static void vdraw_circle(double x, double y, double r, int64_t color){
+    if(r<0) return;
+    int x0=(int)ceil(x-r-0.5), x1=(int)floor(x+r+0.5), y0=(int)ceil(y-r-0.5), y1=(int)floor(y+r+0.5);
+    if(x0<0)x0=0; if(y0<0)y0=0; if(x1>VFB_W-1)x1=VFB_W-1; if(y1>VFB_H-1)y1=VFB_H-1;
+    double r2=r*r;
+    for(int py=y0;py<=y1;py++) for(int px=x0;px<=x1;px++){
+        double dx=px+0.5-x, dy=py+0.5-y;
+        if(dx*dx+dy*dy<=r2) vfb[py*VFB_W+px]=(int32_t)color;
+    }
+}
+static void vdraw_line(double x0, double y0, double x1, double y1, int64_t color){
+    int px=(int)llround(x0), py=(int)llround(y0), ex=(int)llround(x1), ey=(int)llround(y1);
+    int dx=abs(ex-px), dy=abs(ey-py);
+    int sx=px<ex?1:-1, sy=py<ey?1:-1, err=dx-dy;
+    for(;;){
+        if(px>=0&&px<VFB_W&&py>=0&&py<VFB_H) vfb[py*VFB_W+px]=(int32_t)color;
+        if(px==ex&&py==ey) break;
+        int e2=2*err;
+        if(e2>-dy){ err-=dy; px+=sx; }
+        if(e2<dx){ err+=dx; py+=sy; }
+    }
+}
+static void vdraw_text(double x, double y, const char* s, int64_t color){
+    int bx=(int)llround(x), by=(int)llround(y);
+    for(size_t i=0;s[i];i++){
+        const char* p=strchr(vfont_chars, toupper((unsigned char)s[i]));
+        if(!p) continue;
+        int gi=(int)(p-vfont_chars);
+        for(int row=0;row<5;row++){
+            int bits=vfont_data[gi*5+row]-'0';
+            for(int col=0;col<3;col++){
+                if(bits&(4>>col)){
+                    int px=bx+(int)i*4+col, py=by+row;
+                    if(px>=0&&px<VFB_W&&py>=0&&py<VFB_H) vfb[py*VFB_W+px]=(int32_t)color;
+                }
+            }
+        }
+    }
+}
+static void vpresent(void){
+    fputs("\033[H", stdout);
+    for(int cy=0;cy<18;cy++){
+        for(int cx=0;cx<64;cx++){
+            int ur=0,ug=0,ub=0,lr=0,lg=0,lb=0;
+            for(int sy=0;sy<4;sy++) for(int sx=0;sx<4;sx++){
+                int32_t v=vfb[(cy*8+sy)*VFB_W+cx*4+sx];
+                ur+=(v>>16)&255; ug+=(v>>8)&255; ub+=v&255;
+            }
+            for(int sy=4;sy<8;sy++) for(int sx=0;sx<4;sx++){
+                int32_t v=vfb[(cy*8+sy)*VFB_W+cx*4+sx];
+                lr+=(v>>16)&255; lg+=(v>>8)&255; lb+=v&255;
+            }
+            printf("\033[38;2;%d;%d;%dm\033[48;2;%d;%d;%dm\342\226\200", (ur+8)>>4, (ug+8)>>4, (ub+8)>>4, (lr+8)>>4, (lg+8)>>4, (lb+8)>>4);
+        }
+        fputs("\033[0m\n", stdout);
+    }
+}
+static double vmouse_x(void){ return -1.0; }
+static double vmouse_y(void){ return -1.0; }
+static int8_t vmouse_down(void){ return 0; }
+static int8_t vkey_down(int64_t c){ (void)c; return 0; }
 "#;
 
 pub fn generate(program: &[Item]) -> String {
@@ -147,6 +221,7 @@ fn generate_inner(program: &[Item], tests: Option<&[String]>) -> String {
         out: String::new(),
         body: String::new(),
         struct_arrs: Vec::new(),
+        vec_emitted: Vec::new(),
         indent: 1,
         locals: Vec::new(),
         counter: 0,
@@ -210,15 +285,79 @@ fn generate_inner(program: &[Item], tests: Option<&[String]>) -> String {
         }
     }
     let _ = write!(g.out, "\n// ---- structs ----\n");
+    // forward-declare every struct first, then emit bodies in dependency order
+    // (a struct field may be another struct or a Vec_<Other> of structs, and the
+    // Vec_ typedef must come after the element struct is complete)
     for item in program {
         if let Item::Struct(s) = item {
-            let _ = writeln!(g.out, "typedef struct {{");
-            for (fname, fty) in &s.fields {
-                let _ = writeln!(g.out, "    {} {};", g.ctype(fty), fname);
-            }
-            let _ = writeln!(g.out, "}} {};", s.name);
+            let _ = writeln!(g.out, "typedef struct {} {};", s.name, s.name);
         }
     }
+    // structs referenced (directly or as array elements) by another struct's fields
+    let mut deps: HashMap<String, Vec<String>> = HashMap::new();
+    for item in program {
+        if let Item::Struct(s) = item {
+            let mut d = Vec::new();
+            for (_, fty) in &s.fields {
+                match fty {
+                    Ty::Struct(t) if !g.is_enum(t) => d.push(t.clone()),
+                    Ty::Array(inner) => {
+                        if let Ty::Struct(t) = &**inner {
+                            if !g.is_enum(t) { d.push(t.clone()); }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            deps.insert(s.name.clone(), d);
+        }
+    }
+    // which structs are used as array elements in some field -> need Vec typedefs
+    let mut vec_needed: Vec<String> = Vec::new();
+    for item in program {
+        if let Item::Struct(s) = item {
+            for (_, fty) in &s.fields {
+                if let Ty::Array(inner) = fty {
+                    if let Ty::Struct(t) = &**inner {
+                        if !g.is_enum(t) && !vec_needed.contains(t) {
+                            vec_needed.push(t.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // topological order over direct struct dependencies (cycle = impossible layout)
+    let mut order: Vec<String> = Vec::new();
+    let mut visiting: Vec<String> = Vec::new();
+    fn visit(name: &str, deps: &HashMap<String, Vec<String>>, visiting: &mut Vec<String>, order: &mut Vec<String>) {
+        if order.iter().any(|n| n == name) { return; }
+        if visiting.iter().any(|n| n == name) {
+            panic!("vulcan: circular struct reference involving `{name}`");
+        }
+        visiting.push(name.to_string());
+        if let Some(ds) = deps.get(name) {
+            for d in ds.clone() { visit(&d, deps, visiting, order); }
+        }
+        visiting.pop();
+        order.push(name.to_string());
+    }
+    for item in program {
+        if let Item::Struct(s) = item { visit(&s.name, &deps, &mut visiting, &mut order); }
+    }
+    for name in &order {
+        if let Some(fields) = g.structs.get(name) {
+            let _ = writeln!(g.out, "struct {} {{", name);
+            for (fname, fty) in fields {
+                let _ = writeln!(g.out, "    {} {};", g.ctype(fty), fname);
+            }
+            let _ = writeln!(g.out, "}};");
+            if vec_needed.contains(name) {
+                emit_vec_typedef(&mut g.out, name);
+            }
+        }
+    }
+    g.vec_emitted = vec_needed;
     let _ = write!(g.out, "\n// ---- functions ----\n");
     for item in program {
         if let Item::Fn(f) = item {
@@ -270,21 +409,37 @@ fn generate_inner(program: &[Item], tests: Option<&[String]>) -> String {
     let mut out = PRELUDE.to_string();
     out.push_str(&g.out);
     for name in &g.struct_arrs {
-        let _ = write!(out, "\ntypedef struct {{ {name}* data; int64_t len; int64_t cap; }} Vec_{name};\n");
-        let _ = write!(out, "static Vec_{name} vs_{name}_new(int64_t n){{ Vec_{name} v; v.cap=(n>0?n:8); v.data=malloc(v.cap*sizeof({name})); v.len=0; return v; }}\n");
-        let _ = write!(out, "static void vs_{name}_push(Vec_{name}* v, {name} x){{ if(v->len==v->cap){{ v->cap*=2; v->data=realloc(v->data,v->cap*sizeof({name})); }} v->data[v->len++]=x; }}\n");
-        let _ = write!(out, "static {name} vs_{name}_get(Vec_{name}* v, int64_t i){{ if(i<0||i>=v->len){{ fprintf(stderr,\"vulcan: index out of bounds\\n\"); exit(1);}} return v->data[i]; }}\n");
-        let _ = write!(out, "static void vs_{name}_set(Vec_{name}* v, int64_t i, {name} x){{ if(i<0||i>=v->len){{ fprintf(stderr,\"vulcan: index out of bounds\\n\"); exit(1);}} v->data[i]=x; }}\n");
-        let _ = write!(out, "static {name} vs_{name}_pop(Vec_{name}* v){{ {name} z = {{0}}; return v->len>0 ? v->data[--v->len] : z; }}\n");
-        let _ = write!(out, "static {name} vs_{name}_shift(Vec_{name}* v){{ {name} z = {{0}}; if(v->len==0) return z; {name} x=v->data[0]; memmove(v->data, v->data+1, (size_t)(v->len-1)*sizeof({name})); v->len--; return x; }}\n");
-        let _ = write!(out, "static {name} vs_{name}_last(Vec_{name}* v){{ {name} z = {{0}}; return v->len>0 ? v->data[v->len-1] : z; }}\n");
-        let _ = write!(out, "static void vs_{name}_remove(Vec_{name}* v, int64_t i){{ if(i<0||i>=v->len){{ fprintf(stderr,\"vulcan: index out of bounds\\n\"); exit(1);}} memmove(v->data+i, v->data+i+1, (size_t)(v->len-i-1)*sizeof({name})); v->len--; }}\n");
-        let _ = write!(out, "static void vs_{name}_insert(Vec_{name}* v, int64_t i, {name} x){{ if(i<0||i>v->len){{ fprintf(stderr,\"vulcan: index out of bounds\\n\"); exit(1);}} if(v->len==v->cap){{ v->cap*=2; v->data=realloc(v->data,v->cap*sizeof({name})); }} memmove(v->data+i+1, v->data+i, (size_t)(v->len-i)*sizeof({name})); v->data[i]=x; v->len++; }}\n");
+        if g.vec_emitted.contains(name) { continue; }
+        emit_vec_typedef(&mut out, name);
     }
     out.push_str("\n// ---- program ----\n");
     out.push_str(&g.body);
     out.push('\n');
     out
+}
+
+// Formats an f64 literal so it is always a valid C double literal
+// (Rust's `{}` prints 1.0 as `1`, which would become integer division in C).
+fn cfloat(v: f64) -> String {
+    let s = format!("{v}");
+    if s.contains('.') || s.contains('e') || s.contains('E') || s.contains("inf") || s.contains("NaN") {
+        return s;
+    }
+    format!("{s}.0")
+}
+
+// Emits the Vec_<name> typedef + helpers for a struct used as an array element.
+fn emit_vec_typedef(out: &mut String, name: &str) {
+    let _ = write!(out, "\ntypedef struct {{ {name}* data; int64_t len; int64_t cap; }} Vec_{name};\n");
+    let _ = write!(out, "static Vec_{name} vs_{name}_new(int64_t n){{ Vec_{name} v; v.cap=(n>0?n:8); v.data=malloc(v.cap*sizeof({name})); v.len=0; return v; }}\n");
+    let _ = write!(out, "static void vs_{name}_push(Vec_{name}* v, {name} x){{ if(v->len==v->cap){{ v->cap*=2; v->data=realloc(v->data,v->cap*sizeof({name})); }} v->data[v->len++]=x; }}\n");
+    let _ = write!(out, "static {name} vs_{name}_get(Vec_{name}* v, int64_t i){{ if(i<0||i>=v->len){{ fprintf(stderr,\"vulcan: index out of bounds\\n\"); exit(1);}} return v->data[i]; }}\n");
+    let _ = write!(out, "static void vs_{name}_set(Vec_{name}* v, int64_t i, {name} x){{ if(i<0||i>=v->len){{ fprintf(stderr,\"vulcan: index out of bounds\\n\"); exit(1);}} v->data[i]=x; }}\n");
+    let _ = write!(out, "static {name} vs_{name}_pop(Vec_{name}* v){{ {name} z = {{0}}; return v->len>0 ? v->data[--v->len] : z; }}\n");
+    let _ = write!(out, "static {name} vs_{name}_shift(Vec_{name}* v){{ {name} z = {{0}}; if(v->len==0) return z; {name} x=v->data[0]; memmove(v->data, v->data+1, (size_t)(v->len-1)*sizeof({name})); v->len--; return x; }}\n");
+    let _ = write!(out, "static {name} vs_{name}_last(Vec_{name}* v){{ {name} z = {{0}}; return v->len>0 ? v->data[v->len-1] : z; }}\n");
+    let _ = write!(out, "static void vs_{name}_remove(Vec_{name}* v, int64_t i){{ if(i<0||i>=v->len){{ fprintf(stderr,\"vulcan: index out of bounds\\n\"); exit(1);}} memmove(v->data+i, v->data+i+1, (size_t)(v->len-i-1)*sizeof({name})); v->len--; }}\n");
+    let _ = write!(out, "static void vs_{name}_insert(Vec_{name}* v, int64_t i, {name} x){{ if(i<0||i>v->len){{ fprintf(stderr,\"vulcan: index out of bounds\\n\"); exit(1);}} if(v->len==v->cap){{ v->cap*=2; v->data=realloc(v->data,v->cap*sizeof({name})); }} memmove(v->data+i+1, v->data+i, (size_t)(v->len-i)*sizeof({name})); v->data[i]=x; v->len++; }}\n");
 }
 
 fn const_ty(c: &ConstDecl) -> Ty {
@@ -881,7 +1036,7 @@ impl Codegen {
     fn gen_expr(&mut self, e: &Expr) -> (String, Ty) {
         match e {
             Expr::Int(v) | Expr::Char(v) => (format!("INT64_C({v})"), Ty::I64),
-            Expr::Float(v) => (format!("{v}"), Ty::F64),
+            Expr::Float(v) => (cfloat(*v), Ty::F64),
             Expr::Str(s) => (format!("\"{}\"", escape_c(s)), Ty::Str),
             Expr::Bool(b) => (format!("{}", if *b {1} else {0}), Ty::Bool),
             Expr::Ident(name) => {
@@ -1322,6 +1477,68 @@ impl Codegen {
             }
             "screen_width" => ("vscreen_w()".into(), Ty::I64),
             "screen_height" => ("vscreen_h()".into(), Ty::I64),
+            "canvas_width" => ("256".into(), Ty::I64),
+            "canvas_height" => ("144".into(), Ty::I64),
+            "clear" => {
+                if args.len() != 1 { panic!("vulcan: clear(color) takes 1 arg"); }
+                let (c, t) = self.gen_expr(&args[0]);
+                let c = self.cast(&c, &t, &Ty::I64);
+                (format!("(vclear({c}), (void)0)"), Ty::Void)
+            }
+            "draw_rect" => {
+                if args.len() != 5 { panic!("vulcan: draw_rect(x, y, w, h, color) takes 5 args"); }
+                let mut cs = Vec::new();
+                for a in args.iter().take(4) {
+                    let (c, t) = self.gen_expr(a);
+                    cs.push(self.cast(&c, &t, &Ty::F64));
+                }
+                let (col, ct) = self.gen_expr(&args[4]);
+                let col = self.cast(&col, &ct, &Ty::I64);
+                (format!("(vdraw_rect({}, {}, {}, {}, {col}), (void)0)", cs[0], cs[1], cs[2], cs[3]), Ty::Void)
+            }
+            "draw_circle" => {
+                if args.len() != 4 { panic!("vulcan: draw_circle(x, y, r, color) takes 4 args"); }
+                let (x, xt) = self.gen_expr(&args[0]); let x = self.cast(&x, &xt, &Ty::F64);
+                let (y, yt) = self.gen_expr(&args[1]); let y = self.cast(&y, &yt, &Ty::F64);
+                let (r, rt) = self.gen_expr(&args[2]); let r = self.cast(&r, &rt, &Ty::F64);
+                let (col, ct) = self.gen_expr(&args[3]); let col = self.cast(&col, &ct, &Ty::I64);
+                (format!("(vdraw_circle({x}, {y}, {r}, {col}), (void)0)"), Ty::Void)
+            }
+            "draw_line" => {
+                if args.len() != 5 { panic!("vulcan: draw_line(x1, y1, x2, y2, color) takes 5 args"); }
+                let mut cs = Vec::new();
+                for a in args.iter().take(4) {
+                    let (c, t) = self.gen_expr(a);
+                    cs.push(self.cast(&c, &t, &Ty::F64));
+                }
+                let (col, ct) = self.gen_expr(&args[4]);
+                let col = self.cast(&col, &ct, &Ty::I64);
+                (format!("(vdraw_line({}, {}, {}, {}, {col}), (void)0)", cs[0], cs[1], cs[2], cs[3]), Ty::Void)
+            }
+            "draw_text" => {
+                if args.len() != 4 { panic!("vulcan: draw_text(x, y, text, color) takes 4 args"); }
+                let (x, xt) = self.gen_expr(&args[0]); let x = self.cast(&x, &xt, &Ty::F64);
+                let (y, yt) = self.gen_expr(&args[1]); let y = self.cast(&y, &yt, &Ty::F64);
+                let (s, st) = self.gen_expr(&args[2]);
+                let s = match st {
+                    Ty::Str => s,
+                    Ty::I64 => format!("vto_str_i64({s})"),
+                    Ty::F64 => format!("vto_str_f64({s})"),
+                    _ => panic!("vulcan: draw_text needs a string or number"),
+                };
+                let (col, ct) = self.gen_expr(&args[3]); let col = self.cast(&col, &ct, &Ty::I64);
+                (format!("(vdraw_text({x}, {y}, {s}, {col}), (void)0)"), Ty::Void)
+            }
+            "present" => ("(vpresent(), (void)0)".into(), Ty::Void),
+            "mouse_x" => ("vmouse_x()".into(), Ty::F64),
+            "mouse_y" => ("vmouse_y()".into(), Ty::F64),
+            "mouse_down" => ("vmouse_down()".into(), Ty::Bool),
+            "key_down" => {
+                if args.len() != 1 { panic!("vulcan: key_down(code) takes 1 arg"); }
+                let (c, t) = self.gen_expr(&args[0]);
+                let c = self.cast(&c, &t, &Ty::I64);
+                (format!("vkey_down({c})"), Ty::Bool)
+            }
             "cursor_visible" => {
                 let (c, t) = self.gen_expr(&args[0]); let c = self.cast(&c, &t, &Ty::I64);
                 (format!("(vcursor_visible({c}), (void)0)"), Ty::Void)

@@ -1,0 +1,57 @@
+// examples/attract.vulcan — interactive: hold the mouse to attract the balls.
+// Best experienced in the IDE (`vulcan ide`) — the mouse only exists there;
+// natively it just runs the same deterministic simulation without input.
+import physics
+
+fn render(w: World, frame: i64) -> void {
+    clear(0x1b2735)
+    let i = 0
+    while i < world_body_count(w) {
+        if body_shape(w, i) == PH_CIRCLE {
+            draw_circle(body_x(w, i), body_y(w, i), body_hw(w, i), 0xa5d6a7)
+        }
+        else {
+            draw_rect(body_x(w, i) - body_hw(w, i), body_y(w, i) - body_hh(w, i), body_hw(w, i) * 2.0, body_hh(w, i) * 2.0, 0x546e7a)
+        }
+        i += 1
+    }
+    if mouse_down() {
+        draw_circle(mouse_x(), mouse_y(), 12.0, 0xffe082)
+    }
+    draw_text(4.0, 4.0, "ATTRACT - HOLD MOUSE", 0xffffff)
+    draw_text(4.0, 12.0, "FRAME", 0x90a4ae)
+    draw_text(44.0, 12.0, frame, 0x90a4ae)
+    present()
+}
+
+fn main() -> void {
+    let w = world_new(0.0, 300.0)
+    w = world_add_bounds(w, 0.6, 0.2)
+    let i = 0
+    while i < 12 {
+        w = world_add_circle(w, 20.0 + 20.0 * i, 20.0 + 10.0 * i, 6.0, 1.0, 0.7, 0.2)
+        i += 1
+    }
+    print("simulating 900 frames...")
+    let f = 0
+    while f < 900 {
+        if mouse_down() {
+            // pull every ball gently towards the cursor
+            let i = 0
+            while i < world_body_count(w) {
+                let dx = mouse_x() - body_x(w, i)
+                let dy = mouse_y() - body_y(w, i)
+                let d = sqrt(dx * dx + dy * dy)
+                if d > 4.0 {
+                    w = body_apply_impulse(w, i, dx / d * 1.2, dy / d * 1.2)
+                }
+                i += 1
+            }
+        }
+        w = world_step(w, 1.0 / 60.0)
+        render(w, f)
+        sleep_ms(16)
+        f += 1
+    }
+    print("done")
+}

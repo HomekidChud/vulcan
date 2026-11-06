@@ -17,3 +17,4 @@ src/*.py
 package-*/
 todo.txt
 selftest_io.txt
+.ide/

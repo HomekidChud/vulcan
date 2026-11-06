@@ -7,6 +7,32 @@ struct Case {
     expected: &'static str,
 }
 
+// Physics engine selftest main — concatenated after lib/physics.vulcan
+// (imports are just flattened modules, so this is equivalent to `import physics`).
+const PHYSICS_TEST_MAIN: &str = r#"
+
+fn main() -> void {
+    let w = world_new(0.0, 900.0)
+    w = world_add_bounds(w, 0.5, 0.3)
+    w = world_add_circle(w, 40.0, 20.0, 6.0, 1.0, 0.5, 0.2)
+    w = world_add_box(w, 120.0, 30.0, 10.0, 8.0, 2.0, 0.2, 0.5)
+    w = world_add_spring(w, 4, 5, 50.0, 60.0, 2.0)
+    print("bodies:", world_body_count(w), "springs:", world_spring_count(w))
+    let f = 0
+    while f < 120 {
+        w = world_step(w, 1.0 / 60.0)
+        f += 1
+    }
+    let i = 0
+    while i < world_body_count(w) {
+        print(i, body_x(w, i), body_y(w, i))
+        i += 1
+    }
+}
+"#;
+
+const PHYSICS_TEST_EXPECTED: &str = "bodies: 6 springs: 1\n0 128 152\n1 -6 72\n2 262 72\n3 128 -8\n4 59.1166 138.092\n5 108.806 136.102\n";
+
 const CASES: &[Case] = &[
     Case {
         name: "basic (0.1 feature set)",
@@ -340,76 +366,100 @@ fn main() -> void {
 "#,
         expected: "true\nalpha,beta,gamma\n3\nbeta\ntrue\ntrue\nbeta\n6\nshout\npad\n42 0\n2.5\n[2, 99, 3, 4]\n5\ntrue\n",
     },
+    Case {
+        name: "graphics builtins (all backends)",
+        src: r#"
+fn main() -> void {
+    print("canvas:", canvas_width(), "x", canvas_height())
+    clear(0x102030)
+    draw_rect(10.5, 20.5, 50.0, 30.0, 0xFF5500)
+    draw_circle(200.0, 70.0, 25.0, 0x33CCFF)
+    draw_line(0.0, 0.0, 255.0, 143.0, 0xFFFFFF)
+    draw_text(4.0, 4.0, "VULCAN", 0xFFFFFF)
+    draw_text(4.0, 130.0, "count: 42", 0x00FF00)
+    print("drawn")
+}
+"#,
+        expected: "canvas: 256 x 144\ndrawn\n",
+    },
 ];
 
 pub fn selftest() {
     let dir = std::env::temp_dir().join("vulcan_selftest");
     let _ = std::fs::create_dir_all(&dir);
     let mut failures = 0;
+    // the physics engine case: lib source + test main, verified like any other case
+    let physics_src = include_str!("../lib/physics.vulcan").to_string() + PHYSICS_TEST_MAIN;
+    failures += run_case("physics engine (all backends)", &physics_src, PHYSICS_TEST_EXPECTED, &dir);
     for case in CASES {
-        let tag = case.name.replace(['(', ')', ' ', '/'], "_");
-        let src_path = dir.join(format!("{tag}.vulcan"));
-        std::fs::write(&src_path, case.src).unwrap();
-        let c_path = dir.join(format!("{tag}.v.c"));
-        let out_path = dir.join(format!("{tag}.vbin"));
-        let tokens = crate::lexer::lex(case.src);
-        let program = crate::parser::parse_program(&tokens);
-        let c_src = if case.name.starts_with("test runner") {
-            let tests: Vec<String> = program.iter().filter_map(|i| match i {
-                crate::parser::Item::Fn(f) if f.name.starts_with("test_") => Some(f.name.clone()),
-                _ => None,
-            }).collect();
-            crate::codegen::generate_test(&program, &tests)
-        } else {
-            crate::codegen::generate(&program)
-        };
-        std::fs::write(&c_path, c_src).unwrap();
-        let cc = crate::pick_cc();
-        let status = Command::new(&cc)
-            .args(["-O3", c_path.to_str().unwrap(), "-lm", "-o", out_path.to_str().unwrap()])
-            .output()
-            .expect("no C compiler found");
-        if !status.status.success() {
-            eprintln!("[FAIL] {}: compile failed:\n{}", case.name, String::from_utf8_lossy(&status.stderr));
-            failures += 1;
-            continue;
-        }
-        let run = Command::new(&out_path).output().unwrap();
-        let stdout = String::from_utf8_lossy(&run.stdout);
-        if stdout != case.expected {
-            eprintln!("[FAIL] {}: output mismatch\n--- got ---\n{stdout}--- expected ---\n{}", case.name, case.expected);
-            failures += 1;
-        } else {
-            println!("[ok] {}", case.name);
-        }
-        // cross-backend check: the JS and Python backends must produce identical output
-        if case.name.starts_with("test runner") { continue; }
-        for backend in ["js", "py"] {
-            let (runner, src) = if backend == "js" {
-                ("node", crate::codegen_js::generate_js(&program))
-            } else {
-                ("python3", crate::codegen_py::generate_py(&program))
-            };
-            let script_path = dir.join(format!("{tag}.{backend}"));
-            std::fs::write(&script_path, &src).unwrap();
-            match Command::new(runner).arg(&script_path).output() {
-                Ok(r) => {
-                    let stdout = String::from_utf8_lossy(&r.stdout);
-                    if stdout != case.expected {
-                        eprintln!("[FAIL] {}: {backend} backend output mismatch\n--- got ---\n{stdout}--- expected ---\n{}", case.name, case.expected);
-                        failures += 1;
-                    }
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    eprintln!("[skip] {}: `{runner}` not found — {backend} backend not verified", case.name);
-                }
-                Err(e) => { eprintln!("[FAIL] {}: {backend} runner error: {e}", case.name); failures += 1; }
-            }
-        }
+        failures += run_case(case.name, case.src, case.expected, &dir);
     }
     if failures > 0 {
         eprintln!("{failures} selftest case(s) failed");
         std::process::exit(1);
     }
-    println!("vulcan selftest: {} cases passed", CASES.len());
+    println!("vulcan selftest: {} cases passed", CASES.len() + 1);
+}
+
+fn run_case(name: &str, src: &str, expected: &str, dir: &std::path::Path) -> usize {
+    let mut failures = 0;
+    let tag = name.replace(['(', ')', ' ', '/'], "_");
+    let src_path = dir.join(format!("{tag}.vulcan"));
+    std::fs::write(&src_path, src).unwrap();
+    let c_path = dir.join(format!("{tag}.v.c"));
+    let out_path = dir.join(format!("{tag}.vbin"));
+    let tokens = crate::lexer::lex(src);
+    let program = crate::parser::parse_program(&tokens);
+    let c_src = if name.starts_with("test runner") {
+        let tests: Vec<String> = program.iter().filter_map(|i| match i {
+            crate::parser::Item::Fn(f) if f.name.starts_with("test_") => Some(f.name.clone()),
+            _ => None,
+        }).collect();
+        crate::codegen::generate_test(&program, &tests)
+    } else {
+        crate::codegen::generate(&program)
+    };
+    std::fs::write(&c_path, c_src).unwrap();
+    let cc = crate::pick_cc();
+    let status = Command::new(&cc)
+        .args(["-O3", c_path.to_str().unwrap(), "-lm", "-o", out_path.to_str().unwrap()])
+        .output()
+        .expect("no C compiler found");
+    if !status.status.success() {
+        eprintln!("[FAIL] {}: compile failed:\n{}", name, String::from_utf8_lossy(&status.stderr));
+        return 1;
+    }
+    let run = Command::new(&out_path).output().unwrap();
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    if stdout != expected {
+        eprintln!("[FAIL] {}: output mismatch\n--- got ---\n{stdout}--- expected ---\n{}", name, expected);
+        failures += 1;
+    } else {
+        println!("[ok] {}", name);
+    }
+    // cross-backend check: the JS and Python backends must produce identical output
+    if name.starts_with("test runner") { return failures; }
+    for backend in ["js", "py"] {
+        let (runner, src) = if backend == "js" {
+            ("node", crate::codegen_js::generate_js(&program))
+        } else {
+            ("python3", crate::codegen_py::generate_py(&program))
+        };
+        let script_path = dir.join(format!("{tag}.{backend}"));
+        std::fs::write(&script_path, &src).unwrap();
+        match Command::new(runner).arg(&script_path).output() {
+            Ok(r) => {
+                let stdout = String::from_utf8_lossy(&r.stdout);
+                if stdout != expected {
+                    eprintln!("[FAIL] {}: {backend} backend output mismatch\n--- got ---\n{stdout}--- expected ---\n{}", name, expected);
+                    failures += 1;
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                eprintln!("[skip] {}: `{runner}` not found — {backend} backend not verified", name);
+            }
+            Err(e) => { eprintln!("[FAIL] {}: {backend} runner error: {e}", name); failures += 1; }
+        }
+    }
+    failures
 }

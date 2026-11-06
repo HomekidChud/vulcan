@@ -1,0 +1,41 @@
+// examples/springs.vulcan — a soft chain of circles linked by damped springs.
+// Runs in the IDE with live graphics or natively in your terminal.
+import physics
+
+fn render(w: World) -> void {
+    clear(0x0d1b2a)
+    let i = 0
+    while i < world_body_count(w) {
+        draw_circle(body_x(w, i), body_y(w, i), body_hw(w, i), 0x90caf9)
+        i += 1
+    }
+    draw_text(4.0, 4.0, "SPRING CHAIN", 0xffffff)
+    present()
+}
+
+fn main() -> void {
+    let w = world_new(0.0, 250.0)
+    w = world_add_bounds(w, 0.4, 0.3)
+    // anchor: a static box, then a hanging chain
+    w = world_add_static_box(w, 128.0, 10.0, 6.0, 6.0, 0.0, 0.9)
+    let i = 0
+    while i < 8 {
+        w = world_add_circle(w, 128.0, 20.0 + 12.0 * (i + 1), 5.0, 0.8, 0.2, 0.3)
+        w = world_add_spring(w, i, i + 1, 12.0, 800.0, 8.0)
+        i += 1
+    }
+    print("simulating 900 frames...")
+    let f = 0
+    while f < 900 {
+        w = world_step(w, 1.0 / 60.0)
+        render(w)
+        sleep_ms(16)
+        f += 1
+    }
+    let i = 0
+    while i < world_body_count(w) {
+        print("body", i, "at", body_x(w, i), body_y(w, i))
+        i += 1
+    }
+    print("done")
+}

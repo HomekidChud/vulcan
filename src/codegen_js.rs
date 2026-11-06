@@ -95,6 +95,99 @@ function __clear_screen() { __out("\x1b[2J\x1b[H"); }
 function __exit(c) { process.exit(c); }
 function __min(a, b) { return a < b ? a : b; }
 function __max(a, b) { return a > b ? a : b; }
+// ---- graphics: 256x144 framebuffer, presented to the IDE canvas or terminal ----
+const __FB_W = 256, __FB_H = 144;
+const __fb = new Int32Array(__FB_W * __FB_H);
+const __FONT_CHARS = " 0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ.:-!?/+%";
+const __FONT_DATA = "000007555726227717477171755711747177475771122757577571775755656567444765556746477464474557557557222711157556554444757755655557555775744755717565574717722225555755552557755525555722712470000202020007002220271302112440272051245";
+function __clear(c) { __fb.fill(c | 0); }
+function __draw_rect(x, y, w, h, c) {
+    const x0 = Math.ceil(x - 0.5), x1 = Math.floor(x + w - 0.5);
+    const y0 = Math.ceil(y - 0.5), y1 = Math.floor(y + h - 0.5);
+    const a = Math.max(0, x0), b = Math.min(__FB_W - 1, x1), d = Math.min(__FB_H - 1, y1);
+    for (let py = Math.max(0, y0); py <= d; py++)
+        for (let px = a; px <= b; px++) __fb[py * __FB_W + px] = c | 0;
+}
+function __draw_circle(x, y, r, c) {
+    if (r < 0) return;
+    const x0 = Math.max(0, Math.ceil(x - r - 0.5)), x1 = Math.min(__FB_W - 1, Math.floor(x + r + 0.5));
+    const y0 = Math.max(0, Math.ceil(y - r - 0.5)), y1 = Math.min(__FB_H - 1, Math.floor(y + r + 0.5));
+    const r2 = r * r;
+    for (let py = y0; py <= y1; py++)
+        for (let px = x0; px <= x1; px++) {
+            const dx = px + 0.5 - x, dy = py + 0.5 - y;
+            if (dx * dx + dy * dy <= r2) __fb[py * __FB_W + px] = c | 0;
+        }
+}
+function __draw_line(x0, y0, x1, y1, c) {
+    let px = Math.round(x0), py = Math.round(y0);
+    const ex = Math.round(x1), ey = Math.round(y1);
+    const dx = Math.abs(ex - px), dy = Math.abs(ey - py);
+    const sx = px < ex ? 1 : -1, sy = py < ey ? 1 : -1;
+    let err = dx - dy;
+    for (;;) {
+        if (px >= 0 && px < __FB_W && py >= 0 && py < __FB_H) __fb[py * __FB_W + px] = c | 0;
+        if (px === ex && py === ey) break;
+        const e2 = 2 * err;
+        if (e2 > -dy) { err -= dy; px += sx; }
+        if (e2 < dx) { err += dx; py += sy; }
+    }
+}
+function __draw_text(x, y, s, c) {
+    if (typeof s !== "string") s = Number.isInteger(s) ? String(s) : __g6(s);
+    s = s.toUpperCase();
+    const bx = Math.round(x), by = Math.round(y);
+    for (let i = 0; i < s.length; i++) {
+        const gi = __FONT_CHARS.indexOf(s.charAt(i));
+        if (gi < 0) continue;
+        for (let row = 0; row < 5; row++) {
+            const bits = __FONT_DATA.charCodeAt(gi * 5 + row) - 48;
+            for (let col = 0; col < 3; col++) {
+                if (bits & (4 >> col)) {
+                    const px = bx + i * 4 + col, py = by + row;
+                    if (px >= 0 && px < __FB_W && py >= 0 && py < __FB_H) __fb[py * __FB_W + px] = c | 0;
+                }
+            }
+        }
+    }
+}
+function __present() {
+    if (typeof importScripts === "function" && typeof postMessage === "function") {
+        // running in the Vulcan IDE worker — ship the frame to the canvas
+        const copy = __fb.slice();
+        postMessage({ __vulcan_frame: copy.buffer, w: __FB_W, h: __FB_H }, [copy.buffer]);
+        return;
+    }
+    // terminal: downsample to 64x18 half-block cells (same output as the C backend)
+    let out = "\x1b[H";
+    for (let cy = 0; cy < 18; cy++) {
+        let row = "";
+        for (let cx = 0; cx < 64; cx++) {
+            let ur = 0, ug = 0, ub = 0, lr = 0, lg = 0, lb = 0;
+            for (let sy = 0; sy < 4; sy++) for (let sx = 0; sx < 4; sx++) {
+                const v = __fb[(cy * 8 + sy) * __FB_W + cx * 4 + sx];
+                ur += (v >> 16) & 255; ug += (v >> 8) & 255; ub += v & 255;
+            }
+            for (let sy = 4; sy < 8; sy++) for (let sx = 0; sx < 4; sx++) {
+                const v = __fb[(cy * 8 + sy) * __FB_W + cx * 4 + sx];
+                lr += (v >> 16) & 255; lg += (v >> 8) & 255; lb += v & 255;
+            }
+            const urr = (ur + 8) >> 4, urg = (ug + 8) >> 4, urb = (ub + 8) >> 4;
+            const lrr = (lr + 8) >> 4, lrg = (lg + 8) >> 4, lrb = (lb + 8) >> 4;
+            row += "\x1b[38;2;" + urr + ";" + urg + ";" + urb + "m\x1b[48;2;" + lrr + ";" + lrg + ";" + lrb + "m\u2580";
+        }
+        out += row + "\x1b[0m\n";
+    }
+    process.stdout.write(out);
+}
+// ---- IDE input (mouse + keys) via SharedArrayBuffer, set by the IDE worker ----
+function __input_state() {
+    try { return (typeof globalThis !== "undefined" && globalThis.__VULCAN_INPUT) || null; } catch (e) { return null; }
+}
+function __mouse_x() { const s = __input_state(); return s ? s[0] / 100 : -1.0; }
+function __mouse_y() { const s = __input_state(); return s ? s[1] / 100 : -1.0; }
+function __mouse_down() { const s = __input_state(); return s ? s[2] !== 0 : false; }
+function __key_down(c) { const s = __input_state(); return s ? s[3 + c] !== 0 : false; }
 "#;
 
 pub fn generate_js(program: &[Item]) -> String {
@@ -1049,6 +1142,63 @@ impl JsGen {
             }
             "screen_width" => ("__screen_w()".into(), Ty::I64),
             "screen_height" => ("__screen_h()".into(), Ty::I64),
+            "canvas_width" => ("256".into(), Ty::I64),
+            "canvas_height" => ("144".into(), Ty::I64),
+            "clear" => {
+                if args.len() != 1 { panic!("vulcan: clear(color) takes 1 arg"); }
+                let (c, t) = self.gen_expr(&args[0]);
+                let c = self.cast(&c, &t, &Ty::I64);
+                (format!("(__clear({c}), undefined)"), Ty::Void)
+            }
+            "draw_rect" => {
+                if args.len() != 5 { panic!("vulcan: draw_rect(x, y, w, h, color) takes 5 args"); }
+                let mut cs = Vec::new();
+                for a in args.iter().take(4) {
+                    let (c, t) = self.gen_expr(a);
+                    cs.push(self.cast(&c, &t, &Ty::F64));
+                }
+                let (col, ct) = self.gen_expr(&args[4]);
+                let col = self.cast(&col, &ct, &Ty::I64);
+                (format!("(__draw_rect({}, {}, {}, {}, {col}), undefined)", cs[0], cs[1], cs[2], cs[3]), Ty::Void)
+            }
+            "draw_circle" => {
+                if args.len() != 4 { panic!("vulcan: draw_circle(x, y, r, color) takes 4 args"); }
+                let (x, xt) = self.gen_expr(&args[0]); let x = self.cast(&x, &xt, &Ty::F64);
+                let (y, yt) = self.gen_expr(&args[1]); let y = self.cast(&y, &yt, &Ty::F64);
+                let (r, rt) = self.gen_expr(&args[2]); let r = self.cast(&r, &rt, &Ty::F64);
+                let (col, ct) = self.gen_expr(&args[3]); let col = self.cast(&col, &ct, &Ty::I64);
+                (format!("(__draw_circle({x}, {y}, {r}, {col}), undefined)"), Ty::Void)
+            }
+            "draw_line" => {
+                if args.len() != 5 { panic!("vulcan: draw_line(x1, y1, x2, y2, color) takes 5 args"); }
+                let mut cs = Vec::new();
+                for a in args.iter().take(4) {
+                    let (c, t) = self.gen_expr(a);
+                    cs.push(self.cast(&c, &t, &Ty::F64));
+                }
+                let (col, ct) = self.gen_expr(&args[4]);
+                let col = self.cast(&col, &ct, &Ty::I64);
+                (format!("(__draw_line({}, {}, {}, {}, {col}), undefined)", cs[0], cs[1], cs[2], cs[3]), Ty::Void)
+            }
+            "draw_text" => {
+                if args.len() != 4 { panic!("vulcan: draw_text(x, y, text, color) takes 4 args"); }
+                let (x, xt) = self.gen_expr(&args[0]); let x = self.cast(&x, &xt, &Ty::F64);
+                let (y, yt) = self.gen_expr(&args[1]); let y = self.cast(&y, &yt, &Ty::F64);
+                let (s, st) = self.gen_expr(&args[2]);
+                let s = if st == Ty::Str { s } else { self.fmt_val(&s, &st) };
+                let (col, ct) = self.gen_expr(&args[3]); let col = self.cast(&col, &ct, &Ty::I64);
+                (format!("(__draw_text({x}, {y}, {s}, {col}), undefined)"), Ty::Void)
+            }
+            "present" => ("(__present(), undefined)".into(), Ty::Void),
+            "mouse_x" => ("__mouse_x()".into(), Ty::F64),
+            "mouse_y" => ("__mouse_y()".into(), Ty::F64),
+            "mouse_down" => ("__mouse_down()".into(), Ty::Bool),
+            "key_down" => {
+                if args.len() != 1 { panic!("vulcan: key_down(code) takes 1 arg"); }
+                let (c, t) = self.gen_expr(&args[0]);
+                let c = self.cast(&c, &t, &Ty::I64);
+                (format!("__key_down({c})"), Ty::Bool)
+            }
             "cursor_visible" => {
                 let (c, t) = self.gen_expr(&args[0]); let c = self.cast(&c, &t, &Ty::I64);
                 (format!("(__cursor_visible({c}), undefined)"), Ty::Void)

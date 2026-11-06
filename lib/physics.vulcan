@@ -1,0 +1,386 @@
+// lib/physics.vulcan — the Vulcan 2D rigid-body physics engine.
+//
+// Circles and axis-aligned boxes, gravity, springs, impulse-based collision
+// resolution with restitution + friction, and positional correction for
+// stable stacking. Runs identically on the C, JavaScript and Python backends.
+//
+// World mutation follows the copy-in / copy-out discipline that works on every
+// backend (C structs are values, JS/Python objects are references):
+//     w = world_add_circle(w, ...)
+//     w = world_step(w, 1.0 / 60.0)
+// Always re-assign `w` from the function result.
+pub const PH_CIRCLE = 0
+pub const PH_BOX = 1
+
+pub const PH_MAX_BODIES = 512
+pub const PH_MAX_SPRINGS = 64
+
+pub struct Body {
+    shape: i64,          // PH_CIRCLE or PH_BOX
+    x: f64, y: f64,     // center
+    vx: f64, vy: f64,
+    hw: f64, hh: f64,   // box half-extents; circle radius lives in hw
+    mass: f64,
+    inv_mass: f64,      // 0 = static (infinite mass)
+    restitution: f64,   // bounciness 0..1
+    friction: f64,      // 0..1
+}
+
+pub struct Spring {
+    a: i64, b: i64,     // body indices
+    rest: f64,          // rest length
+    k: f64,             // stiffness
+    damping: f64,
+}
+
+pub struct World {
+    gx: f64, gy: f64,   // gravity
+    bodies: [Body],
+    body_count: i64,
+    springs: [Spring],
+    spring_count: i64,
+    iterations: i64,    // velocity solver iterations per step
+}
+
+// internal: contact between two bodies (a < b is not required)
+pub struct Contact {
+    a: i64, b: i64,
+    nx: f64, ny: f64,   // collision normal, from a to b
+    depth: f64,
+}
+
+fn ph_no_contact() -> Contact {
+    return Contact { a: -1, b: -1, nx: 0.0, ny: 0.0, depth: 0.0 }
+}
+
+fn ph_new_body() -> Body {
+    return Body {
+        shape: PH_CIRCLE, x: 0.0, y: 0.0, vx: 0.0, vy: 0.0,
+        hw: 0.0, hh: 0.0, mass: 0.0, inv_mass: 0.0,
+        restitution: 0.0, friction: 0.0
+    }
+}
+
+fn ph_new_spring() -> Spring {
+    return Spring { a: 0, b: 0, rest: 0.0, k: 0.0, damping: 0.0 }
+}
+
+// Builds a world with gravity (gx, gy) — e.g. (0.0, 900.0).
+pub fn world_new(gx: f64, gy: f64) -> World {
+    let bodies: [Body] = []
+    let i = 0
+    while i < PH_MAX_BODIES {
+        bodies.push(ph_new_body())
+        i += 1
+    }
+    let springs: [Spring] = []
+    let j = 0
+    while j < PH_MAX_SPRINGS {
+        springs.push(ph_new_spring())
+        j += 1
+    }
+    return World {
+        gx: gx, gy: gy, bodies: bodies, body_count: 0,
+        springs: springs, spring_count: 0, iterations: 8
+    }
+}
+
+// Adds a dynamic circle. Returns the updated world.
+pub fn world_add_circle(w: World, x: f64, y: f64, r: f64, mass: f64, restitution: f64, friction: f64) -> World {
+    let im = 0.0
+    if mass > 0.0 { im = 1.0 / mass }
+    w.bodies[w.body_count] = Body {
+        shape: PH_CIRCLE, x: x, y: y, vx: 0.0, vy: 0.0,
+        hw: r, hh: r, mass: mass, inv_mass: im,
+        restitution: restitution, friction: friction
+    }
+    w.body_count = w.body_count + 1
+    return w
+}
+
+// Adds a dynamic axis-aligned box. Returns the updated world.
+pub fn world_add_box(w: World, x: f64, y: f64, hw: f64, hh: f64, mass: f64, restitution: f64, friction: f64) -> World {
+    let im = 0.0
+    if mass > 0.0 { im = 1.0 / mass }
+    w.bodies[w.body_count] = Body {
+        shape: PH_BOX, x: x, y: y, vx: 0.0, vy: 0.0,
+        hw: hw, hh: hh, mass: mass, inv_mass: im,
+        restitution: restitution, friction: friction
+    }
+    w.body_count = w.body_count + 1
+    return w
+}
+
+// Adds an immovable box (walls, floors, platforms). Returns the updated world.
+pub fn world_add_static_box(w: World, x: f64, y: f64, hw: f64, hh: f64, restitution: f64, friction: f64) -> World {
+    w.bodies[w.body_count] = Body {
+        shape: PH_BOX, x: x, y: y, vx: 0.0, vy: 0.0,
+        hw: hw, hh: hh, mass: 0.0, inv_mass: 0.0,
+        restitution: restitution, friction: friction
+    }
+    w.body_count = w.body_count + 1
+    return w
+}
+
+// Adds walls + floor + ceiling around the default 256x144 canvas.
+pub fn world_add_bounds(w: World, restitution: f64, friction: f64) -> World {
+    w = world_add_static_box(w, 128.0, 152.0, 140.0, 8.0, restitution, friction)  // floor
+    w = world_add_static_box(w, -6.0, 72.0, 8.0, 80.0, restitution, friction)     // left
+    w = world_add_static_box(w, 262.0, 72.0, 8.0, 80.0, restitution, friction)   // right
+    w = world_add_static_box(w, 128.0, -8.0, 140.0, 8.0, restitution, friction)  // ceiling
+    return w
+}
+
+// Adds a damped spring between bodies a and b. Returns the updated world.
+pub fn world_add_spring(w: World, a: i64, b: i64, rest: f64, k: f64, damping: f64) -> World {
+    w.springs[w.spring_count] = Spring { a: a, b: b, rest: rest, k: k, damping: damping }
+    w.spring_count = w.spring_count + 1
+    return w
+}
+
+pub fn world_body_count(w: World) -> i64 {
+    return w.body_count
+}
+
+pub fn world_spring_count(w: World) -> i64 {
+    return w.spring_count
+}
+
+// Body read accessors.
+pub fn body_shape(w: World, i: i64) -> i64 { return w.bodies[i].shape }
+pub fn body_x(w: World, i: i64) -> f64 { return w.bodies[i].x }
+pub fn body_y(w: World, i: i64) -> f64 { return w.bodies[i].y }
+pub fn body_vx(w: World, i: i64) -> f64 { return w.bodies[i].vx }
+pub fn body_vy(w: World, i: i64) -> f64 { return w.bodies[i].vy }
+pub fn body_hw(w: World, i: i64) -> f64 { return w.bodies[i].hw }
+pub fn body_hh(w: World, i: i64) -> f64 { return w.bodies[i].hh }
+
+// Moves a body (useful for spawning / mouse drags). Returns the updated world.
+pub fn body_set_pos(w: World, i: i64, x: f64, y: f64) -> World {
+    let b = w.bodies[i]
+    b.x = x
+    b.y = y
+    w.bodies[i] = b
+    return w
+}
+
+// Kicks a body with an instantaneous impulse. Returns the updated world.
+pub fn body_apply_impulse(w: World, i: i64, ix: f64, iy: f64) -> World {
+    let b = w.bodies[i]
+    b.vx = b.vx + ix * b.inv_mass
+    b.vy = b.vy + iy * b.inv_mass
+    w.bodies[i] = b
+    return w
+}
+
+// ---- collision detection ----
+
+fn ph_detect_circles(a: Body, b: Body, ia: i64, ib: i64) -> Contact {
+    let dx = b.x - a.x
+    let dy = b.y - a.y
+    let r = a.hw + b.hw
+    let d2 = dx * dx + dy * dy
+    if d2 >= r * r { return ph_no_contact() }
+    if d2 == 0.0 { return Contact { a: ia, b: ib, nx: 0.0, ny: -1.0, depth: r } }
+    let d = sqrt(d2)
+    return Contact { a: ia, b: ib, nx: dx / d, ny: dy / d, depth: r - d }
+}
+
+fn ph_detect_boxes(a: Body, b: Body, ia: i64, ib: i64) -> Contact {
+    let dx = b.x - a.x
+    let px = a.hw + b.hw - abs(dx)
+    if px <= 0.0 { return ph_no_contact() }
+    let dy = b.y - a.y
+    let py = a.hh + b.hh - abs(dy)
+    if py <= 0.0 { return ph_no_contact() }
+    if px < py {
+        let nx = 1.0
+        if dx < 0.0 { nx = -1.0 }
+        return Contact { a: ia, b: ib, nx: nx, ny: 0.0, depth: px }
+    }
+    let ny = 1.0
+    if dy < 0.0 { ny = -1.0 }
+    return Contact { a: ia, b: ib, nx: 0.0, ny: ny, depth: py }
+}
+
+// box (first) vs circle (second); normal points from box to circle
+fn ph_detect_box_circle(box: Body, circ: Body, ibox: i64, icirc: i64) -> Contact {
+    let cx = circ.x
+    let cy = circ.y
+    if cx < box.x - box.hw { cx = box.x - box.hw }
+    if cx > box.x + box.hw { cx = box.x + box.hw }
+    if cy < box.y - box.hh { cy = box.y - box.hh }
+    if cy > box.y + box.hh { cy = box.y + box.hh }
+    let dx = circ.x - cx
+    let dy = circ.y - cy
+    let r = circ.hw
+    let d2 = dx * dx + dy * dy
+    if d2 > r * r { return ph_no_contact() }
+    if d2 > 0.0 {
+        let d = sqrt(d2)
+        return Contact { a: ibox, b: icirc, nx: dx / d, ny: dy / d, depth: r - d }
+    }
+    // circle center inside the box: push out along the nearest face
+    let left = circ.x - (box.x - box.hw)
+    let right = (box.x + box.hw) - circ.x
+    let top = circ.y - (box.y - box.hh)
+    let bottom = (box.y + box.hh) - circ.y
+    let m = left
+    let nx = -1.0
+    let ny = 0.0
+    if right < m { m = right; nx = 1.0; ny = 0.0 }
+    if top < m { m = top; nx = 0.0; ny = -1.0 }
+    if bottom < m { m = bottom; nx = 0.0; ny = 1.0 }
+    return Contact { a: ibox, b: icirc, nx: nx, ny: ny, depth: r + m }
+}
+
+fn ph_detect_pair(w: World, ia: i64, ib: i64) -> Contact {
+    let a = w.bodies[ia]
+    let b = w.bodies[ib]
+    if a.shape == PH_CIRCLE {
+        if b.shape == PH_CIRCLE { return ph_detect_circles(a, b, ia, ib) }
+        return ph_detect_box_circle(b, a, ib, ia)
+    }
+    if b.shape == PH_CIRCLE { return ph_detect_box_circle(a, b, ia, ib) }
+    return ph_detect_boxes(a, b, ia, ib)
+}
+
+// ---- velocity resolution (sequential impulses) ----
+
+fn ph_resolve_velocity(w: World, c: Contact) -> World {
+    let a = w.bodies[c.a]
+    let b = w.bodies[c.b]
+    let inv_sum = a.inv_mass + b.inv_mass
+    if inv_sum == 0.0 { return w }
+    let rvx = b.vx - a.vx
+    let rvy = b.vy - a.vy
+    let vel_n = rvx * c.nx + rvy * c.ny
+    if vel_n > 0.0 { return w }   // already separating
+    let e = a.restitution
+    if b.restitution < e { e = b.restitution }
+    let j = -(1.0 + e) * vel_n / inv_sum
+    a.vx = a.vx - c.nx * j * a.inv_mass
+    a.vy = a.vy - c.ny * j * a.inv_mass
+    b.vx = b.vx + c.nx * j * b.inv_mass
+    b.vy = b.vy + c.ny * j * b.inv_mass
+    // friction along the tangent
+    let tx = -c.ny
+    let ty = c.nx
+    let rvx2 = b.vx - a.vx
+    let rvy2 = b.vy - a.vy
+    let vel_t = rvx2 * tx + rvy2 * ty
+    let jt = -vel_t / inv_sum
+    let mu = (a.friction + b.friction) * 0.5
+    let max_f = j * mu
+    if jt > max_f { jt = max_f }
+    if jt < -max_f { jt = -max_f }
+    a.vx = a.vx - tx * jt * a.inv_mass
+    a.vy = a.vy - ty * jt * a.inv_mass
+    b.vx = b.vx + tx * jt * b.inv_mass
+    b.vy = b.vy + ty * jt * b.inv_mass
+    w.bodies[c.a] = a
+    w.bodies[c.b] = b
+    return w
+}
+
+// ---- positional correction (prevents sinking) ----
+
+fn ph_correct_positions(w: World) -> World {
+    let i = 0
+    while i < w.body_count {
+        let j = i + 1
+        while j < w.body_count {
+            let c = ph_detect_pair(w, i, j)
+            if c.a >= 0 {
+                let a = w.bodies[c.a]
+                let b = w.bodies[c.b]
+                let inv_sum = a.inv_mass + b.inv_mass
+                if inv_sum > 0.0 {
+                    let slop = 0.05
+                    let percent = 0.8
+                    let corr = c.depth - slop
+                    if corr < 0.0 { corr = 0.0 }
+                    corr = corr / inv_sum * percent
+                    a.x = a.x - c.nx * corr * a.inv_mass
+                    a.y = a.y - c.ny * corr * a.inv_mass
+                    b.x = b.x + c.nx * corr * b.inv_mass
+                    b.y = b.y + c.ny * corr * b.inv_mass
+                    w.bodies[c.a] = a
+                    w.bodies[c.b] = b
+                }
+            }
+            j += 1
+        }
+        i += 1
+    }
+    return w
+}
+
+// ---- springs ----
+
+fn ph_apply_springs(w: World, dt: f64) -> World {
+    let s = 0
+    while s < w.spring_count {
+        let sp = w.springs[s]
+        let a = w.bodies[sp.a]
+        let b = w.bodies[sp.b]
+        let dx = b.x - a.x
+        let dy = b.y - a.y
+        let d2 = dx * dx + dy * dy
+        if d2 > 0.0 {
+            let d = sqrt(d2)
+            let ux = dx / d
+            let uy = dy / d
+            let rel = (b.vx - a.vx) * ux + (b.vy - a.vy) * uy
+            let f = -sp.k * (d - sp.rest) - sp.damping * rel
+            a.vx = a.vx - f * ux * a.inv_mass * dt
+            a.vy = a.vy - f * uy * a.inv_mass * dt
+            b.vx = b.vx + f * ux * b.inv_mass * dt
+            b.vy = b.vy + f * uy * b.inv_mass * dt
+            w.bodies[sp.a] = a
+            w.bodies[sp.b] = b
+        }
+        s += 1
+    }
+    return w
+}
+
+// ---- integration ----
+
+fn ph_integrate(w: World, dt: f64) -> World {
+    let i = 0
+    while i < w.body_count {
+        let b = w.bodies[i]
+        if b.inv_mass > 0.0 {
+            b.vx = b.vx + w.gx * dt
+            b.vy = b.vy + w.gy * dt
+            b.x = b.x + b.vx * dt
+            b.y = b.y + b.vy * dt
+            w.bodies[i] = b
+        }
+        i += 1
+    }
+    return w
+}
+
+// Advances the world by dt seconds. Returns the updated world.
+pub fn world_step(w: World, dt: f64) -> World {
+    w = ph_apply_springs(w, dt)
+    let it = 0
+    while it < w.iterations {
+        let a = 0
+        while a < w.body_count {
+            let b = a + 1
+            while b < w.body_count {
+                let c = ph_detect_pair(w, a, b)
+                if c.a >= 0 { w = ph_resolve_velocity(w, c) }
+                b += 1
+            }
+            a += 1
+        }
+        it += 1
+    }
+    w = ph_integrate(w, dt)
+    w = ph_correct_positions(w)
+    return w
+}

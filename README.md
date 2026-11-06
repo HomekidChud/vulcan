@@ -13,6 +13,36 @@ fn main() {
 }
 ```
 
+## Vulcan 1.0 — what's new
+
+Vulcan is now a physics-engine scripting IDE:
+
+- **`vulcan ide`** — launch a full browser IDE (localhost, zero dependencies): syntax-highlighted editor, examples, file sidebar, console panel, and a **live canvas**. Programs run in a sandboxed Web Worker; `present()` streams 256x144 frames to the canvas at your `sleep_ms` frame rate, and `mouse_x()` / `mouse_y()` / `mouse_down()` / `key_down(code)` feed live input back into your program. Ctrl+Enter runs. Your files are saved in `.ide/`, and `import physics` is always available.
+
+  ```bash
+  vulcan ide          # http://127.0.0.1:7788 — try the bouncing-balls demo
+  ```
+- **A 2D rigid-body physics engine** — `import physics` gives you circles, boxes, static walls, gravity, restitution, friction, damped springs, impulse-based collision resolution with iterative solving, and positional correction for stable stacking (see the crate-stacking `examples/pyramid.vulcan`). Deterministic, byte-for-byte identical on all three backends, and written in pure Vulcan (~400 lines, `lib/physics.vulcan`).
+
+  ```vulcan
+  import physics
+
+  fn main() -> void {
+      let w = world_new(0.0, 900.0)          // gravity
+      w = world_add_bounds(w, 0.75, 0.1)     // walls + floor
+      w = world_add_circle(w, 40.0, 20.0, 8.0, 1.0, 0.8, 0.1)
+      w = world_add_box(w, 120.0, 30.0, 10.0, 8.0, 2.0, 0.2, 0.5)
+      w = world_add_spring(w, 1, 2, 50.0, 60.0, 2.0)
+      while true {
+          w = world_step(w, 1.0 / 60.0)
+          render(w)                          // draw with the canvas builtins
+      }
+  }
+  ```
+- **A graphics layer for every backend** — a 256x144 canvas with `clear(color)`, `draw_rect`, `draw_circle`, `draw_line`, `draw_text` (3x5 pixel font), `canvas_width()`, `canvas_height()` and `present()`. The same program renders to the IDE canvas, or to your terminal as truecolor half-block ANSI — byte-for-byte identical across C, JS, and Python.
+- **Compiler fixes** — whole-number float literals (`1.0`) no longer degrade to integer division on the C backend (this was a real constant-folding bug: `1.0 / 60.0` emitted `1 / 60`), and struct fields holding arrays of structs (`bodies: [Body]`) now work on the C backend (forward declarations + dependency-ordered struct emission).
+- The selftest suite now covers all of the above (16 cases, each verified on C, JS, and Python — the five animated examples produce identical output on all backends, ANSI frames included).
+
 ## Vulcan 0.5.0 — what's new
 
 - **Package once, run anywhere**: `vulcan package app.vulcan --platform <web|desktop|mobile|linux|windows|macos>` emits a ready-to-ship bundle for that target (see Packaging below).
@@ -156,6 +186,7 @@ Reproduce with:
 
 ```bash
 cargo build --release
+vulcan ide                            # launch the browser IDE (physics + canvas)
 vulcan run examples/fib.vulcan        # compile + execute (native, via C)
 vulcan build examples/fib.vulcan     # emit C + native binary
 vulcan emit examples/fib.vulcan      # show generated C
@@ -193,6 +224,36 @@ Three complete games ship in `examples/`: Snake (arcade), Pong (real-time physic
    - **Python backend**: Python 3 source — structs become classes, `impl` methods become real class methods, `defer` becomes `try/finally`.
 3. `vulcan selftest` compiles and runs every test case on all three backends and diffs the output — byte-for-byte identical or the build fails.
 
+## Graphics + physics reference
+
+The canvas is a fixed 256x144 framebuffer (colors are `0xRRGGBB` integers). Drawing is identical on every backend — `present()` renders it to the IDE canvas, or to your terminal as truecolor ANSI half-blocks.
+
+| builtin | description |
+|---|---|
+| `canvas_width()`, `canvas_height()` | 256 and 144 |
+| `clear(color)` | fill the canvas |
+| `draw_rect(x, y, w, h, color)` | axis-aligned rectangle |
+| `draw_circle(x, y, r, color)` | filled circle |
+| `draw_line(x1, y1, x2, y2, color)` | Bresenham line |
+| `draw_text(x, y, s, color)` | 3x5 pixel font (A-Z, 0-9, punctuation) |
+| `present()` | show the frame (IDE canvas / terminal) |
+| `mouse_x()`, `mouse_y()`, `mouse_down()` | live mouse (IDE only; -1 / false elsewhere) |
+| `key_down(code)` | key held (IDE only; ASCII codes + arrows 37-40) |
+
+The physics engine (`import physics`) follows the copy-in/copy-out discipline that makes one source work on value-semantics (C) and reference-semantics (JS/Python) backends: always re-assign `w = world_step(w, dt)`.
+
+| function | description |
+|---|---|
+| `world_new(gx, gy)` | create a world with gravity |
+| `world_add_circle(w, x, y, r, mass, restitution, friction)` | dynamic circle |
+| `world_add_box(w, x, y, hw, hh, mass, restitution, friction)` | dynamic box |
+| `world_add_static_box(w, x, y, hw, hh, restitution, friction)` | immovable box |
+| `world_add_bounds(w, restitution, friction)` | walls + floor around the canvas |
+| `world_add_spring(w, a, b, rest, k, damping)` | damped spring between bodies |
+| `world_step(w, dt)` | advance the simulation |
+| `world_body_count(w)`, `body_x(w, i)`, `body_y(w, i)`, ... | read state |
+| `body_set_pos(w, i, x, y)`, `body_apply_impulse(w, i, ix, iy)` | mutate a body |
+
 ## Examples
 
 - `examples/fib.vulcan` — classic recursion
@@ -200,4 +261,9 @@ Three complete games ship in `examples/`: Snake (arcade), Pong (real-time physic
 - `examples/impl_demo.vulcan` — struct methods (`impl`) across all three backends
 - `examples/todo.vulcan` — a CLI todo app (not a game): subcommands, file persistence, struct lists with impl methods
 - `examples/snake.vulcan` — Snake, written in pure Vulcan (WASD keys; uses `term_raw` + `defer` for terminal cleanup)
+- `examples/hello_canvas.vulcan` — the graphics layer: rects, circles, lines, text, animation
+- `examples/bounce.vulcan` — bouncy balls with the physics engine
+- `examples/pyramid.vulcan` — stable box stacking (iterative solver)
+- `examples/springs.vulcan` — a damped-spring chain
+- `examples/attract.vulcan` — interactive: hold the mouse to attract the balls (IDE)
 - `bench/` — vulcan-vs-rust benchmarks

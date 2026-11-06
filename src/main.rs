@@ -10,12 +10,14 @@ mod cli;
 mod modules;
 mod pkg;
 mod package;
+mod ide;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn usage() {
-    println!("Vulcan 0.4 — a small, fast language with multiple backends
+    println!("Vulcan 1.0 — a small, fast language with multiple backends,
+a 2D physics engine and a browser IDE
 
 USAGE (single file):
   vulcan run <file.vulcan>     compile + execute
@@ -39,6 +41,10 @@ USAGE (project — when a vulcan.toml is present):
   vulcan add <user/repo|path> add a dependency
   vulcan run | build | test   work on the whole project
   vulcan bench                time the project entry point
+
+USAGE (IDE):
+  vulcan ide [port]           launch the browser IDE (editor + live canvas,
+                               physics engine ready via `import physics`)
 
 OTHER:
   vulcan selftest             run the compiler test suite
@@ -76,6 +82,11 @@ fn main() {
     let cmd = args[1].clone();
     if cmd == "selftest" {
         cli::selftest();
+        return;
+    }
+    if cmd == "ide" {
+        let port = args.get(2).and_then(|a| a.parse().ok()).unwrap_or(7788);
+        ide::serve(port);
         return;
     }
     if matches!(cmd.as_str(), "help" | "--help" | "-h") {
