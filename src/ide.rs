@@ -28,8 +28,9 @@ const EXAMPLES: &[(&str, &str)] = &[
 pub fn serve(port: u16) {
     let ws = provision_workspace();
 
-    let listener = TcpListener::bind(("127.0.0.1", port))
-        .unwrap_or_else(|e| panic!("vulcan: cannot bind 127.0.0.1:{port}: {e}"));
+    let bind_addr = std::env::var("VULCAN_IDE_ADDR").unwrap_or_else(|_| "127.0.0.1".to_string());
+    let listener = TcpListener::bind((bind_addr.as_str(), port))
+        .unwrap_or_else(|e| panic!("vulcan: cannot bind {bind_addr}:{port}: {e}"));
     println!("Vulcan IDE: http://127.0.0.1:{port}  (Ctrl+C to stop)");
     println!("  workspace: {}  (your files are saved in .ide/)", ws.display());
 
@@ -490,8 +491,9 @@ function logLine(text, cls) {
 }
 
 // ---------- files / examples ----------
+const API_BASE = window.__API_BASE__ || "";
 async function api(path, opts) {
-  const r = await fetch(path, opts);
+  const r = await fetch(API_BASE + path, opts);
   if (!r.ok) throw new Error(await r.text());
   return r;
 }
@@ -545,13 +547,17 @@ function canvasPos(e) {
   const r = cv.getBoundingClientRect();
   return [ (e.clientX - r.left) / r.width * 256, (e.clientY - r.top) / r.height * 144 ];
 }
+function pushInput() {
+  if (worker && !inputShared) worker.postMessage({ type: "input", input: input.slice() });
+}
 cv.addEventListener("mousemove", (e) => {
   const [x, y] = canvasPos(e);
   input[0] = Math.round(x * 100); input[1] = Math.round(y * 100);
+  pushInput();
 });
-cv.addEventListener("mousedown", (e) => { input[2] = 1; e.preventDefault(); });
-window.addEventListener("mouseup", () => { input[2] = 0; });
-cv.addEventListener("mouseleave", () => { input[2] = 0; });
+cv.addEventListener("mousedown", (e) => { input[2] = 1; e.preventDefault(); pushInput(); });
+window.addEventListener("mouseup", () => { input[2] = 0; pushInput(); });
+cv.addEventListener("mouseleave", () => { input[2] = 0; pushInput(); });
 const KEYMAP = { ArrowLeft: 37, ArrowUp: 38, ArrowRight: 39, ArrowDown: 40, Space: 32, Enter: 13, Shift: 16, Control: 17, Alt: 18, Tab: 9, Backspace: 8, Escape: 27, Delete: 46 };
 function keyCode(e) {
   if (e.key.length === 1) return e.key.charCodeAt(0);
@@ -562,11 +568,13 @@ window.addEventListener("keydown", (e) => {
   if (c && running) {
     if (e.key === " " || e.key.startsWith("Arrow")) e.preventDefault();
     input[3 + c] = 1;
+    pushInput();
   }
 });
 window.addEventListener("keyup", (e) => {
   const c = keyCode(e);
   if (c) input[3 + c] = 0;
+  pushInput();
 });
 
 // ---------- frame rendering ----------
@@ -596,7 +604,13 @@ function drawFrame(buf, w, h) {
 // detects the worker environment and posts frames instead of printing ANSI.
 function workerMain(e) {
   const msg = e.data;
-  if (!msg || msg.type !== "run") return;
+  if (!msg) return;
+  if (msg.type === "input") {
+    if (!self.__VULCAN_INPUT) self.__VULCAN_INPUT = new Int32Array(300);
+    self.__VULCAN_INPUT.set(msg.input);
+    return;
+  }
+  if (msg.type !== "run") return;
   if (msg.sab) self.__VULCAN_INPUT = new Int32Array(msg.sab);
   const shim =
     'const process = { argv: ["vulcan"], ' +
@@ -608,14 +622,21 @@ function workerMain(e) {
     'writeFileSync: () => { throw new Error("file I/O is not available in the IDE sandbox"); }, ' +
     'existsSync: () => false });';
   try {
-    const fn = new Function('"use strict";\n' + shim + "\n" + msg.code);
-    fn();
+    const fn = new Function('"use strict";\n' + shim + "\nself.__VULCAN_NO_BOOT = true;\n" + msg.code + "\nreturn __vulcan_boot;");
+    const boot = fn();
+    boot()
+      .catch(function (err) {
+        if (!(err && err.__vulcan_exit)) {
+          postMessage({ type: "err", s: String((err && err.stack) || err) });
+        }
+      })
+      .then(function () { postMessage({ type: "done" }); });
   } catch (err) {
     if (!(err && err.__vulcan_exit)) {
       postMessage({ type: "err", s: String((err && err.stack) || err) });
     }
+    postMessage({ type: "done" });
   }
-  postMessage({ type: "done" });
 }
 let worker = null, running = false;
 function makeWorker() {

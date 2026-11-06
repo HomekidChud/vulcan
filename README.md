@@ -45,6 +45,10 @@ Vulcan now talks to the outside world: FFI, C libraries, host-language interop a
   ```
   `extern`-declared fns with those names then call into the host plugin.
 - New example `examples/ffi_demo.vulcan` (also in the IDE), new selftest case — 18 cases.
+- The IDE is hostable: `VULCAN_IDE_ADDR=0.0.0.0 vulcan ide 8000` binds all interfaces, the
+  frontend honors a `window.__API_BASE__` proxy prefix, and the JS backend now compiles to
+  async functions with promise-based sleeps — so live keyboard/mouse input works even in
+  hosted previews without SharedArrayBuffer (input falls back to postMessage).
 - FORT ISLAND upgraded with real Fortnite systems: shield bar (soaks damage before health),
   weapon slots (pickaxe / pistol / lootable shotgun with different damage, range and
   fire rate), R to build ramps you can walk up, and chests with loot rolls

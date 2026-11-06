@@ -75,7 +75,7 @@ function __key_ready() {
     // ready only before EOF so piped-input programs still terminate cleanly
     return __stdin_eof ? 0 : 0;
 }
-function __sleep(ms) { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); }
+function __sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
 function __ms_now() { return Date.now(); }
 function __clock() { return performance.now() / 1000; }
 function __rand() { return Math.floor(Math.random() * 2147483647); }
@@ -310,11 +310,20 @@ pub fn generate_js(program: &[Item]) -> String {
     out.push_str(&g.body);
     out.push_str("\n// ---- main ----\n");
     let main_ret = g.fns.get("main").map(|(_, r)| r.clone()).unwrap_or(Ty::Void);
+    out.push_str("async function __vulcan_boot() {\n");
     if main_ret == Ty::I64 {
-        out.push_str("const __r = main();\nif (typeof __r === \"number\") process.exit(__r);\n");
+        out.push_str("  const __r = await main();\n");
+        out.push_str("  if (typeof __r === \"number\" && typeof process !== \"undefined\") process.exit(__r);\n");
     } else {
-        out.push_str("main();\n");
+        out.push_str("  await main();\n");
     }
+    out.push_str("}\n");
+    out.push_str("if (typeof __VULCAN_NO_BOOT === \"undefined\") __vulcan_boot().catch(function (e) {\n");
+    out.push_str("  if (!(e && e.__vulcan_exit)) {\n");
+    out.push_str("    if (typeof console !== \"undefined\") console.error(e && e.stack || e);\n");
+    out.push_str("    if (typeof process !== \"undefined\") process.exit(1);\n");
+    out.push_str("  }\n");
+    out.push_str("});\n");
     out
 }
 
@@ -446,7 +455,7 @@ impl JsGen {
             self.locals.last_mut().unwrap().insert(pname.clone(), (pty.clone(), pname.clone()));
         }
         let params = f.params.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>().join(", ");
-        let _ = writeln!(self.body, "\nfunction {}({}) {{", f.name, params);
+        let _ = writeln!(self.body, "\nasync function {}({}) {{", f.name, params);
         self.indent = 1;
         self.emit_stmts(&f.body);
         self.line("}");
@@ -470,7 +479,7 @@ impl JsGen {
             self.locals.last_mut().unwrap().insert(pname.clone(), (pty.clone(), pname.clone()));
             params.push(pname.clone());
         }
-        let _ = writeln!(self.body, "\nfunction {}({}) {{", method_js_name(sname, &m.name), params.join(", "));
+        let _ = writeln!(self.body, "\nasync function {}({}) {{", method_js_name(sname, &m.name), params.join(", "));
         self.indent = 1;
         self.emit_stmts(&m.body);
         self.line("}");
@@ -867,7 +876,7 @@ impl JsGen {
                                 let (ac, at) = self.gen_expr(arg);
                                 call_args.push(self.cast(&ac, &at, pty));
                             }
-                            return (format!("{}({})", method_js_name(sname, name), call_args.join(", ")), m.ret.clone());
+                            return (format!("await {}({})", method_js_name(sname, name), call_args.join(", ")), m.ret.clone());
                         }
                     }
                 }
@@ -1164,7 +1173,7 @@ impl JsGen {
             "sleep_ms" => {
                 let (c, t) = self.gen_expr(&args[0]);
                 let c = self.cast(&c, &t, &Ty::I64);
-                (format!("(__sleep({c}), undefined)"), Ty::Void)
+                (format!("(await __sleep({c}), undefined)"), Ty::Void)
             }
             "exit" => {
                 let (c, t) = self.gen_expr(&args[0]);
@@ -1324,7 +1333,7 @@ impl JsGen {
                     // FFI: the host provides this function via the __ffi table
                     (format!("__ffi.{callee}({})", call_args.join(", ")), ret)
                 } else {
-                    (format!("{callee}({})", call_args.join(", ")), ret)
+                    (format!("await {callee}({})", call_args.join(", ")), ret)
                 }
             }
         }
