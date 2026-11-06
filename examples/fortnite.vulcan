@@ -4,7 +4,9 @@
 // triangles + camera projection from lib/render3d.vulcan):
 //   - procedural low-poly island with height-colored terrain
 //   - third-person camera, WASD movement, mouse look, SPACE jump
-//   - hitscan shooting (bots, walls, terrain), B to build walls
+//   - hitscan shooting (bots, walls, terrain), B to build walls, R for ramps
+//   - Fortnite systems: shield bar (soaks damage first), weapon slots
+//     (pickaxe/pistol/lootable shotgun), chests with loot rolls
 //   - bot opponents that wander, chase, shoot back and build
 //   - shrinking storm circle with damage, chests, kill feed, HUD
 //
@@ -16,6 +18,7 @@ import render3d
 const ISLAND: f64 = 256.0        // world spans 0..256 in x and z
 const STORM_R0: f64 = 110.0      // initial storm radius
 const MAX_WALLS: i64 = 48
+const MAX_RAMPS: i64 = 8
 const MAX_BOTS: i64 = 9
 const MAX_CHESTS: i64 = 6
 const FRAMES: i64 = 5400         // ~90s safety cap
@@ -24,6 +27,7 @@ const SKY: i64 = 0x9FD8F0
 struct Bot { x: f64, z: f64, hp: i64, alive: i64, timer: i64, tx: f64, tz: f64, cd: i64, flash: i64, kills: i64 }
 struct Wall { x: f64, z: f64, hp: i64, hit: i64 }
 struct Chest { x: f64, z: f64, taken: i64 }
+struct Ramp { x: f64, z: f64, yaw: f64, hp: i64 }
 
 // ---- terrain: sum of sines with island falloff ----
 fn terrain_h(x: f64, z: f64) -> f64 {
@@ -38,6 +42,21 @@ fn terrain_h(x: f64, z: f64) -> f64 {
     h = h - (d - 78.0) * 0.32
     if h < 0.0 { h = 0.0 }
     return h
+}
+
+// height on a ramp footprint: rises 6 units over 8 along its facing direction
+fn ramp_height(r: Ramp, x: f64, z: f64) -> f64 {
+    let fx = -sin(r.yaw)
+    let fz = cos(r.yaw)
+    let dx = x - r.x
+    let dz = z - r.z
+    let side = dx * fz - dz * fx
+    if side < -4.0 { return -1.0 }
+    if side > 4.0 { return -1.0 }
+    let t = (dx * fx + dz * fz) + 4.0
+    if t < 0.0 { return -1.0 }
+    if t > 8.0 { return -1.0 }
+    return terrain_h(r.x, r.z) + t * 0.75
 }
 
 fn terrain_color(h: f64) -> i64 {
@@ -182,14 +201,19 @@ fn main() -> void {
     let yaw = 0.0
     let pitch = -0.15
     let hp = 100
+    let shield = 0            // Fortnite shield: absorbs damage before HP
     let kills = 0
     let shoot_cd = 0
     let build_cd = 0
     let grounded = 1
+    let weapon = 1            // 0 pickaxe, 1 pistol, 2 shotgun
+    let owned_sg = 0          // shotgun must be looted
 
     // ---- arrays (pre-sized, set-only) ----
     let walls: [Wall] = []
     for i in 0 .. MAX_WALLS { walls.push(Wall { x: 0.0, z: 0.0, hp: 0, hit: 0 }) }
+    let ramps: [Ramp] = []
+    for i in 0 .. MAX_RAMPS { ramps.push(Ramp { x: 0.0, z: 0.0, yaw: 0.0, hp: 0 }) }
     let bots: [Bot] = []
     let bot_spots: [f64] = []
     bot_spots.push(70.0); bot_spots.push(180.0)
@@ -282,6 +306,13 @@ fn main() -> void {
         if pz < 8.0 { pz = 8.0 }
         if pz > 248.0 { pz = 248.0 }
 
+        // weapon slots: 1 pickaxe, 2 pistol, 3 shotgun (if looted)
+        if key_down(49) { weapon = 0 }
+        if key_down(50) { weapon = 1 }
+        if key_down(51) {
+            if owned_sg == 1 { weapon = 2 }
+        }
+
         // jump
         if key_down(32) {
             if grounded == 1 { vy = 5.0; grounded = 0 }
@@ -289,6 +320,14 @@ fn main() -> void {
         vy = vy - 0.35
         py = py + vy
         let ground = terrain_h(px, pz)
+        // ramps: standing on a ramp footprint raises the ground under you
+        for i in 0 .. MAX_RAMPS {
+            let r = ramps[i]
+            if r.hp > 0 {
+                let rh = ramp_height(r, px, pz)
+                if rh > ground { ground = rh }
+            }
+        }
         if py <= ground { py = ground; vy = 0.0; grounded = 1 }
 
         // build (B): wall 8 units ahead
@@ -314,16 +353,42 @@ fn main() -> void {
             }
         }
 
-        // shoot (click): hitscan from eye
+        // build ramp (R): 8 units ahead, facing where you look
+        if key_down(82) {
+            if build_cd == 0 {
+                let rx = px + (-sin(yaw)) * 8.0
+                let rz = pz + cos(yaw) * 8.0
+                rx = floor(rx / 8.0) * 8.0 + 4.0
+                rz = floor(rz / 8.0) * 8.0 + 4.0
+                let placed = 0
+                for i in 0 .. MAX_RAMPS {
+                    if ramps[i].hp == 0 {
+                        if placed == 0 {
+                            ramps[i] = Ramp { x: rx, z: rz, yaw: yaw, hp: 60 }
+                            placed = 1
+                        }
+                    }
+                }
+                build_cd = 14
+                msg = "RAMP BUILT"
+                msg_t = 40
+            }
+        }
+
+        // shoot (click): hitscan from eye — weapon decides damage/cooldown/range
         if shoot_cd > 0 { shoot_cd = shoot_cd - 1 }
         if mouse_down() {
             if shoot_cd == 0 {
-                shoot_cd = 10
+                let dmg = 34
+                let range = 120.0
+                if weapon == 0 { dmg = 20; range = 7.0; shoot_cd = 8 }
+                if weapon == 1 { dmg = 34; range = 120.0; shoot_cd = 10 }
+                if weapon == 2 { dmg = 70; range = 45.0; shoot_cd = 26 }
                 let f = cam_forward(Camera { x: px, y: py + 3.6, z: pz, yaw: yaw, pitch: pitch })
                 let ox = px
                 let oy = py + 3.6
                 let oz = pz
-                let best_t = 120.0
+                let best_t = range
                 let hit_bot = -1
                 let hit_wall = -1
                 // bots
@@ -367,7 +432,7 @@ fn main() -> void {
                 // apply damage
                 if hit_bot >= 0 {
                     let b = bots[hit_bot]
-                    b.hp = b.hp - 34
+                    b.hp = b.hp - dmg
                     b.flash = 4
                     if b.hp <= 0 {
                         b.alive = 0
@@ -383,7 +448,7 @@ fn main() -> void {
                 }
                 if hit_wall >= 0 {
                     let w = walls[hit_wall]
-                    w.hp = w.hp - 34
+                    w.hp = w.hp - dmg
                     w.hit = 4
                     if w.hp <= 0 { w.hp = 0 }
                     walls[hit_wall] = w
@@ -435,8 +500,15 @@ fn main() -> void {
                         let acc = 0.75 - pd * 0.008
                         let roll = rand_int(0, 100) * 0.01
                         if roll < acc {
-                            hp = hp - 7
-                            msg = "HIT BY ENEMY -7"
+                            // Fortnite rule: shield soaks damage before health
+                            if shield >= 7 {
+                                shield = shield - 7
+                                msg = "SHIELD -7"
+                            } else {
+                                hp = hp - (7 - shield)
+                                shield = 0
+                                msg = "HIT BY ENEMY"
+                            }
                             msg_t = 40
                         }
                     }
@@ -482,9 +554,29 @@ fn main() -> void {
                 let dz = pz - c.z
                 if dx * dx + dz * dz < 25.0 {
                     c.taken = 1
-                    hp = hp + 25
-                    if hp > 100 { hp = 100 }
-                    msg = "CHEST +25 HP"
+                    // loot roll: 0 shield potion, 1 shotgun, 2 med kit
+                    let loot = rand_int(0, 2)
+                    if loot == 0 {
+                        shield = shield + 50
+                        if shield > 100 { shield = 100 }
+                        msg = "SHIELD POTION +50"
+                    }
+                    if loot == 1 {
+                        if owned_sg == 0 {
+                            owned_sg = 1
+                            weapon = 2
+                            msg = "SHOTGUN FOUND (PRESS 3)"
+                        } else {
+                            hp = hp + 25
+                            if hp > 100 { hp = 100 }
+                            msg = "MED KIT +25 HP"
+                        }
+                    }
+                    if loot == 2 {
+                        hp = hp + 30
+                        if hp > 100 { hp = 100 }
+                        msg = "MED KIT +30 HP"
+                    }
                     msg_t = 60
                 }
             }
@@ -561,6 +653,24 @@ fn main() -> void {
             }
         }
 
+        // ramps: sloped wooden quad rising 6 units over 8
+        for i in 0 .. MAX_RAMPS {
+            let r = ramps[i]
+            if r.hp > 0 {
+                let fx = -sin(r.yaw)
+                let fz = cos(r.yaw)
+                let rx = cos(r.yaw)
+                let rz = sin(r.yaw)
+                let base = terrain_h(r.x, r.z)
+                draw_quad(cam,
+                    Vec3 { x: r.x - fx * 4.0 - rx * 4.0, y: base, z: r.z - fz * 4.0 - rz * 4.0 },
+                    Vec3 { x: r.x - fx * 4.0 + rx * 4.0, y: base, z: r.z - fz * 4.0 + rz * 4.0 },
+                    Vec3 { x: r.x + fx * 4.0 + rx * 4.0, y: base + 6.0, z: r.z + fz * 4.0 + rz * 4.0 },
+                    Vec3 { x: r.x + fx * 4.0 - rx * 4.0, y: base + 6.0, z: r.z + fz * 4.0 - rz * 4.0 },
+                    0xB09060)
+            }
+        }
+
         // chests
         for i in 0 .. MAX_CHESTS {
             let c = chests[i]
@@ -623,8 +733,17 @@ fn main() -> void {
         let hpw = hp * 0.5
         if hpw < 0.0 { hpw = 0.0 }
         draw_rect(5.0, 5.0, hpw, 3.0, 0x30D050)
-        draw_text(4.0, 11.0, "HP ", 0xFFFFFF)
-        draw_text(16.0, 11.0, to_string(hp), 0xFFFFFF)
+        // shield bar (blue, above HP)
+        draw_rect(4.0, 12.0, 52.0, 5.0, 0x202020)
+        let shw = shield * 0.5
+        if shw < 0.0 { shw = 0.0 }
+        draw_rect(5.0, 13.0, shw, 3.0, 0x40A0F0)
+        draw_text(4.0, 19.0, "HP ", 0xFFFFFF)
+        draw_text(16.0, 19.0, to_string(hp), 0xFFFFFF)
+        // weapon name
+        if weapon == 0 { draw_text(4.0, 26.0, "PICKAXE", 0xE0E0E0) }
+        if weapon == 1 { draw_text(4.0, 26.0, "PISTOL", 0xE0E0E0) }
+        if weapon == 2 { draw_text(4.0, 26.0, "SHOTGUN", 0xE0E0E0) }
         // alive count + kills
         let alive_bots = 0
         for i in 0 .. MAX_BOTS {
@@ -648,7 +767,7 @@ fn main() -> void {
             msg_t = msg_t - 1
         }
         // controls hint
-        draw_text(4.0, 136.0, "WASD ARROWS+MOUSE AIM CLICK SHOOT B BUILD SPACE JUMP", 0xA0C8D8)
+        draw_text(4.0, 136.0, "WASD AIM CLICK SHOOT B WALL R RAMP 1-3 WEAPON", 0xA0C8D8)
 
         // ---------- present ----------
         present()

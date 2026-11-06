@@ -45,6 +45,10 @@ Vulcan now talks to the outside world: FFI, C libraries, host-language interop a
   ```
   `extern`-declared fns with those names then call into the host plugin.
 - New example `examples/ffi_demo.vulcan` (also in the IDE), new selftest case — 18 cases.
+- FORT ISLAND upgraded with real Fortnite systems: shield bar (soaks damage before health),
+  weapon slots (pickaxe / pistol / lootable shotgun with different damage, range and
+  fire rate), R to build ramps you can walk up, and chests with loot rolls
+  (shield potions, shotgun, med kits).
 
 ## Vulcan 1.1 — what's new
 
