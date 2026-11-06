@@ -239,15 +239,22 @@ fn main() -> void {
     let playing = 1
     let result = 0        // 0 = ongoing, 1 = victory, 2 = eliminated
     let place = 0
+    let mouse_engaged = 0  // mouse aim activates on first click
 
     while playing == 1 {
         // ---------- input ----------
-        if key_down(87) || key_down(38) { yaw = yaw - 0.0 }        // W = forward (handled below)
-        let mx = mouse_x()
-        let my = mouse_y()
-        // mouse look: offset from center = turn speed
-        yaw = yaw + (mx - 128.0) * 0.004
-        pitch = pitch - (my - 72.0) * 0.003
+        // arrow keys always steer; mouse aim engages after the first click
+        if mouse_down() { mouse_engaged = 1 }
+        if key_down(37) { yaw = yaw - 0.05 }        // left
+        if key_down(39) { yaw = yaw + 0.05 }        // right
+        if key_down(38) { pitch = pitch + 0.03 }     // up
+        if key_down(40) { pitch = pitch - 0.03 }     // down
+        if mouse_engaged == 1 {
+            let mx = mouse_x()
+            let my = mouse_y()
+            yaw = yaw + (mx - 128.0) * 0.004
+            pitch = pitch - (my - 72.0) * 0.003
+        }
         if pitch > 0.9 { pitch = 0.9 }
         if pitch < -0.9 { pitch = -0.9 }
 
@@ -627,9 +634,11 @@ fn main() -> void {
         draw_text(232.0, 4.0, to_string(alive_bots + 1), 0xFFFFFF)
         draw_text(200.0, 11.0, "ELIMS ", 0xFFFFFF)
         draw_text(232.0, 11.0, to_string(kills), 0xFFFFFF)
-        // storm timer
+        // storm readout
         draw_text(96.0, 4.0, "STORM ", 0xD8A0E8)
-        draw_text(128.0, 4.0, to_string(storm_r), 0xD8A0E8)
+        let sri: i64 = 0
+        sri = storm_r
+        draw_text(128.0, 4.0, to_string(sri), 0xD8A0E8)
         // crosshair
         draw_line(124.0, 72.0, 132.0, 72.0, 0xFFFFFF)
         draw_line(128.0, 68.0, 128.0, 76.0, 0xFFFFFF)
@@ -639,7 +648,7 @@ fn main() -> void {
             msg_t = msg_t - 1
         }
         // controls hint
-        draw_text(4.0, 136.0, "WASD+MOUSE AIM CLICK SHOOT B BUILD SPACE JUMP", 0xA0C8D8)
+        draw_text(4.0, 136.0, "WASD ARROWS+MOUSE AIM CLICK SHOOT B BUILD SPACE JUMP", 0xA0C8D8)
 
         // ---------- present ----------
         present()

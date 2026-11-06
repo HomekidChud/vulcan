@@ -20,6 +20,8 @@ const EXAMPLES: &[(&str, &str)] = &[
     ("pyramid.vulcan", include_str!("../examples/pyramid.vulcan")),
     ("springs.vulcan", include_str!("../examples/springs.vulcan")),
     ("attract.vulcan", include_str!("../examples/attract.vulcan")),
+    ("spin_cube.vulcan", include_str!("../examples/spin_cube.vulcan")),
+    ("fortnite.vulcan", include_str!("../examples/fortnite.vulcan")),
 ];
 
 pub fn serve(port: u16) {
