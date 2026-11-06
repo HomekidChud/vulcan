@@ -135,6 +135,10 @@ def _ceil(x): return float(math.ceil(x))
 def _sin(x): return math.sin(x)
 def _cos(x): return math.cos(x)
 def _pow(a, b): return math.pow(a, b)
+def _tan(x): return math.tan(x)
+def _exp(x): return math.exp(x)
+def _log(x): return math.log(x)
+def _atan2(y, x): return math.atan2(y, x)
 def _min(a, b): return a if a < b else b
 def _max(a, b): return a if a > b else b
 def _exit(c): sys.exit(c)
@@ -1315,7 +1319,7 @@ impl PyGen {
                 let (c, t) = self.gen_expr(&args[0]); let c = self.cast(&c, &t, &Ty::I64);
                 (format!("(_cursor_visible({c}), None)[1]"), Ty::Void)
             }
-            "sqrt" | "floor" | "ceil" | "sin" | "cos" | "pow" => {
+            "sqrt" | "floor" | "ceil" | "sin" | "cos" | "tan" | "exp" | "log" | "pow" => {
                 let (c, t) = self.gen_expr(&args[0]);
                 let c = self.cast(&c, &t, &Ty::F64);
                 if callee == "pow" {
@@ -1325,6 +1329,14 @@ impl PyGen {
                 } else {
                     (format!("_{callee}({c})"), Ty::F64)
                 }
+            }
+            "atan2" => {
+                if args.len() != 2 { panic!("vulcan: atan2(y, x) takes 2 args"); }
+                let (y, yt) = self.gen_expr(&args[0]);
+                let y = self.cast(&y, &yt, &Ty::F64);
+                let (x, xt) = self.gen_expr(&args[1]);
+                let x = self.cast(&x, &xt, &Ty::F64);
+                (format!("_atan2({y}, {x})"), Ty::F64)
             }
             "abs" => {
                 let (c, t) = self.gen_expr(&args[0]);

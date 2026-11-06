@@ -1631,7 +1631,7 @@ impl Codegen {
                 (format!("(vcursor_visible({c}), (void)0)"), Ty::Void)
             }
             "term_normal" => ("(term_normal(), (void)0)".into(), Ty::Void),
-            "sqrt" | "floor" | "ceil" | "sin" | "cos" | "pow" => {
+            "sqrt" | "floor" | "ceil" | "sin" | "cos" | "tan" | "exp" | "log" | "pow" => {
                 let (c, t) = self.gen_expr(&args[0]);
                 let c = self.cast(&c, &t, &Ty::F64);
                 if callee == "pow" {
@@ -1641,6 +1641,14 @@ impl Codegen {
                 } else {
                     (format!("{callee}({c})"), Ty::F64)
                 }
+            }
+            "atan2" => {
+                if args.len() != 2 { panic!("vulcan: atan2(y, x) takes 2 args"); }
+                let (y, yt) = self.gen_expr(&args[0]);
+                let y = self.cast(&y, &yt, &Ty::F64);
+                let (x, xt) = self.gen_expr(&args[1]);
+                let x = self.cast(&x, &xt, &Ty::F64);
+                (format!("atan2({y}, {x})"), Ty::F64)
             }
             "abs" => {
                 let (c, t) = self.gen_expr(&args[0]);

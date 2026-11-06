@@ -13,6 +13,19 @@ fn main() {
 }
 ```
 
+## Vulcan 1.3 — what's new
+
+The repo no longer ships pre-bundled demo games — `examples/` is now pure language and tooling
+reference code (`tour`, `fib`, `todo`, `impl_demo`, `ffi_demo`), and the IDE ships the same set.
+The compiler gained the math builtins that real simulation, steering and aiming code needs:
+
+- **`atan2(y, x)`** — two-argument arctangent, the function bot AI, projectile and camera code
+  can't live without. Available as a free function on all three backends (libm `atan2`,
+  `Math.atan2`, `math.atan2`), with identical `%.6g` output everywhere.
+- **`tan(x)`, `exp(x)`, `log(x)`** — join `sqrt` / `sin` / `cos` / `pow` as free functions on
+  every backend.
+- New selftest case covering all four — 19 cases, each verified byte-for-byte on C, JS, and Python.
+
 ## Vulcan 1.2 — what's new
 
 Vulcan now talks to the outside world: FFI, C libraries, host-language interop and a plugin hook.
@@ -49,25 +62,19 @@ Vulcan now talks to the outside world: FFI, C libraries, host-language interop a
   frontend honors a `window.__API_BASE__` proxy prefix, and the JS backend now compiles to
   async functions with promise-based sleeps — so live keyboard/mouse input works even in
   hosted previews without SharedArrayBuffer (input falls back to postMessage).
-- FORT ISLAND upgraded with real Fortnite systems: shield bar (soaks damage before health),
-  weapon slots (pickaxe / pistol / lootable shotgun with different damage, range and
-  fire rate), R to build ramps you can walk up, and chests with loot rolls
-  (shield potions, shotgun, med kits).
 
 ## Vulcan 1.1 — what's new
 
-Vulcan now has a **software 3D renderer** — and a Fortnite-style battle royale running on it:
+Vulcan now has a **software 3D renderer**:
 
 - **`draw_tri` — depth-buffered triangles** — the canvas gained a real 3D pipeline: barycentric rasterization with a per-pixel z-buffer, pixel-center sampling, and winding-insensitive coverage. Draw far triangles first or last — the depth buffer makes the result identical. Works on all three backends, byte-for-byte.
 - **`import render3d`** — `lib/render3d.vulcan` gives you `Vec3` math (add/sub/scaled/dot/cross/length/normalized via impl methods), a `Camera` (position + yaw/pitch), `project()` (world point → screen x/y + camera depth + visibility flag), `draw_quad()`, and color helpers (`color_shade`, `color_lerp`). Together with `draw_tri` that's a complete software renderer: perspective projection, flat shading, fog, and hidden-surface removal — in ~130 lines of pure Vulcan.
-- **`examples/fortnite.vulcan` — FORT ISLAND** — a 3D battle-royale in ~700 lines of pure Vulcan: procedural low-poly island (sum-of-sines terrain with height coloring and slope shading), third-person camera, WASD + mouse look, hitscan shooting (ray-sphere vs bots, ray-AABB vs walls, terrain ray marching), wall building (B), 9 bot opponents that wander and shoot back, loot chests, a shrinking storm circle with damage, kill feed, HUD, and victory/elimination screens. Runs on C, JS, and Python (Python plays it as a slideshow — the rasterizer is pure interpreted code).
-- **`examples/spin_cube.vulcan`** — the minimal 3D example: a rotating cube, 20 lines of game code.
 - `to_string(n)` now works on the JS and Python backends too (it was C-only).
 - The Python backend no longer breaks when builtins like `sqrt()` are called inside `impl` methods (Python name-mangled the runtime helpers; they're now mangle-proof).
 - The selftest suite now covers all of the above (17 cases, each verified on C, JS, and Python — the animated examples produce identical output on all backends, ANSI frames included).
 
   ```bash
-  vulcan ide                # http://127.0.0.1:7788 — open examples/fortnite.vulcan, Run
+  vulcan ide                # http://127.0.0.1:7788 — open examples/tour.vulcan, Run
   ```
 
 ## Vulcan 1.0 — what's new
@@ -77,9 +84,9 @@ Vulcan is a physics-engine scripting IDE:
 - **`vulcan ide`** — launch a full browser IDE (localhost, zero dependencies): syntax-highlighted editor, examples, file sidebar, console panel, and a **live canvas**. Programs run in a sandboxed Web Worker; `present()` streams 256x144 frames to the canvas at your `sleep_ms` frame rate, and `mouse_x()` / `mouse_y()` / `mouse_down()` / `key_down(code)` feed live input back into your program. Ctrl+Enter runs. Your files are saved in `.ide/`, and `import physics` is always available.
 
   ```bash
-  vulcan ide          # http://127.0.0.1:7788 — try the bouncing-balls demo
+  vulcan ide          # http://127.0.0.1:7788 — live canvas + physics engine
   ```
-- **A 2D rigid-body physics engine** — `import physics` gives you circles, boxes, static walls, gravity, restitution, friction, damped springs, impulse-based collision resolution with iterative solving, and positional correction for stable stacking (see the crate-stacking `examples/pyramid.vulcan`). Deterministic, byte-for-byte identical on all three backends, and written in pure Vulcan (~400 lines, `lib/physics.vulcan`).
+- **A 2D rigid-body physics engine** — `import physics` gives you circles, boxes, static walls, gravity, restitution, friction, damped springs, impulse-based collision resolution with iterative solving, and positional correction for stable stacking. Deterministic, byte-for-byte identical on all three backends, and written in pure Vulcan (~400 lines, `lib/physics.vulcan`).
 
   ```vulcan
   import physics
@@ -148,14 +155,6 @@ Vulcan is a physics-engine scripting IDE:
   - output: `print_at(x, y, s)`, `clear_screen()`, `cursor_visible(0)`, `set_color(fg, bg)` (8 ANSI colors, `-1` skips)
   - screen: `screen_width()`, `screen_height()` (live terminal size)
   - randomness: `rand_int(lo, hi)`
-- **Three example games** in pure Vulcan, covering three genres:
-  - `examples/snake.vulcan` — arcade (grid, growth, collision)
-  - `examples/pong.vulcan` — real-time physics (ball angles, AI opponent, frame loop)
-  - `examples/fortnite.vulcan` — 3D battle royale (software 3D renderer, bots, storm)
-  - `examples/spin_cube.vulcan` — spinning 3D cube (render3d minimal example)
-  - `examples/tictactoe.vulcan` — turn-based strategy (full minimax AI — it cannot be beaten)
-- **`examples/fortnite.vulcan` — FORT ISLAND, a 3D battle royale**: procedural island terrain, third-person camera, hitscan gunfights, wall building, bot opponents, shrinking storm — all on the software 3D renderer (`import render3d` + `draw_tri`).
-- **A first-person 3D engine** — `examples/raycaster.vulcan` is a Wolfenstein-style raycaster written in pure Vulcan: one ray per screen column, distance-falloff wall heights, fisheye correction, 256-color depth shading, collision detection, live minimap, ~30fps. This is the same core technique that powered Wolfenstein 3D.
 - **Language**: bare `return` (no semicolon, no value), string indexing (`s[i]` yields the char code), trailing commas in array literals, `.repeat(n)`, array printing, typed empty arrays
 
 ## Vulcan 0.2.0 — what's new
@@ -181,7 +180,7 @@ The 0.2.0 release roughly doubles the language:
 - `vulcan test` — runs every `test_*` function in your project
 - a clang-first backend (set `VULCAN_CC` to override)
 
-Run the tour: `vulcan run examples/tour.vulcan`. Play the game: `vulcan run examples/snake.vulcan`.
+Run the tour: `vulcan run examples/tour.vulcan`.
 
 ## Packaging
 
@@ -200,12 +199,12 @@ vulcan test                 # runs every test_* function
 `vulcan package` turns one `.vulcan` file into a bundle for a target platform — no project setup needed:
 
 ```bash
-vulcan package examples/pong.vulcan --platform web       # single index.html: ANSI terminal emulator + web-worker runtime
-vulcan package examples/pong.vulcan --platform desktop   # Electron scaffold (npm install; packages .dmg/.exe/AppImage)
-vulcan package examples/pong.vulcan --platform mobile    # Capacitor scaffold (npx cap add ios / android)
-vulcan package examples/pong.vulcan --platform linux     # embedded C source + ./build.sh (cc -O3 + hardening)
-vulcan package examples/pong.vulcan --platform windows   # mingw-w64 cross-compile build.sh
-vulcan package examples/pong.vulcan --platform macos      # universal (arm64 + x86_64) build.sh
+vulcan package examples/todo.vulcan --platform web       # single index.html: ANSI terminal emulator + web-worker runtime
+vulcan package examples/todo.vulcan --platform desktop   # Electron scaffold (npm install; packages .dmg/.exe/AppImage)
+vulcan package examples/todo.vulcan --platform mobile    # Capacitor scaffold (npx cap add ios / android)
+vulcan package examples/todo.vulcan --platform linux     # embedded C source + ./build.sh (cc -O3 + hardening)
+vulcan package examples/todo.vulcan --platform windows   # mingw-w64 cross-compile build.sh
+vulcan package examples/todo.vulcan --platform macos      # universal (arm64 + x86_64) build.sh
 ```
 
 The **web** bundle is a single self-contained `index.html`: your program compiles to JS, runs in a Web Worker, and renders through an 80x24 ANSI terminal emulator with full color support — keyboard input, `sleep_ms` pacing, and in-memory `file_read`/`file_write` all work in the browser. The **desktop** and **mobile** bundles are standard Electron/Capacitor scaffolds around the same runtime, and the **native-OS** bundles ship the generated C with a one-command build script.
@@ -256,7 +255,7 @@ vulcan run --target js examples/tour.vulcan   # run on Node.js — same output
 vulcan run --target py examples/tour.vulcan   # run on Python 3 — same output
 vulcan selftest                       # run the test suite (all 3 backends)
 vulcan init myproj                    # scaffold a new project
-vulcan package examples/pong.vulcan --platform web   # one-file web app (also: desktop, mobile, linux, windows, macos)
+vulcan package examples/todo.vulcan --platform web   # one-file web app (also: desktop, mobile, linux, windows, macos)
 vulcan run examples/todo.vulcan add "buy milk"       # args after the file are forwarded to your program
 ```
 
@@ -264,7 +263,7 @@ Requires `clang` or `gcc` on your PATH for the default C backend (clang is prefe
 
 ## Making games
 
-The full game stack is built in — timing (`ms_now`, `sleep_ms`), non-blocking keyboard input (`key_ready`, `read_key`, `term_raw`), drawing (`print_at`, `clear_screen`, `set_color`, `cursor_visible`), screen size (`screen_width`, `screen_height`), and randomness (`rand_int`). See `examples/pong.vulcan` for the canonical game loop:
+The full game stack is built in — timing (`ms_now`, `sleep_ms`), non-blocking keyboard input (`key_ready`, `read_key`, `term_raw`), drawing (`print_at`, `clear_screen`, `set_color`, `cursor_visible`), screen size (`screen_width`, `screen_height`), and randomness (`rand_int`). The canonical game loop:
 
 ```vulcan
 term_raw()
@@ -273,7 +272,7 @@ cursor_visible(0)
 // per frame: drain keys, update state, draw at print_at(x, y, ...), sleep_ms(70)
 ```
 
-Three complete games ship in `examples/`: Snake (arcade), Pong (real-time physics + AI), and Tic-Tac-Toe (unbeatable minimax AI).
+The IDE canvas adds a 256x144 framebuffer with live mouse/keyboard input, and `import render3d` gives you a complete software 3D renderer (see Graphics + physics reference below). Write your own games in pure Vulcan — that's what the stack is for.
 
 ## How it works
 
@@ -319,11 +318,6 @@ The physics engine (`import physics`) follows the copy-in/copy-out discipline th
 - `examples/fib.vulcan` — classic recursion
 - `examples/tour.vulcan` — a tour of every feature (runs identically on all backends)
 - `examples/impl_demo.vulcan` — struct methods (`impl`) across all three backends
-- `examples/todo.vulcan` — a CLI todo app (not a game): subcommands, file persistence, struct lists with impl methods
-- `examples/snake.vulcan` — Snake, written in pure Vulcan (WASD keys; uses `term_raw` + `defer` for terminal cleanup)
-- `examples/hello_canvas.vulcan` — the graphics layer: rects, circles, lines, text, animation
-- `examples/bounce.vulcan` — bouncy balls with the physics engine
-- `examples/pyramid.vulcan` — stable box stacking (iterative solver)
-- `examples/springs.vulcan` — a damped-spring chain
-- `examples/attract.vulcan` — interactive: hold the mouse to attract the balls (IDE)
+- `examples/todo.vulcan` — a CLI todo app: subcommands, file persistence, struct lists with impl methods
+- `examples/ffi_demo.vulcan` — calling C libraries (`extern "c"` + `link`)
 - `bench/` — vulcan-vs-rust benchmarks

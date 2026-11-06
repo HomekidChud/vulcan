@@ -15,13 +15,10 @@ use std::thread;
 const PHYSICS_LIB: &str = include_str!("../lib/physics.vulcan");
 
 const EXAMPLES: &[(&str, &str)] = &[
-    ("hello_canvas.vulcan", include_str!("../examples/hello_canvas.vulcan")),
-    ("bounce.vulcan", include_str!("../examples/bounce.vulcan")),
-    ("pyramid.vulcan", include_str!("../examples/pyramid.vulcan")),
-    ("springs.vulcan", include_str!("../examples/springs.vulcan")),
-    ("attract.vulcan", include_str!("../examples/attract.vulcan")),
-    ("spin_cube.vulcan", include_str!("../examples/spin_cube.vulcan")),
-    ("fortnite.vulcan", include_str!("../examples/fortnite.vulcan")),
+    ("tour.vulcan", include_str!("../examples/tour.vulcan")),
+    ("fib.vulcan", include_str!("../examples/fib.vulcan")),
+    ("todo.vulcan", include_str!("../examples/todo.vulcan")),
+    ("impl_demo.vulcan", include_str!("../examples/impl_demo.vulcan")),
     ("ffi_demo.vulcan", include_str!("../examples/ffi_demo.vulcan")),
 ];
 
@@ -704,7 +701,7 @@ $("new").onclick = () => {
   try {
     const r = await api("/api/examples");
     const data = await r.json();
-    const ex = data.find((x) => x.name === "bounce.vulcan") || data[0];
+    const ex = data.find((x) => x.name === "tour.vulcan") || data[0];
     if (ex) { $("fname").value = ex.name; srcEl.value = ex.source; }
   } catch (e) { /* offline fallback */ }
   refreshEditor();

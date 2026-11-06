@@ -435,6 +435,18 @@ fn main() -> void {
 "#,
         expected: "4\n0\n3\n4\n",
     },
+    Case {
+        name: "math builtins: atan2 / tan / exp / log (all backends)",
+        src: r#"
+fn main() -> void {
+    print("atan2:", atan2(0.0, 1.0), atan2(1.0, 1.0), atan2(0.0, -1.0))
+    print("tan:", tan(0.0))
+    print("exp:", exp(0.0), exp(1.0))
+    print("log:", log(1.0))
+}
+"#,
+        expected: "atan2: 0 0.785398 3.14159\ntan: 0\nexp: 1 2.71828\nlog: 0\n",
+    },
 ];
 
 pub fn selftest() {
