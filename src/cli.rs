@@ -33,6 +33,37 @@ fn main() -> void {
 
 const PHYSICS_TEST_EXPECTED: &str = "bodies: 6 springs: 1\n0 128 152\n1 -6 72\n2 262 72\n3 128 -8\n4 59.1166 138.092\n5 108.806 136.102\n";
 
+// Engine selftest main — concatenated after render3d + engine libs
+// (the engine's `import render3d` line is stripped; the lib is inlined above it)
+const ENGINE_TEST_MAIN: &str = r#"
+
+fn main() -> void {
+    let s = scene_new()
+    s = scene_flat_terrain(s, 8, 0.0)
+    s = scene_spawn(s, "player", ENTITY_KIND_PLAYER, Vec3 { x: 0.0, y: 5.0, z: 0.0 })
+    let p = scene_last_id(s)
+    s = scene_spawn(s, "bot1", ENTITY_KIND_BOT, Vec3 { x: 4.0, y: 0.5, z: 4.0 })
+    let b1 = scene_last_id(s)
+    s = scene_spawn(s, "bot2", ENTITY_KIND_BOT, Vec3 { x: -4.0, y: 0.5, z: -4.0 })
+    print("spawned:", p, b1, scene_last_id(s), "alive bots:", scene_count_alive(s, ENTITY_KIND_BOT))
+    for i in 0 .. 120 {
+        s = scene_step(s, 1.0 / 60.0)
+    }
+    let pi = scene_find(s, p)
+    let e = s.entities[pi]
+    print("player settled at y:", e.pos.y, "time:", s.time)
+    print("terrain at (0,0):", terrain_height(s, 0.0, 0.0), "at (16,16):", terrain_height(s, 16.0, 16.0))
+    let bi = scene_find(s, b1)
+    s.entities[bi].hp = 0.0
+    s = scene_reap(s)
+    print("after reap, bots alive:", scene_count_alive(s, ENTITY_KIND_BOT))
+    s = engine_tick(s, 0.5, 1.0 / 60.0)
+    print("after tick, time:", s.time)
+}
+"#;
+
+const ENGINE_TEST_EXPECTED: &str = "spawned: 1 2 3 alive bots: 2\nplayer settled at y: 0.5 time: 2\nterrain at (0,0): 0 at (16,16): 0\nafter reap, bots alive: 1\nafter tick, time: 2.1\n";
+
 // 3D renderer selftest main — concatenated after lib/render3d.vulcan
 const RENDER3D_TEST_MAIN: &str = r#"
 
@@ -447,6 +478,54 @@ fn main() -> void {
 "#,
         expected: "atan2: 0 0.785398 3.14159\ntan: 0\nexp: 1 2.71828\nlog: 0\n",
     },
+    Case {
+        name: "nested arrays (all backends)",
+        src: r#"
+struct Level { name: string, tiles: [[i64]] }
+
+fn make_grid(rows: i64, cols: i64) -> [[i64]] {
+    let g: [[i64]] = []
+    for r in 0 .. rows {
+        let row: [i64] = []
+        for c in 0 .. cols {
+            row.push(r * 10 + c)
+        }
+        g.push(row)
+    }
+    return g
+}
+
+fn main() -> void {
+    let g = make_grid(3, 4)
+    print("g[1][2] =", g[1][2], "len:", g.len(), "row1:", g[1].len())
+    g[0][0] = 99
+    g[1][1] += 5
+    print("mutated:", g[0][0], g[1][1])
+    let lvl = Level { name: "world", tiles: [[1, 2], [3, 4]] }
+    lvl.tiles[1][0] = 30
+    print("level:", lvl.name, lvl.tiles[1][0], lvl.tiles[0][1])
+    let cube: [[[i64]]] = [[[1, 2]], [[3, 4], [5, 6]]]
+    print("cube:", cube[1][0][1], cube[1][1][0])
+    let cells: [[Cell]] = [[Cell { x: 1, y: 2 }, Cell { x: 3, y: 4 }], [Cell { x: 5, y: 6 }]]
+    print("cells:", cells[0][1].x, cells[1][0].y)
+    let popped: [i64] = g.pop()
+    print("popped len:", popped.len(), "grid len:", g.len())
+}
+struct Cell { x: i64, y: i64 }
+"#,
+        expected: "g[1][2] = 12 len: 3 row1: 4\nmutated: 99 16\nlevel: world 30 2\ncube: 4 5\ncells: 3 6\npopped len: 4 grid len: 2\n",
+    },
+    Case {
+        name: "clamp / lerp / sign (all backends)",
+        src: r#"
+fn main() -> void {
+    print("clamp:", clamp(5, 0, 3), clamp(-1, 0, 3), clamp(2.5, 0.0, 2.0))
+    print("lerp:", lerp(0.0, 10.0, 0.25), lerp(10.0, 20.0, 0.5))
+    print("sign:", sign(-3), sign(0), sign(7), sign(-2.5), sign(0.0), sign(3.5))
+}
+"#,
+        expected: "clamp: 3 0 2\nlerp: 2.5 15\nsign: -1 0 1 -1 0 1\n",
+    },
 ];
 
 pub fn selftest() {
@@ -459,6 +538,11 @@ pub fn selftest() {
     // the 3D renderer case: lib source + test main
     let render3d_src = include_str!("../lib/render3d.vulcan").to_string() + RENDER3D_TEST_MAIN;
     failures += run_case("3d renderer (all backends)", &render3d_src, RENDER3D_TEST_EXPECTED, &dir);
+    // the engine case: render3d + engine libs (import stripped) + test main
+    let engine_src = include_str!("../lib/render3d.vulcan").to_string()
+        + &include_str!("../lib/engine.vulcan").replace("import render3d\n", "");
+    let engine_src = engine_src + ENGINE_TEST_MAIN;
+    failures += run_case("engine (all backends)", &engine_src, ENGINE_TEST_EXPECTED, &dir);
     for case in CASES {
         failures += run_case(case.name, case.src, case.expected, &dir);
     }
@@ -466,7 +550,7 @@ pub fn selftest() {
         eprintln!("{failures} selftest case(s) failed");
         std::process::exit(1);
     }
-    println!("vulcan selftest: {} cases passed", CASES.len() + 2);
+    println!("vulcan selftest: {} cases passed", CASES.len() + 3);
 }
 
 fn run_case(name: &str, src: &str, expected: &str, dir: &std::path::Path) -> usize {

@@ -7,6 +7,7 @@ pub struct Codegen {
     out: String,
     body: String,
     struct_arrs: Vec<String>,
+    nested_arrs: Vec<String>, // element C-names for nested array types ([[i64]] -> "VecI64")
     vec_emitted: Vec<String>,
     indent: usize,
     locals: Vec<HashMap<String, (Ty, String)>>, // name -> (type, C name)
@@ -269,6 +270,7 @@ fn generate_inner(program: &[Item], tests: Option<&[String]>) -> String {
         out: String::new(),
         body: String::new(),
         struct_arrs: Vec::new(),
+        nested_arrs: Vec::new(),
         vec_emitted: Vec::new(),
         indent: 1,
         locals: Vec::new(),
@@ -388,6 +390,8 @@ fn generate_inner(program: &[Item], tests: Option<&[String]>) -> String {
     }
     // which structs are used as array elements in some field -> need Vec typedefs
     let mut vec_needed: Vec<String> = Vec::new();
+    // nested-array field types ([[i64]]) -> their Vec typedefs must precede the struct block
+    let mut field_nested: Vec<String> = Vec::new();
     for item in program {
         if let Item::Struct(s) = item {
             for (_, fty) in &s.fields {
@@ -395,6 +399,26 @@ fn generate_inner(program: &[Item], tests: Option<&[String]>) -> String {
                     if let Ty::Struct(t) = &**inner {
                         if !g.is_enum(t) && !vec_needed.contains(t) {
                             vec_needed.push(t.clone());
+                        }
+                    }
+                    if matches!(**inner, Ty::Array(_)) {
+                        // nested array as a struct field: only scalar bases for now
+                        // (a [[Point]] field would need Vec_Point before Vec_Vec_Point,
+                        //  which the struct loop cannot guarantee yet)
+                        let mut base = &**inner;
+                        while let Ty::Array(next) = base { base = next; }
+                        if let Ty::Struct(t) = base {
+                            if !g.is_enum(t) {
+                                panic!("vulcan: struct fields of nested arrays of structs (`[[{t}]]`) are not supported yet — use a [[i64]]/[[f64]]/[[string]]/[[bool]] grid or a [[{t}]] flat list");
+                            }
+                        }
+                        // register every level of the chain: [[[i64]]] needs
+                        // Vec_VecI64 (from "VecI64") AND Vec_Vec_VecI64 (from "Vec_VecI64")
+                        let mut e = &**inner;
+                        while let Ty::Array(next) = e {
+                            let cname = g.vec_cname(e);
+                            if !field_nested.contains(&cname) { field_nested.push(cname); }
+                            e = next;
                         }
                     }
                 }
@@ -418,6 +442,12 @@ fn generate_inner(program: &[Item], tests: Option<&[String]>) -> String {
     }
     for item in program {
         if let Item::Struct(s) = item { visit(&s.name, &deps, &mut visiting, &mut order); }
+    }
+    // nested-array field typedefs must precede the structs that use them
+    // (sorted by depth: "VecI64" before "Vec_VecI64")
+    field_nested.sort_by_key(|n| n.len());
+    for name in &field_nested {
+        emit_vec_typedef(&mut g.out, name);
     }
     for name in &order {
         if let Some(fields) = g.structs.get(name) {
@@ -484,6 +514,15 @@ fn generate_inner(program: &[Item], tests: Option<&[String]>) -> String {
     out.push_str(&g.out);
     for name in &g.struct_arrs {
         if g.vec_emitted.contains(name) { continue; }
+        emit_vec_typedef(&mut out, name);
+    }
+    // nested-array typedefs discovered during codegen (sorted by depth, innermost first;
+    // skip any already emitted for struct fields above)
+    let mut nested: Vec<String> = g.nested_arrs.iter()
+        .filter(|n| !field_nested.contains(n))
+        .cloned().collect();
+    nested.sort_by_key(|n| n.len());
+    for name in &nested {
         emit_vec_typedef(&mut out, name);
     }
     out.push_str("\n// ---- program ----\n");
@@ -586,18 +625,26 @@ impl Codegen {
             Ty::Bool => "int8_t".into(),
             Ty::Str => "char*".into(),
             Ty::Void => "void".into(),
-            Ty::Array(inner) => match &**inner {
-                Ty::I64 => "VecI64".into(),
-                Ty::F64 => "VecF64".into(),
-                Ty::Bool => "VecBool".into(),
-                Ty::Str => "VecStr".into(),
-                Ty::Struct(name) if self.is_enum(name) => "VecI64".into(),
-                Ty::Struct(name) => format!("Vec_{name}"),
-                _ => panic!("vulcan: unsupported array element type"),
-            },
+            Ty::Array(_) => self.vec_cname(t),
             Ty::Struct(name) => {
                 if self.is_enum(name) { "int64_t".into() } else { name.clone() }
             }
+        }
+    }
+
+    // C typedef name for a (possibly nested) array type:
+    // [i64] -> VecI64, [[i64]] -> Vec_VecI64, [[Point]] -> Vec_Vec_Point
+    fn vec_cname(&self, t: &Ty) -> String {
+        let elem = self.array_elem(t);
+        match &elem {
+            Ty::I64 => "VecI64".into(),
+            Ty::F64 => "VecF64".into(),
+            Ty::Bool => "VecBool".into(),
+            Ty::Str => "VecStr".into(),
+            Ty::Struct(name) if self.is_enum(name) => "VecI64".into(),
+            Ty::Struct(name) => format!("Vec_{name}"),
+            Ty::Array(_) => format!("Vec_{}", self.vec_cname(&elem)),
+            _ => panic!("vulcan: unsupported array element type"),
         }
     }
 
@@ -752,13 +799,41 @@ impl Codegen {
                         self.line(&format!("{cvar} = {cast};"));
                     }
                     Expr::Index(recv, idx) => {
-                        let (recv_c, recv_ty) = self.gen_expr(recv);
-                        let (idx_c, idx_ty) = self.gen_expr(idx);
-                        let elem = self.array_elem(&recv_ty);
-                        let set = self.vec_helper(&recv_ty, "set");
-                        let idx_c = self.cast(&idx_c, &idx_ty, &Ty::I64);
-                        let cast = self.cast(&val_c, &val_ty, &elem);
-                        self.line(&format!("{set}(&{recv_c}, {idx_c}, {cast});"));
+                        if let Expr::Index(arr, aidx) = &**recv {
+                            // nested element assign: grid[i][j] = v
+                            // (read row into a temp, mutate, write the row back)
+                            let (arr_c, arr_ty) = self.gen_expr(arr);
+                            // arr may itself be an index (cube[0][0][1] = v) — materialize
+                            let arr_c = if matches!(**arr, Expr::Ident(_) | Expr::Field(_, _)) {
+                                arr_c
+                            } else {
+                                let tmp = self.fresh("row");
+                                self.line(&format!("{} {} = {};", self.ctype(&arr_ty), tmp, arr_c));
+                                tmp
+                            };
+                            let (aidx_c, aidx_ty) = self.gen_expr(aidx);
+                            let aidx_c = self.cast(&aidx_c, &aidx_ty, &Ty::I64);
+                            let row_ty = self.array_elem(&arr_ty);
+                            let elem = self.array_elem(&row_ty);
+                            let row_get = self.vec_helper(&arr_ty, "get");
+                            let row_set = self.vec_helper(&arr_ty, "set");
+                            let set = self.vec_helper(&row_ty, "set");
+                            let (idx_c, idx_ty) = self.gen_expr(idx);
+                            let idx_c = self.cast(&idx_c, &idx_ty, &Ty::I64);
+                            let cast = self.cast(&val_c, &val_ty, &elem);
+                            let tmp = self.fresh("row");
+                            self.line(&format!("{{ {} {} = {}(&{}, {});", self.ctype(&row_ty), tmp, row_get, arr_c, aidx_c));
+                            self.line(&format!("    {}(&{}, {}, {});", set, tmp, idx_c, cast));
+                            self.line(&format!("    {}(&{}, {}, {}); }}", row_set, arr_c, aidx_c, tmp));
+                        } else {
+                            let (recv_c, recv_ty) = self.gen_expr(recv);
+                            let (idx_c, idx_ty) = self.gen_expr(idx);
+                            let elem = self.array_elem(&recv_ty);
+                            let set = self.vec_helper(&recv_ty, "set");
+                            let idx_c = self.cast(&idx_c, &idx_ty, &Ty::I64);
+                            let cast = self.cast(&val_c, &val_ty, &elem);
+                            self.line(&format!("{set}(&{recv_c}, {idx_c}, {cast});"));
+                        }
                     }
                     Expr::Field(recv, fname) => {
                         if let Expr::Index(arr, idx) = &**recv {
@@ -813,6 +888,14 @@ impl Codegen {
                     }
                     Expr::Index(recv, idx) => {
                         let (recv_c, recv_ty) = self.gen_expr(recv);
+                        // receiver may be an rvalue (g[0][0] += x) — materialize it
+                        let recv_c = if matches!(**recv, Expr::Ident(_) | Expr::Field(_, _)) {
+                            recv_c
+                        } else {
+                            let tmp = self.fresh("row");
+                            self.line(&format!("{} {} = {};", self.ctype(&recv_ty), tmp, recv_c));
+                            tmp
+                        };
                         let (idx_c, idx_ty) = self.gen_expr(idx);
                         let elem = self.array_elem(&recv_ty);
                         let set = self.vec_helper(&recv_ty, "set");
@@ -850,6 +933,14 @@ impl Codegen {
                     }
                     Expr::Index(recv, idx) => {
                         let (recv_c, recv_ty) = self.gen_expr(recv);
+                        // receiver may be an rvalue (g[0][0]++) — materialize it
+                        let recv_c = if matches!(**recv, Expr::Ident(_) | Expr::Field(_, _)) {
+                            recv_c
+                        } else {
+                            let tmp = self.fresh("row");
+                            self.line(&format!("{} {} = {};", self.ctype(&recv_ty), tmp, recv_c));
+                            tmp
+                        };
                         let (idx_c, idx_ty) = self.gen_expr(idx);
                         let set = self.vec_helper(&recv_ty, "set");
                         let get = self.vec_helper(&recv_ty, "get");
@@ -1061,10 +1152,17 @@ impl Codegen {
         }
     }
 
-    fn vec_helper(&self, arr_ty: &Ty, kind: &str) -> String {
+    fn vec_helper(&mut self, arr_ty: &Ty, kind: &str) -> String {
         let elem = self.array_elem(arr_ty);
         let prefix = if let Ty::Struct(name) = &elem {
             if self.is_enum(name) { "vi64".to_string() } else { format!("vs_{name}") }
+        } else if matches!(elem, Ty::Array(_)) {
+            // nested array: [[i64]] -> element VecI64, helpers vs_VecI64_* on Vec_VecI64;
+            // [[Cell]] -> element Vec_Cell, helpers vs_Vec_Cell_* on Vec_Vec_Cell
+            let cname = self.vec_cname(&elem); // VecI64 / Vec_Cell / Vec_VecI64 ...
+            self.note_nested_array(&cname);
+            self.note_struct_array(&elem);
+            format!("vs_{cname}")
         } else {
             match self.norm(&elem) {
                 Ty::I64 => "vi64".to_string(),
@@ -1101,10 +1199,20 @@ impl Codegen {
     }
 
     fn note_struct_array(&mut self, elem: &Ty) {
-        if let Ty::Struct(name) = elem {
+        // unwrap nested arrays: [[Point]] still needs Vec_Point emitted
+        let mut e = elem;
+        while let Ty::Array(inner) = e { e = inner; }
+        if let Ty::Struct(name) = e {
             if !self.is_enum(name) && !self.struct_arrs.contains(name) {
                 self.struct_arrs.push(name.clone());
             }
+        }
+    }
+
+    // register a nested-array element typedef for late emission ([[i64]] -> "VecI64")
+    fn note_nested_array(&mut self, elem_cname: &str) {
+        if !self.nested_arrs.contains(&elem_cname.to_string()) {
+            self.nested_arrs.push(elem_cname.to_string());
         }
     }
 
@@ -1381,7 +1489,16 @@ impl Codegen {
                 } else {
                     let elem = self.array_elem(&recv_ty);
                     let get = self.vec_helper(&recv_ty, "get");
-                    (format!("{get}(&{recv_c}, {idx_c})"), elem)
+                    if !matches!(**recv, Expr::Ident(_) | Expr::Field(_, _)) {
+                        // receiver is an rvalue (e.g. h[1][1], make_grid(2,3)[0][1]) —
+                        // materialize it so we can take its address
+                        let tmp = self.fresh("row");
+                        let cty = self.ctype(&recv_ty);
+                        self.line(&format!("{cty} {tmp} = {recv_c};"));
+                        (format!("{get}(&{tmp}, {idx_c})"), elem)
+                    } else {
+                        (format!("{get}(&{recv_c}, {idx_c})"), elem)
+                    }
                 }
             }
             Expr::ArrayLit(items) => {
@@ -1674,6 +1791,43 @@ impl Codegen {
                     (format!("{f}({a}, {b})"), Ty::I64)
                 } else {
                     panic!("vulcan: {callee} needs two numbers");
+                }
+            }
+            "clamp" => {
+                if args.len() != 3 { panic!("vulcan: clamp(x, lo, hi) takes 3 args"); }
+                let (x, xt) = self.gen_expr(&args[0]);
+                let (lo, lot) = self.gen_expr(&args[1]);
+                let (hi, hit) = self.gen_expr(&args[2]);
+                if xt == Ty::F64 || lot == Ty::F64 || hit == Ty::F64 {
+                    let x = self.cast(&x, &xt, &Ty::F64);
+                    let lo = self.cast(&lo, &lot, &Ty::F64);
+                    let hi = self.cast(&hi, &hit, &Ty::F64);
+                    (format!("(({x} < {lo}) ? {lo} : (({x} > {hi}) ? {hi} : {x}))"), Ty::F64)
+                } else if self.norm(&xt) == Ty::I64 && self.norm(&lot) == Ty::I64 && self.norm(&hit) == Ty::I64 {
+                    (format!("(({x} < {lo}) ? {lo} : (({x} > {hi}) ? {hi} : {x}))"), Ty::I64)
+                } else {
+                    panic!("vulcan: clamp needs three numbers");
+                }
+            }
+            "lerp" => {
+                if args.len() != 3 { panic!("vulcan: lerp(a, b, t) takes 3 args"); }
+                let (a, at) = self.gen_expr(&args[0]);
+                let (b, bt) = self.gen_expr(&args[1]);
+                let (t, tt) = self.gen_expr(&args[2]);
+                let a = self.cast(&a, &at, &Ty::F64);
+                let b = self.cast(&b, &bt, &Ty::F64);
+                let t = self.cast(&t, &tt, &Ty::F64);
+                (format!("(({a}) + (({b}) - ({a})) * ({t}))"), Ty::F64)
+            }
+            "sign" => {
+                if args.len() != 1 { panic!("vulcan: sign(x) takes 1 arg"); }
+                let (x, xt) = self.gen_expr(&args[0]);
+                if xt == Ty::F64 {
+                    (format!("((({x}) > 0.0) ? 1.0 : ((({x}) < 0.0) ? -1.0 : 0.0))"), Ty::F64)
+                } else if self.norm(&xt) == Ty::I64 {
+                    (format!("((({x}) > 0) ? 1 : ((({x}) < 0) ? -1 : 0))"), Ty::I64)
+                } else {
+                    panic!("vulcan: sign needs a number");
                 }
             }
             "to_string" => {

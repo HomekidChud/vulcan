@@ -1,0 +1,298 @@
+// lib/engine.vulcan — the Vulcan Engine v0.1
+//
+// A game-engine layer in pure Vulcan, built on the existing stack:
+//   import render3d  (Vec3 / Camera / projection / draw_tri pipeline)
+//   canvas builtins  (draw_rect / draw_line / draw_text / present)
+//   nested arrays    ([[f64]] heightmap terrain — added in Vulcan 1.4)
+//
+// This is NOT a port or clone of Epic's Unreal Engine (that is a
+// multi-million-line proprietary product). This is vulcan's own engine,
+// grown system by system. See TODO.md for the roadmap.
+//
+// Conventions:
+//   - +Y is up (matches render3d)
+//   - terrain is a heightmap grid: heights[r][c], cell size = terrain_scale
+//   - fixed timestep simulation, render every frame
+//   - entities are value structs in a flat array (spawn returns the new id)
+
+import render3d
+
+// ---------------------------------------------------------------------------
+// Entities
+// ---------------------------------------------------------------------------
+
+pub struct Entity {
+    id: i64,
+    active: bool,
+    name: string,
+    kind: i64,          // game-defined: 0 player, 1 bot, 2 projectile, ...
+    pos: Vec3,
+    vel: Vec3,
+    radius: f64,
+    hp: f64,
+    max_hp: f64,
+    speed: f64,
+    alive: bool,
+}
+
+pub const ENTITY_KIND_PLAYER: i64 = 0
+pub const ENTITY_KIND_BOT: i64 = 1
+pub const ENTITY_KIND_PROJECTILE: i64 = 2
+pub const ENTITY_KIND_PICKUP: i64 = 3
+
+// ---------------------------------------------------------------------------
+// Scene / world
+// ---------------------------------------------------------------------------
+
+pub struct Scene {
+    entities: [Entity],
+    next_id: i64,
+    camera: Camera,
+    time: f64,              // simulated seconds
+    gravity: f64,           // units/s^2, negative = down
+    terrain: [[f64]],       // heightmap grid
+    terrain_scale: f64,     // world units per grid cell
+    terrain_size: f64,      // world extent (terrain.len() * scale)
+}
+
+pub fn scene_new() -> Scene {
+    let ents: [Entity] = []
+    let terr: [[f64]] = []
+    return Scene {
+        entities: ents,
+        next_id: 1,
+        camera: Camera { x: 0.0, y: 10.0, z: 0.0, yaw: 0.0, pitch: 0.0 },
+        time: 0.0,
+        gravity: -30.0,
+        terrain: terr,
+        terrain_scale: 4.0,
+        terrain_size: 0.0,
+    }
+}
+
+// Flat terrain of n x n cells at the given height.
+pub fn scene_flat_terrain(s: Scene, n: i64, height: f64) -> Scene {
+    let rows: [[f64]] = []
+    for r in 0 .. n {
+        let row: [f64] = []
+        for c in 0 .. n {
+            row.push(height)
+        }
+        rows.push(row)
+    }
+    s.terrain = rows
+    s.terrain_size = (n as f64) * s.terrain_scale
+    return s
+}
+
+// Spawn an entity (copy-in/copy-out: re-assign the scene, like the physics
+// engine — `s = scene_spawn(s, ...)`, then `scene_last_id(s)` is the new id).
+pub fn scene_spawn(s: Scene, name: string, kind: i64, pos: Vec3) -> Scene {
+    let id = s.next_id
+    s.next_id = id + 1
+    s.entities.push(Entity {
+        id: id,
+        active: true,
+        name: name,
+        kind: kind,
+        pos: pos,
+        vel: Vec3 { x: 0.0, y: 0.0, z: 0.0 },
+        radius: 0.5,
+        hp: 100.0,
+        max_hp: 100.0,
+        speed: 8.0,
+        alive: true,
+    })
+    return s
+}
+
+// The id of the most recently spawned entity.
+pub fn scene_last_id(s: Scene) -> i64 {
+    return s.next_id - 1
+}
+
+// Find an entity index by id (-1 if not found).
+pub fn scene_find(s: Scene, id: i64) -> i64 {
+    for i in 0 .. s.entities.len() {
+        if s.entities[i].id == id {
+            return i
+        }
+    }
+    return -1
+}
+
+// Deactivate entities whose hp dropped to 0 (call each frame).
+pub fn scene_reap(s: Scene) -> Scene {
+    for i in 0 .. s.entities.len() {
+        if s.entities[i].alive && s.entities[i].hp <= 0.0 {
+            s.entities[i].alive = false
+            s.entities[i].active = false
+        }
+    }
+    return s
+}
+
+pub fn scene_count_alive(s: Scene, kind: i64) -> i64 {
+    let n = 0
+    for i in 0 .. s.entities.len() {
+        if s.entities[i].active && s.entities[i].kind == kind {
+            n += 1
+        }
+    }
+    return n
+}
+
+// ---------------------------------------------------------------------------
+// Terrain
+// ---------------------------------------------------------------------------
+
+// World height at (x, z); outside the grid returns 0.
+pub fn terrain_height(s: Scene, x: f64, z: f64) -> f64 {
+    if s.terrain.len() == 0 { return 0.0 }
+    let n = s.terrain.len()
+    let c = (x / s.terrain_scale + (n as f64) / 2.0) as i64
+    let r = (z / s.terrain_scale + (n as f64) / 2.0) as i64
+    if r < 0 || r >= n { return 0.0 }
+    let row: [f64] = s.terrain[r]
+    if c < 0 || c >= row.len() { return 0.0 }
+    return row[c]
+}
+
+// ---------------------------------------------------------------------------
+// Simulation
+// ---------------------------------------------------------------------------
+
+// One fixed-timestep tick: gravity, ground collision, friction.
+pub fn scene_step(s: Scene, dt: f64) -> Scene {
+    for i in 0 .. s.entities.len() {
+        let e = s.entities[i]
+        if !e.active { continue }
+        // gravity
+        e.vel.y = e.vel.y + s.gravity * dt
+        // integrate
+        e.pos.x = e.pos.x + e.vel.x * dt
+        e.pos.y = e.pos.y + e.vel.y * dt
+        e.pos.z = e.pos.z + e.vel.z * dt
+        // ground collision: rest on the terrain, kill downward velocity
+        let ground = terrain_height(s, e.pos.x, e.pos.z) + e.radius
+        if e.pos.y < ground {
+            e.pos.y = ground
+            if e.vel.y < 0.0 { e.vel.y = 0.0 }
+            // ground friction on the horizontal plane
+            e.vel.x = e.vel.x * 0.85
+            e.vel.z = e.vel.z * 0.85
+        }
+        // write the (possibly mutated) entity back — the C backend is
+        // value-semantics, so `e` is a copy until we store it again
+        s.entities[i] = e
+    }
+    s.time = s.time + dt
+    return s
+}
+
+// ---------------------------------------------------------------------------
+// Player controller (third-person style)
+// ---------------------------------------------------------------------------
+
+pub const KEY_W: i64 = 87
+pub const KEY_A: i64 = 65
+pub const KEY_S: i64 = 83
+pub const KEY_D: i64 = 68
+pub const KEY_SPACE: i64 = 32
+pub const KEY_ARROW_LEFT: i64 = 37
+pub const KEY_ARROW_RIGHT: i64 = 39
+
+// Move an entity from WASD input relative to the camera yaw; SPACE jumps
+// when grounded. Returns the updated scene.
+pub fn player_control(s: Scene, id: i64, dt: f64) -> Scene {
+    let i = scene_find(s, id)
+    if i < 0 { return s }
+    let e = s.entities[i]
+    let fwd = cam_forward(s.camera)
+    let right = cam_right(s.camera)
+    let move_x = 0.0
+    let move_z = 0.0
+    if key_down(KEY_W) { move_x = move_x + fwd.x; move_z = move_z + fwd.z }
+    if key_down(KEY_S) { move_x = move_x - fwd.x; move_z = move_z - fwd.z }
+    if key_down(KEY_D) { move_x = move_x + right.x; move_z = move_z + right.z }
+    if key_down(KEY_A) { move_x = move_x - right.x; move_z = move_z - right.z }
+    let len = sqrt(move_x * move_x + move_z * move_z)
+    if len > 0.0 {
+        e.vel.x = move_x / len * e.speed
+        e.vel.z = move_z / len * e.speed
+    } else {
+        e.vel.x = 0.0
+        e.vel.z = 0.0
+    }
+    let ground = terrain_height(s, e.pos.x, e.pos.z) + e.radius
+    if key_down(KEY_SPACE) && e.pos.y <= ground + 0.01 {
+        e.vel.y = 12.0
+    }
+    // write the controlled entity back (value semantics on the C backend)
+    s.entities[i] = e
+    // third-person chase camera
+    let back = fwd.scaled(-6.0)
+    let up = Vec3 { x: 0.0, y: 3.0, z: 0.0 }
+    let p = e.pos
+    let target = p.add(back)
+    target = target.add(up)
+    s.camera.x = lerp(s.camera.x, target.x, clamp(dt * 8.0, 0.0, 1.0))
+    s.camera.y = lerp(s.camera.y, target.y, clamp(dt * 8.0, 0.0, 1.0))
+    s.camera.z = lerp(s.camera.z, target.z, clamp(dt * 8.0, 0.0, 1.0))
+    return s
+}
+
+// ---------------------------------------------------------------------------
+// HUD helpers (canvas)
+// ---------------------------------------------------------------------------
+
+pub fn hud_health_bar(x: i64, y: i64, w: i64, hp: f64, max_hp: f64) -> void {
+    let frac = clamp(hp / max_hp, 0.0, 1.0)
+    draw_rect(x, y, w, 3, 0x202020)
+    let filled = ((w as f64) * frac) as i64
+    if filled > 0 {
+        let color = 0x00ff00
+        if frac < 0.6 { color = 0xffff00 }
+        if frac < 0.3 { color = 0xff0000 }
+        draw_rect(x, y, filled, 3, color)
+    }
+}
+
+pub fn hud_crosshair(cx: i64, cy: i64) -> void {
+    draw_line(cx - 4, cy, cx + 4, cy, 0xffffff)
+    draw_line(cx, cy - 4, cx, cy + 4, 0xffffff)
+}
+
+// Top-down minimap: dots for entities inside `range` around the camera.
+pub fn hud_minimap(s: Scene, x: i64, y: i64, size: i64, range: f64) -> void {
+    draw_rect(x, y, size, size, 0x101820)
+    let half = (size as f64) / 2.0
+    for i in 0 .. s.entities.len() {
+        let e = s.entities[i]
+        if !e.active { continue }
+        let dx = e.pos.x - s.camera.x
+        let dz = e.pos.z - s.camera.z
+        if abs(dx) > range || abs(dz) > range { continue }
+        let mx = x + (half + dx / range * half) as i64
+        let my = y + (half + dz / range * half) as i64
+        let color = 0x00ff00
+        if e.kind == ENTITY_KIND_BOT { color = 0xff4040 }
+        if e.kind == ENTITY_KIND_PICKUP { color = 0xffd700 }
+        draw_rect(mx, my, 1, 1, color)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Fixed-timestep game loop helper
+// ---------------------------------------------------------------------------
+
+// Advance the simulation in fixed steps; returns the updated scene.
+// Use like:  s = engine_tick(s, frame_dt, 1.0 / 60.0)
+pub fn engine_tick(s: Scene, frame_dt: f64, fixed_dt: f64) -> Scene {
+    let remaining = clamp(frame_dt, 0.0, 0.1)
+    while remaining >= fixed_dt {
+        s = scene_step(s, fixed_dt)
+        remaining = remaining - fixed_dt
+    }
+    return s
+}

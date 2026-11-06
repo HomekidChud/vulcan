@@ -13,6 +13,50 @@ fn main() {
 }
 ```
 
+## Vulcan 1.4 — what's new
+
+Nested arrays, game math builtins, and the first release of the **Vulcan Engine**.
+
+- **Nested arrays** — `[[i64]]`, `[[f64]]`, `[[string]]`, `[[bool]]`, `[[Point]]`,
+  and deeper (`[[[i64]]]`), on all three backends with identical output:
+  ```vulcan
+  let grid: [[i64]] = []
+  for r in 0 .. 8 {
+      let row: [i64] = []
+      for c in 0 .. 8 { row.push(r * 8 + c) }
+      grid.push(row)
+  }
+  grid[3][5] = 99        // read, write, compound assign (grid[3][5] += 1)
+  ```
+  Struct fields support nested scalar grids (`tiles: [[i64]]`). The C backend
+  generates `Vec_VecI64`-style vector-of-vector types on demand.
+- **`clamp(x, lo, hi)`, `lerp(a, b, t)`, `sign(x)`** — game math builtins on all
+  backends (i64/f64 overloads, matching `min`/`max`).
+- **`lib/engine.vulcan` — the Vulcan Engine v0.1** — a game-engine layer in pure
+  vulcan on top of `render3d` and the canvas: entity registry (`scene_spawn` /
+  `scene_find` / `scene_reap`), heightmap terrain (`[[f64]]` grids + ground
+  collision), gravity/friction simulation, a WASD + jump player controller with
+  third-person chase camera, HUD helpers (health bar, crosshair, minimap), and
+  a fixed-timestep loop (`engine_tick`). Like the physics engine it follows
+  copy-in/copy-out (`s = scene_step(s, dt)`) so one source runs on value-semantics
+  C and reference-semantics JS/Python.
+  ```vulcan
+  import engine
+  fn main() -> void {
+      let s = scene_new()
+      s = scene_flat_terrain(s, 16, 0.0)
+      s = scene_spawn(s, "player", ENTITY_KIND_PLAYER, Vec3 { x: 0.0, y: 5.0, z: 0.0 })
+      let player = scene_last_id(s)
+      while true {
+          s = player_control(s, player, 1.0 / 60.0)
+          s = engine_tick(s, 1.0 / 60.0, 1.0 / 60.0)
+          // draw with the canvas + render3d builtins, then present()
+      }
+  }
+  ```
+- Selftest grew to 22 cases (nested arrays, clamp/lerp/sign, engine smoke test —
+  all byte-identical across backends). Roadmap now lives in `TODO.md`.
+
 ## Vulcan 1.3 — what's new
 
 The repo no longer ships pre-bundled demo games — `examples/` is now pure language and tooling
@@ -320,4 +364,7 @@ The physics engine (`import physics`) follows the copy-in/copy-out discipline th
 - `examples/impl_demo.vulcan` — struct methods (`impl`) across all three backends
 - `examples/todo.vulcan` — a CLI todo app: subcommands, file persistence, struct lists with impl methods
 - `examples/ffi_demo.vulcan` — calling C libraries (`extern "c"` + `link`)
+- `lib/engine.vulcan` — the Vulcan Engine (entities, terrain, player controller, HUD)
+- `lib/render3d.vulcan`, `lib/physics.vulcan` — 3D math and 2D rigid-body physics
+- `TODO.md` — the roadmap (compiler, engine, tooling, game)
 - `bench/` — vulcan-vs-rust benchmarks

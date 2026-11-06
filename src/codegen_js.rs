@@ -1325,6 +1325,43 @@ impl JsGen {
                     panic!("vulcan: {callee} needs two numbers");
                 }
             }
+            "clamp" => {
+                if args.len() != 3 { panic!("vulcan: clamp(x, lo, hi) takes 3 args"); }
+                let (x, xt) = self.gen_expr(&args[0]);
+                let (lo, lot) = self.gen_expr(&args[1]);
+                let (hi, hit) = self.gen_expr(&args[2]);
+                if xt == Ty::F64 || lot == Ty::F64 || hit == Ty::F64 {
+                    let x = self.cast(&x, &xt, &Ty::F64);
+                    let lo = self.cast(&lo, &lot, &Ty::F64);
+                    let hi = self.cast(&hi, &hit, &Ty::F64);
+                    (format!("(({x} < {lo}) ? {lo} : (({x} > {hi}) ? {hi} : {x}))"), Ty::F64)
+                } else if self.norm(&xt) == Ty::I64 && self.norm(&lot) == Ty::I64 && self.norm(&hit) == Ty::I64 {
+                    (format!("(({x} < {lo}) ? {lo} : (({x} > {hi}) ? {hi} : {x}))"), Ty::I64)
+                } else {
+                    panic!("vulcan: clamp needs three numbers");
+                }
+            }
+            "lerp" => {
+                if args.len() != 3 { panic!("vulcan: lerp(a, b, t) takes 3 args"); }
+                let (a, at) = self.gen_expr(&args[0]);
+                let (b, bt) = self.gen_expr(&args[1]);
+                let (t, tt) = self.gen_expr(&args[2]);
+                let a = self.cast(&a, &at, &Ty::F64);
+                let b = self.cast(&b, &bt, &Ty::F64);
+                let t = self.cast(&t, &tt, &Ty::F64);
+                (format!("(({a}) + (({b}) - ({a})) * ({t}))"), Ty::F64)
+            }
+            "sign" => {
+                if args.len() != 1 { panic!("vulcan: sign(x) takes 1 arg"); }
+                let (x, xt) = self.gen_expr(&args[0]);
+                if xt == Ty::F64 {
+                    (format!("((({x}) > 0.0) ? 1.0 : ((({x}) < 0.0) ? -1.0 : 0.0))"), Ty::F64)
+                } else if self.norm(&xt) == Ty::I64 {
+                    (format!("((({x}) > 0) ? 1 : ((({x}) < 0) ? -1 : 0))"), Ty::I64)
+                } else {
+                    panic!("vulcan: sign needs a number");
+                }
+            }
             _ => {
                 // user-defined function
                 let (ptys, ret) = self.fns.get(callee).cloned()
