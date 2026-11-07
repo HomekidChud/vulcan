@@ -177,6 +177,7 @@ The physics engine (`import physics`) follows the copy-in/copy-out discipline th
 - `examples/tour.vulcan` — a tour of every feature (runs identically on all backends)
 - `examples/impl_demo.vulcan` — struct methods (`impl`) across all three backends
 - `examples/obby.vulcan` — VULCAN OBBY, a Roblox-style obstacle course game (checkpoints, kill bricks, jump pad, moving platforms, R6 avatar)
+- `examples/frontier.vulcan` — VULCAN FRONTIER, an open-world western adventure (RDR/GTA-flavored): horse riding, three bandit camps with bosses, six-shooter, general store, day/night cycle; playable natively and as a web build
 - `examples/todo.vulcan` — a CLI todo app: subcommands, file persistence, struct lists with impl methods
 - `examples/ffi_demo.vulcan` — calling C libraries (`extern "c"` + `link`)
 - `lib/engine.vulcan` — the Vulcan Engine (entities, terrain, player controller, HUD)

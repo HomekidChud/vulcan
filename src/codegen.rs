@@ -601,10 +601,13 @@ fn generate_inner(program: &[Item], tests: Option<&[String]>) -> String {
         g.gen_fn(&main_decl);
     }
     let mut out = PRELUDE.to_string();
-    out.push_str(&g.out);
+    // Vec typedefs discovered during codegen (arrays of structs in fn
+    // signatures/bodies, nested arrays): they must precede the function
+    // prototypes, which may reference them in parameter/return types.
+    let mut late = String::new();
     for name in &g.struct_arrs {
         if g.vec_emitted.contains(name) { continue; }
-        emit_vec_typedef(&mut out, name);
+        emit_vec_typedef(&mut late, name);
     }
     // nested-array typedefs discovered during codegen (sorted by depth, innermost first;
     // skip any already emitted for struct fields above)
@@ -613,7 +616,17 @@ fn generate_inner(program: &[Item], tests: Option<&[String]>) -> String {
         .cloned().collect();
     nested.sort_by_key(|n| n.len());
     for name in &nested {
-        emit_vec_typedef(&mut out, name);
+        emit_vec_typedef(&mut late, name);
+    }
+    if late.is_empty() {
+        out.push_str(&g.out);
+    } else if let Some(pos) = g.out.find("// ---- functions ----") {
+        out.push_str(&g.out[..pos]);
+        out.push_str(&late);
+        out.push_str(&g.out[pos..]);
+    } else {
+        out.push_str(&g.out);
+        out.push_str(&late);
     }
     out.push_str("\n// ---- program ----\n");
     out.push_str(&g.body);

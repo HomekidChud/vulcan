@@ -1,0 +1,581 @@
+// examples/frontier.vulcan — VULCAN FRONTIER, an open-world western adventure.
+//
+// Third-person open world: ride the range, clear three bandit camps,
+// collect bounties, and spend cash at the general store. Full day/night
+// cycle over a desert valley with a town at its heart.
+//
+// Controls:
+//   W A S D      move (camera relative)
+//   mouse drag   aim / turn the camera
+//   SPACE        jump
+//   F (hold)     fire your six-shooter
+//   E            mount / dismount your horse (stand next to it)
+//   B            buy a full heal at the general store ($50, stand close)
+//   R            restart after game over / victory
+//
+// Playable in the IDE, the web bundle (desktop + phone), and natively.
+
+import engine
+
+// game states
+const ST_PLAYING: i64 = 0
+const ST_GAMEOVER: i64 = 1
+const ST_VICTORY: i64 = 2
+
+// keys this game uses beyond the engine defaults
+const KEY_E: i64 = 101
+const KEY_B: i64 = 98
+
+// a simple western town: blocky buildings placed around a main street
+struct Building { x: f64, z: f64, half: f64, color: i64 }
+
+// desert palette by height (RDR-ish: sand, scrub, red rock, snow caps)
+fn ground_color(h: f64, sun: f64) -> i64 {
+    if h < 0.0 { return 0x2E5F7E }
+    if h < 0.8 { return color_shade(0xD9B779, sun) }
+    if h < 2.4 { return color_shade(0xA98E5B, sun) }
+    if h < 4.2 { return color_shade(0x9A5B44, sun) }
+    return color_shade(0xE8E3D8, sun)
+}
+
+// Near-plane-clipped quad: projects the 4 corners, clips against the camera
+// near plane (Sutherland-Hodgman), then fan-triangulates. Unlike
+// engine.draw_quad this never skips quads that straddle the camera, so the
+// ground fills the screen down to the bottom edge with no sky gap.
+fn draw_quad_clipped(cam: Camera, p0: Vec3, p1: Vec3, p2: Vec3, p3: Vec3, color: i64) -> void {
+    let f = cam_forward(cam)
+    let r = cam_right(cam)
+    let u = f.cross(r)
+    // corners in camera space
+    let xs: [f64] = []
+    let ys: [f64] = []
+    let zs: [f64] = []
+    let pts: [Vec3] = [p0, p1, p2, p3]
+    let i = 0
+    while i < 4 {
+        let d = Vec3 { x: pts[i].x - cam.x, y: pts[i].y - cam.y, z: pts[i].z - cam.z }
+        xs.push(d.dot(r))
+        ys.push(d.dot(u))
+        zs.push(d.dot(f))
+        i = i + 1
+    }
+    // clip polygon against z >= 0.5
+    let cx: [f64] = []
+    let cy: [f64] = []
+    let cz: [f64] = []
+    i = 0
+    while i < 4 {
+        let j = (i + 1) % 4
+        let zi = zs[i]
+        let zj = zs[j]
+        if zi >= 0.5 {
+            cx.push(xs[i]); cy.push(ys[i]); cz.push(zi)
+        }
+        if (zi >= 0.5 && zj < 0.5) || (zi < 0.5 && zj >= 0.5) {
+            // edge crosses the near plane: interpolate to z = 0.5
+            let t = (0.5 - zi) / (zj - zi)
+            cx.push(xs[i] + (xs[j] - xs[i]) * t)
+            cy.push(ys[i] + (ys[j] - ys[i]) * t)
+            cz.push(0.5)
+        }
+        i = i + 1
+    }
+    let n = cx.len()
+    if n < 3 { return }
+    // project + fan triangulate
+    let sx: [f64] = []
+    let sy: [f64] = []
+    i = 0
+    while i < n {
+        sx.push(128.0 + cx[i] * 160.0 / cz[i])
+        sy.push(72.0 - cy[i] * 160.0 / cz[i])
+        i = i + 1
+    }
+    i = 1
+    while i < n - 1 {
+        draw_tri(sx[0], sy[0], cz[0], sx[i], sy[i], cz[i], sx[i + 1], sy[i + 1], cz[i + 1], color)
+        i = i + 1
+    }
+}
+
+// draw the heightmap terrain with distance fog
+fn draw_ground(s: Scene, sun: f64, fog_col: i64) -> void {
+    let n = s.terrain.len()
+    if n < 2 { return }
+    let cell = s.terrain_scale
+    let half = s.terrain_size / 2.0
+    // cull cells behind the camera (they'd project off-screen anyway)
+    let fw = cam_forward(s.camera)
+    for r in 0 .. n - 1 {
+        for c in 0 .. n - 1 {
+            let x0 = (c as f64) * cell - half
+            let z0 = (r as f64) * cell - half
+            let cx = x0 + cell / 2.0 - s.camera.x
+            let cz = z0 + cell / 2.0 - s.camera.z
+            if cx * fw.x + cz * fw.z < -cell * 2.0 { continue }
+            let h00 = s.terrain[r][c]
+            let h10 = s.terrain[r][c + 1]
+            let h11 = s.terrain[r + 1][c + 1]
+            let h01 = s.terrain[r + 1][c]
+            let avg = (h00 + h10 + h11 + h01) / 4.0
+            let shade = 0.75 + 0.25 * ((r + c) % 2)
+            let col = ground_color(avg, sun * shade)
+            let cx = x0 + cell / 2.0 - s.camera.x
+            let cz = z0 + cell / 2.0 - s.camera.z
+            col = fog_mix(col, sqrt(cx * cx + cz * cz), fog_col)
+            draw_quad_clipped(s.camera,
+                Vec3 { x: x0, y: h00, z: z0 },
+                Vec3 { x: x0 + cell, y: h10, z: z0 },
+                Vec3 { x: x0 + cell, y: h11, z: z0 + cell },
+                Vec3 { x: x0, y: h01, z: z0 + cell },
+                col)
+        }
+    }
+}
+
+// the town layout (kept in a flat array so we can collide + draw it)
+fn town_buildings() -> [Building] {
+    let b: [Building] = []
+    // main street runs along Z; buildings on both sides
+    b.push(Building { x: -7.0, z: 4.0, half: 2.2, color: 0x8A6D4B })
+    b.push(Building { x: -7.0, z: -4.0, half: 2.6, color: 0x9C7B55 })
+    b.push(Building { x: 7.0, z: 5.0, half: 2.4, color: 0x8F7350 })
+    b.push(Building { x: 7.0, z: -3.0, half: 2.0, color: 0xA07C57 })
+    // the general store — the big one on the north end (shop point is here)
+    b.push(Building { x: 0.0, z: 12.0, half: 3.0, color: 0xB09060 })
+    // water tower legs
+    b.push(Building { x: -12.0, z: 12.0, half: 1.0, color: 0x707070 })
+    b.push(Building { x: 12.0, z: -12.0, half: 1.2, color: 0x707070 })
+    return b
+}
+
+// keep the player out of building footprints (axis-aligned push-out)
+fn push_out_of_town(s: Scene, pi: i64, b: [Building]) -> Scene {
+    if pi < 0 { return s }
+    let e = s.entities[pi]
+    let i = 0
+    while i < b.len() {
+        let bi = b[i]
+        let dx = e.pos.x - bi.x
+        let dz = e.pos.z - bi.z
+        let min_d = bi.half + e.radius
+        if dx * dx + dz * dz < min_d * min_d {
+            // push along the shallower axis
+            if abs(dx) > abs(dz) {
+                if dx >= 0.0 { e.pos.x = bi.x + min_d } else { e.pos.x = bi.x - min_d }
+            } else {
+                if dz >= 0.0 { e.pos.z = bi.z + min_d } else { e.pos.z = bi.z - min_d }
+            }
+            s.entities[pi] = e
+        }
+        i = i + 1
+    }
+    return s
+}
+
+// deactivate dead entities (never the player) + a dust puff
+fn cull_dead(s: Scene) -> Scene {
+    let i = 0
+    while i < s.entities.len() {
+        let e = s.entities[i]
+        if e.active && e.kind != ENTITY_KIND_PLAYER && e.kind != ENTITY_KIND_PICKUP && e.hp <= 0.0 {
+            s.entities[i].active = false
+            s = scene_spawn_particle(s, e.pos, Vec3 { x: 0.0, y: 2.5, z: 0.0 }, 0.4, 0xEF5350)
+        }
+        i = i + 1
+    }
+    return s
+}
+
+// one bandit camp: a boss (bounty target) plus his crew
+fn spawn_camp(s: Scene, cx: f64, cz: f64, tag: string) -> Scene {
+    s = scene_spawn(s, "boss" + tag, ENTITY_KIND_BOT, Vec3 { x: cx, y: 8.0, z: cz })
+    let bi = scene_find(s, scene_last_id(s))
+    s.entities[bi].hp = 260.0
+    s.entities[bi].max_hp = 260.0
+    s.entities[bi].speed = 4.5
+    s.entities[bi].radius = 0.9
+    let i = 0
+    while i < 4 {
+        let ang = (i as f64) * 1.5708 + 0.4
+        let px = cx + cos(ang) * 4.0
+        let pz = cz + sin(ang) * 4.0
+        s = scene_spawn(s, "bandit", ENTITY_KIND_BOT, Vec3 { x: px, y: 8.0, z: pz })
+        let mi = scene_find(s, scene_last_id(s))
+        s.entities[mi].hp = 60.0
+        s.entities[mi].max_hp = 60.0
+        s.entities[mi].speed = 5.0
+        i = i + 1
+    }
+    // a medkit crate at every camp
+    s = scene_spawn_pickup(s, "medkit", Vec3 { x: cx + 6.0, y: 1.5, z: cz + 6.0 })
+    return s
+}
+
+// count alive entities whose name starts with `prefix`
+fn count_named(s: Scene, prefix: string) -> i64 {
+    let n = 0
+    let i = 0
+    while i < s.entities.len() {
+        let e = s.entities[i]
+        if e.active && e.name.contains(prefix) { n = n + 1 }
+        i = i + 1
+    }
+    return n
+}
+
+// squared distance on the XZ plane between an entity and a point
+fn flat_dist2(e: Entity, x: f64, z: f64) -> f64 {
+    let dx = e.pos.x - x
+    let dz = e.pos.z - z
+    return dx * dx + dz * dz
+}
+
+fn main() -> void {
+    // ---- world ----
+    let s = scene_new()
+    s = terrain_sines(s, 20, 5.0)
+    s.terrain_scale = 6.0
+    s.terrain_size = 120.0
+    s.time = 20.0   // start mid-morning (full day cycle is 120s)
+    let buildings = town_buildings()
+
+    // ---- player + horse ----
+    s = scene_spawn(s, "player", ENTITY_KIND_PLAYER, Vec3 { x: 0.0, y: 6.0, z: 0.0 })
+    let player = scene_last_id(s)
+    s.entities[scene_find(s, player)].speed = 6.0
+    // the horse waits by the town hitching post (inert entity, we move it manually)
+    s = scene_spawn_pickup(s, "horse", Vec3 { x: 5.0, y: 1.5, z: 9.0 })
+
+    // ---- three camps around the valley ----
+    s = spawn_camp(s, -38.0, 30.0, "1")
+    s = spawn_camp(s, 42.0, 12.0, "2")
+    s = spawn_camp(s, -6.0, -46.0, "3")
+
+    // ---- gear + state ----
+    let yaw = 0.0
+    let pitch = 0.25
+    let weapon = weapon_new("six-shooter", 34.0, 0.45, true, 70.0, 6, 1.6)
+    let state = ST_PLAYING
+    let cash = 0
+    let bounties = 0
+    let mounted = false
+    let muzzle_flash = 0.0
+    let msg = ""
+    let msg_timer = 0.0
+
+    // meshes
+    let m_bandit = mesh_cube(0.55, 0x8A4A3A)
+    let m_boss = mesh_cube(0.95, 0x5A1E14)
+    let m_medkit = mesh_cube(0.3, 0x66BB6A)
+    let m_horse = mesh_cube(0.9, 0x6B4A2F)
+    let m_rider = mesh_cube(0.5, 0x2F4F6F)
+    let m_store = mesh_cube(0.6, 0xFFD54F)
+
+    // ---- per-frame loop ----
+    // real elapsed time per frame, so the game runs at true speed even when
+    // the software renderer only manages 15-30 fps in the browser
+    let last_ms = ms_now()
+    while true {
+        let now = ms_now()
+        let dt = (now - last_ms) as f64 / 1000.0
+        last_ms = now
+        if dt <= 0.0 { dt = 0.001 }
+        if dt > 0.1 { dt = 0.1 }
+
+        // --- look: mouse / touch drag ---
+        let mdx = mouse_dx()
+        let mdy = mouse_dy()
+        yaw = yaw + mdx * 0.005
+        pitch = pitch - mdy * 0.004
+        if pitch > 0.9 { pitch = 0.9 }
+        if pitch < -0.2 { pitch = -0.2 }
+
+        // --- one-shot keys ---
+        if key_ready() > 0 {
+            let k = read_key()
+            if k == KEY_R && state != ST_PLAYING {
+                // full restart
+                s = scene_new()
+                s = terrain_sines(s, 20, 5.0)
+    s.terrain_scale = 6.0
+    s.terrain_size = 120.0
+                s = scene_spawn(s, "player", ENTITY_KIND_PLAYER, Vec3 { x: 0.0, y: 6.0, z: 0.0 })
+                player = scene_last_id(s)
+                s.entities[scene_find(s, player)].speed = 6.0
+                s = scene_spawn_pickup(s, "horse", Vec3 { x: 5.0, y: 1.5, z: 9.0 })
+                s = spawn_camp(s, -38.0, 30.0, "1")
+                s = spawn_camp(s, 42.0, 12.0, "2")
+                s = spawn_camp(s, -6.0, -46.0, "3")
+                weapon = weapon_new("six-shooter", 34.0, 0.45, true, 70.0, 6, 1.6)
+                state = ST_PLAYING
+                cash = 0
+                bounties = 0
+                mounted = false
+                msg = ""
+                msg_timer = 0.0
+            }
+        }
+
+        // --- playing: simulate ---
+        if state == ST_PLAYING {
+            let pi = scene_find(s, player)
+
+            // third-person camera follows the player
+            if pi >= 0 {
+                let pp = s.entities[pi].pos
+                s.camera = cam_third_person(Vec3 { x: pp.x, y: pp.y + 1.2, z: pp.z }, yaw, 7.0, pitch)
+            }
+
+            // riding: double speed while the horse is under you
+            if mounted && pi >= 0 {
+                s.entities[pi].speed = 14.0
+            } else if pi >= 0 {
+                s.entities[pi].speed = 6.0
+            }
+
+            s = player_move_cam(s, player, dt)
+            s = push_out_of_town(s, scene_find(s, player), buildings)
+
+            // clamp the player inside the valley
+            let pc = scene_find(s, player)
+            if pc >= 0 {
+                let pp = s.entities[pc]
+                let pr = sqrt(pp.pos.x * pp.pos.x + pp.pos.z * pp.pos.z)
+                if pr > 60.0 {
+                    let k2 = 60.0 / pr
+                    pp.pos.x = pp.pos.x * k2
+                    pp.pos.z = pp.pos.z * k2
+                    s.entities[pc] = pp
+                }
+            }
+
+            // --- mount / dismount (E near the horse) ---
+            if key_down(KEY_E) && pc >= 0 {
+                let pp = s.entities[pc]
+                // find the horse entity
+                let hi = -1
+                let i = 0
+                while i < s.entities.len() {
+                    if s.entities[i].active && s.entities[i].name == "horse" { hi = i }
+                    i = i + 1
+                }
+                if mounted {
+                    // dismount: drop the horse here
+                    mounted = false
+                    if hi >= 0 {
+                        let horse = s.entities[hi]
+                        horse.pos.x = pp.pos.x + 1.5
+                        horse.pos.z = pp.pos.z + 1.5
+                        horse.pos.y = pp.pos.y
+                        s.entities[hi] = horse
+                    }
+                } else if hi >= 0 {
+                    let horse = s.entities[hi]
+                    if flat_dist2(horse, pp.pos.x, pp.pos.z) < 9.0 {
+                        mounted = true
+                        msg = "RIDING — E TO DISMOUNT"
+                        msg_timer = 2.0
+                    }
+                }
+            }
+            // the horse follows the rider (drawn under the player)
+            if mounted {
+                let hi = -1
+                let i = 0
+                while i < s.entities.len() {
+                    if s.entities[i].active && s.entities[i].name == "horse" { hi = i }
+                    i = i + 1
+                }
+                if hi >= 0 && pc >= 0 {
+                    let horse = s.entities[hi]
+                    horse.pos.x = s.entities[pc].pos.x
+                    horse.pos.z = s.entities[pc].pos.z
+                    horse.pos.y = s.entities[pc].pos.y - 0.6
+                    s.entities[hi] = horse
+                }
+            }
+
+            // --- fire: hold F (six-shooter) ---
+            if key_down(KEY_F) && weapon_can_fire(weapon) {
+                weapon = weapon_fire(weapon)
+                let pi2 = scene_find(s, player)
+                if pi2 >= 0 {
+                    let pp = s.entities[pi2].pos
+                    let origin = Vec3 { x: pp.x, y: pp.y + 0.6, z: pp.z }
+                    let dir = cam_forward(s.camera)
+                    s = scene_shoot(s, player, origin, dir, 70.0, weapon.damage)
+                    s = scene_spawn_particle(s,
+                        Vec3 { x: origin.x + dir.x, y: origin.y + dir.y, z: origin.z + dir.z },
+                        Vec3 { x: dir.x * 6.0, y: dir.y * 6.0 + 1.0, z: dir.z * 6.0 }, 0.15, 0xFFD54F)
+                    muzzle_flash = 0.08
+                }
+            }
+
+            // --- shop: buy a heal at the general store ---
+            if key_down(KEY_B) && pc >= 0 {
+                let pp = s.entities[pc]
+                if flat_dist2(pp, 0.0, 12.0) < 20.0 {
+                    if cash >= 50 {
+                        if pp.hp < pp.max_hp {
+                            cash = cash - 50
+                            s.entities[pc].hp = s.entities[pc].max_hp
+                            msg = "PATCHED UP (-$50)"
+                            msg_timer = 2.0
+                        }
+                    } else {
+                        msg = "NEED $50 FOR A HEAL"
+                        msg_timer = 2.0
+                    }
+                }
+            }
+
+            // --- world ---
+            s = bot_think(s, dt)
+            s = engine_tick(s, dt, dt)
+
+            // cull the dead, pay the bounties
+            let before_boss = count_named(s, "boss")
+            let before_bandit = count_named(s, "bandit")
+            s = cull_dead(s)
+            let after_boss = count_named(s, "boss")
+            let after_bandit = count_named(s, "bandit")
+            if after_boss < before_boss {
+                bounties = bounties + 1
+                cash = cash + 150
+                msg = "BOUNTY COLLECTED (+$150)"
+                msg_timer = 2.5
+            }
+            if after_bandit < before_bandit {
+                cash = cash + (before_bandit - after_bandit) * 25
+            }
+
+            // pickups: medkits heal on touch
+            let pi3 = scene_find(s, player)
+            let i = 0
+            while i < s.entities.len() {
+                let e = s.entities[i]
+                if e.active && e.kind == ENTITY_KIND_PICKUP && e.name == "medkit" && pi3 >= 0 {
+                    if flat_dist2(e, s.entities[pi3].pos.x, s.entities[pi3].pos.z) < 2.25 {
+                        s.entities[pi3].hp = s.entities[pi3].max_hp
+                        s.entities[i].active = false
+                        s = scene_spawn_particle(s, e.pos, Vec3 { x: 0.0, y: 3.0, z: 0.0 }, 0.5, 0x66BB6A)
+                    }
+                }
+                i = i + 1
+            }
+
+            // auto reload when empty
+            if weapon.ammo == 0 && weapon.reloading == 0.0 {
+                weapon = weapon_reload(weapon)
+            }
+            weapon = weapon_tick(weapon, dt)
+
+            // player death / victory
+            if pi >= 0 {
+                if s.entities[pi].hp <= 0.0 { state = ST_GAMEOVER }
+            }
+            if count_named(s, "boss") == 0 { state = ST_VICTORY }
+        }
+
+        // --- render ---
+        let sky = sky_colors(s.time)
+        let sun = sun_light(s.time)
+        clear(sky[0])
+        draw_sky_gradient(sky[0], sky[1], 96)
+        draw_ground(s, sun, sky[1])
+
+        // town buildings
+        let i = 0
+        while i < buildings.len() {
+            let b = buildings[i]
+            let gh = terrain_height(s, b.x, b.z)
+            mesh_draw(mesh_cube(b.half, b.color), s.camera, Vec3 { x: b.x, y: gh + b.half - 0.45, z: b.z }, 0.0)
+            i = i + 1
+        }
+
+        // entities
+        let i = 0
+        while i < s.entities.len() {
+            let e = s.entities[i]
+            if !e.active { i = i + 1; continue }
+            if e.kind == ENTITY_KIND_BOT {
+                if e.name.contains("boss") {
+                    mesh_draw(m_boss, s.camera, e.pos, s.time * 1.5 + e.id as f64)
+                } else {
+                    mesh_draw(m_bandit, s.camera, e.pos, s.time * 2.0 + e.id as f64)
+                }
+            }
+            if e.kind == ENTITY_KIND_PICKUP {
+                if e.name == "medkit" {
+                    let bob = 0.3 + 0.25 * sin(s.time * 2.5 + e.id as f64)
+                    mesh_draw(m_medkit, s.camera, Vec3 { x: e.pos.x, y: e.pos.y + bob, z: e.pos.z }, 0.5)
+                }
+                if e.name == "horse" {
+                    mesh_draw(m_horse, s.camera, e.pos, yaw)
+                    if mounted == false {
+                        // a small marker over the horse so you can find it
+                        mesh_draw(m_store, s.camera, Vec3 { x: e.pos.x, y: e.pos.y + 2.2, z: e.pos.z }, 0.5)
+                    }
+                }
+            }
+            if e.kind == ENTITY_KIND_PROJECTILE {
+                mesh_draw(mesh_cube(0.12, 0xFFB300), s.camera, e.pos, 0.0)
+            }
+            i = i + 1
+        }
+
+        // the player model (third person)
+        let pi = scene_find(s, player)
+        if pi >= 0 && state != ST_GAMEOVER {
+            let pp = s.entities[pi].pos
+            if mounted {
+                mesh_draw(m_horse, s.camera, Vec3 { x: pp.x, y: pp.y - 0.6, z: pp.z }, yaw)
+                mesh_draw(m_rider, s.camera, Vec3 { x: pp.x, y: pp.y + 0.7, z: pp.z }, yaw)
+            } else {
+                mesh_draw(m_rider, s.camera, Vec3 { x: pp.x, y: pp.y - 0.4, z: pp.z }, yaw)
+            }
+        }
+
+        draw_particles(s)
+
+        // --- HUD ---
+        let pi = scene_find(s, player)
+        if pi >= 0 {
+            hud_health_bar(4, 136, 60, s.entities[pi].hp, s.entities[pi].max_hp)
+        }
+        hud_minimap(s, 200, 4, 52, 60.0)
+        hud_compass(s.camera.yaw, 84, 4, 64)
+        draw_text(4, 4, "VULCAN FRONTIER", 0xFFFFFF)
+        let bosses_left = count_named(s, "boss")
+        let obj = "BOUNTIES LEFT: " + to_string(bosses_left)
+        draw_text(4, 12, obj, 0x9FB4C7)
+        draw_text(4, 20, "CASH $" + to_string(cash) + "   BOUNTIES " + to_string(bounties) + "/3", 0xFFD54F)
+        let ammo_s = "AMMO " + to_string(weapon.ammo)
+        if weapon.reloading > 0.0 { ammo_s = "RELOADING" }
+        draw_text(196, 136, ammo_s, 0xFFD54F)
+        if mounted { draw_text(196, 128, "ON HORSEBACK", 0x66BB6A) }
+        if msg_timer > 0.0 {
+            msg_timer = msg_timer - dt
+            draw_text(100 - msg.len() * 2, 60, msg, 0xFFD54F)
+        }
+        if muzzle_flash > 0.0 {
+            muzzle_flash = muzzle_flash - dt
+            draw_rect(120.0, 68.0, 16.0, 8.0, 0xFFD54F)
+        }
+        if state == ST_GAMEOVER {
+            draw_rect(48.0, 56.0, 160.0, 32.0, 0x101820)
+            draw_text(92, 62, "YOU DIED", 0xEF5350)
+            draw_text(60, 74, "CASH $" + to_string(cash) + "  BOUNTIES " + to_string(bounties) + "/3  PRESS R", 0x9FB4C7)
+        }
+        if state == ST_VICTORY {
+            draw_rect(48.0, 52.0, 160.0, 40.0, 0x101820)
+            draw_text(88, 58, "THE VALLEY IS SAFE", 0x66BB6A)
+            draw_text(60, 70, "ALL BOUNTIES COLLECTED — $" + to_string(cash), 0xFFD54F)
+            draw_text(88, 80, "PRESS R TO RIDE AGAIN", 0x9FB4C7)
+        }
+
+        present()
+        sleep_ms(16)
+    }
+}

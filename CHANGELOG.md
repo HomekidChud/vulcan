@@ -3,6 +3,29 @@
 Per-version history, newest first. The version number lives in Cargo.toml
 (single source of truth, exposed by `vulcan --version`).
 
+## 1.11.1 — VULCAN FRONTIER + codegen fixes
+
+**`examples/frontier.vulcan` — an open-world western adventure game** in the
+spirit of RDR/GTA: ride a horse between three bandit camps, clear each boss
+for a bounty, spend cash at the general store, watch the full day/night cycle
+roll over the valley. Runs natively (`vulcan run examples/frontier.vulcan`)
+and as a single-file web build (`vulcan package examples/frontier.vulcan
+--platform web`). Rendering is a software 3D pipeline written in the game
+itself: near-plane-clipped terrain quads (Sutherland-Hodgman, so the ground
+fills the screen with no sky gap), behind-camera cell culling, distance fog
+and real frame-time simulation.
+
+- **Fixed (C backend):** `Vec_<T>` typedefs for structs used as array
+  elements in function signatures were emitted *after* the function
+  prototypes, so any function returning `[Struct]` failed to compile
+  (`unknown type name 'Vec_Building'`). Late-discovered typedefs are now
+  spliced in ahead of the prototypes block.
+- **Fixed (JS backend):** `to_string(bool)` panicked ("needs i64 or f64");
+  it now emits `"true"`/`"false"` like the C backend.
+- Frontier gameplay: six-shooter with reload, hitscan + tracer, boss/minion
+  AI via `bot_think`, medkit drops, mount/dismount horse (E), shop heal (B),
+  minimap/compass/health HUD, victory when all three bounties are collected.
+
 ## 1.11.0 — self-hosting: the compiler is written in Vulcan
 
 **`self/vulc.vulcan` (~3,100 lines) is a complete lexer, parser, type

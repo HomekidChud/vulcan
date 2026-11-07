@@ -1560,8 +1560,14 @@ impl JsGen {
             "to_string" => {
                 if args.len() != 1 { panic!("vulcan: to_string(n) takes 1 arg"); }
                 let (c, t) = self.gen_expr(&args[0]);
-                if t != Ty::I64 && t != Ty::F64 { panic!("vulcan: to_string needs i64 or f64"); }
-                (format!("String({c})"), Ty::Str)
+                if t == Ty::Bool {
+                    // match the C backend: "true"/"false"
+                    (format!("({c} ? \"true\" : \"false\")"), Ty::Str)
+                } else if t == Ty::I64 || t == Ty::F64 {
+                    (format!("String({c})"), Ty::Str)
+                } else {
+                    panic!("vulcan: to_string needs bool, i64 or f64");
+                }
             }
             "file_read" => {
                 if args.len() != 1 { panic!("vulcan: file_read(path) takes 1 arg"); }
