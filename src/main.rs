@@ -15,8 +15,12 @@ mod ide;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+// Single source of truth for the version: Cargo.toml (via CARGO_PKG_VERSION).
+// The README, usage banner and `vulcan --version` all come from here.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 fn usage() {
-    println!("Vulcan 1.9 — a small, fast language with multiple backends,
+    println!("Vulcan {VERSION} — a small, fast language with multiple backends,
 a 2D physics engine and a browser IDE
 
 USAGE (single file):
@@ -96,6 +100,10 @@ fn main() {
     if cmd == "ide" {
         let port = args.get(2).and_then(|a| a.parse().ok()).unwrap_or(7788);
         ide::serve(port);
+        return;
+    }
+    if matches!(cmd.as_str(), "version" | "--version" | "-V") {
+        println!("vulcan {VERSION}");
         return;
     }
     if matches!(cmd.as_str(), "help" | "--help" | "-h") {
