@@ -16,7 +16,7 @@ pub enum Tok {
     Amp, Pipe, Caret, Tilde, Shl, Shr, AmpEq, PipeEq, CaretEq, ShlEq, ShrEq,
     Eq, EqEq, Ne, Lt, Gt, Le, Ge, AndAnd, OrOr, Not,
     LParen, RParen, LBrace, RBrace, LBracket, RBracket, Dot, Comma, Colon, ColonColon, Semi, Arrow,
-    DotDot, DotDotEq,
+    DotDot, DotDotEq, Question,
     EOF,
 }
 
@@ -239,6 +239,7 @@ pub fn lex_diags(src: &str) -> (Vec<(Tok, usize)>, Vec<crate::diag::Diag>) {
             '(' => Tok::LParen, ')' => Tok::RParen, '{' => Tok::LBrace, '}' => Tok::RBrace,
             '[' => Tok::LBracket, ']' => Tok::RBracket,
             '.' => Tok::Dot, ',' => Tok::Comma, ':' => Tok::Colon, ';' => Tok::Semi,
+            '?' => Tok::Question,
             _ => panic!("vulcan: line {line}: unexpected character `{c}`"),
         };
         toks.push((t, line));

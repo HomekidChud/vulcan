@@ -817,6 +817,96 @@ struct Cell { x: i64, y: i64 }
         expected: "g[1][2] = 12 len: 3 row1: 4\nmutated: 99 16\nlevel: world 30 2\ncube: 4 5\ncells: 3 6\npopped len: 4 grid len: 2\n",
     },
     Case {
+        name: "payload enums / Option / Result / ?",
+        src: r#"
+enum Shape { Circle(f64), Rect(f64, f64), Point }
+
+struct P { x: i64, y: i64 }
+enum Item { Key(P), Name(string) }
+
+fn area(s: Shape) -> f64 {
+    match s {
+        when Shape.Circle(r) if r > 1.0 { return 3.14159 * r * r }
+        when Shape.Circle(r) { return 0.0 }
+        when Shape.Rect(w, h) { return w * h }
+        when Shape.Point { return 0.0 }
+    }
+    return -1.0
+}
+
+fn find_first_ge(xs: [i64], threshold: i64) -> Option<i64> {
+    for x in xs {
+        if x >= threshold {
+            return Option.Some(x)
+        }
+    }
+    return Option.None
+}
+
+fn div_checked(a: i64, b: i64) -> Result<i64, string> {
+    if b == 0 {
+        return Result.Err("division by zero")
+    }
+    return Result.Ok(a / b)
+}
+
+fn use_q(a: i64, b: i64) -> Result<i64, string> {
+    let d = div_checked(a, b)
+    let q = d?
+    return Result.Ok(q * 2)
+}
+
+fn main() -> void {
+    print("circle:", area(Shape.Circle(2.0)))
+    print("small circle:", area(Shape.Circle(0.5)))
+    print("rect:", area(Shape.Rect(3.0, 4.0)))
+    print("point:", area(Shape.Point))
+    match find_first_ge([1, 5, 9], 6) {
+        when Option.Some(v) { print("found:", v) }
+        when Option.None { print("none") }
+    }
+    match find_first_ge([1, 2], 10) {
+        when Option.Some(v) { print("found:", v) }
+        when Option.None { print("none") }
+    }
+    match div_checked(10, 2) {
+        when Result.Ok(v) { print("ok:", v) }
+        when Result.Err(m) { print("err:", m) }
+    }
+    match div_checked(1, 0) {
+        when Result.Ok(v) { print("ok:", v) }
+        when Result.Err(m) { print("err:", m) }
+    }
+    match use_q(10, 5) {
+        when Result.Ok(v) { print("q ok:", v) }
+        when Result.Err(m) { print("q err:", m) }
+    }
+    match use_q(1, 0) {
+        when Result.Ok(v) { print("q ok:", v) }
+        when Result.Err(m) { print("q err:", m) }
+    }
+    let a = Item.Key(P { x: 1, y: 2 })
+    let b = a
+    match b {
+        when Item.Key(p) {
+            p.x = 99
+            print("b key:", p.x, p.y)
+        }
+        else { print("b other") }
+    }
+    match a {
+        when Item.Key(p) { print("a key:", p.x, p.y) }
+        else { print("a other") }
+    }
+    match Item.Name("hi") {
+        when Item.Name(n) { print("name:", n) }
+        else { print("other") }
+    }
+}
+"#,
+        expected: "circle: 12.5664\nsmall circle: 0\nrect: 12\npoint: 0\nfound: 9\nnone\nok: 5\nerr: division by zero\nq ok: 4\nq err: division by zero\nb key: 99 2\na key: 1 2\nname: hi\n",
+    },
+    Case {
         name: "clamp / lerp / sign (all backends)",
         src: r#"
 fn main() -> void {
@@ -840,6 +930,8 @@ fn doc_ty(t: &crate::parser::Ty) -> String {
         U8 => "u8".into(), U16 => "u16".into(), U32 => "u32".into(),
         F32 => "f32".into(),
         Array(inner) => format!("[{}]", doc_ty(inner)),
+        Option(p) => format!("Option<{}>", doc_ty(p)),
+        Result(o, e) => format!("Result<{}, {}>", doc_ty(o), doc_ty(e)),
         Struct(n) => n.clone(),
     }
 }

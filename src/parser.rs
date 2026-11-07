@@ -7,6 +7,22 @@ pub enum Ty {
     I8, I16, I32, U8, U16, U32, F32,
     Array(Box<Ty>),
     Struct(String),
+    Option(Box<Ty>),
+    Result(Box<Ty>, Box<Ty>),
+}
+
+// source-level name of a type (used to key Option/Result instantiations)
+pub fn ty_name(t: &Ty) -> String {
+    match t {
+        Ty::I64 => "i64".into(), Ty::F64 => "f64".into(), Ty::Bool => "bool".into(), Ty::Str => "string".into(),
+        Ty::Void => "void".into(),
+        Ty::I8 => "i8".into(), Ty::I16 => "i16".into(), Ty::I32 => "i32".into(),
+        Ty::U8 => "u8".into(), Ty::U16 => "u16".into(), Ty::U32 => "u32".into(), Ty::F32 => "f32".into(),
+        Ty::Array(i) => format!("[{}]", ty_name(i)),
+        Ty::Struct(n) => n.clone(),
+        Ty::Option(i) => format!("Option<{}>", ty_name(i)),
+        Ty::Result(a, b) => format!("Result<{}, {}>", ty_name(a), ty_name(b)),
+    }
 }
 
 impl Ty {
@@ -67,7 +83,15 @@ pub struct StructDecl {
 pub struct EnumDecl {
     pub line: usize, // 1-based source line of the `enum` keyword
     pub name: String,
-    pub variants: Vec<String>,
+    pub variants: Vec<EnumVariant>,
+}
+
+// one `enum` variant; `payload` lists the types it carries
+// (`Circle(f64, f64)` has payload [F64, F64])
+#[derive(Debug, Clone)]
+pub struct EnumVariant {
+    pub name: String,
+    pub payload: Vec<Ty>,
 }
 
 #[derive(Debug, Clone)]
@@ -127,6 +151,7 @@ pub enum Expr {
     StructLit { name: String, fields: Vec<(String, Expr)> },
     Interp(Vec<IPart>),          // f"sum is {x}"
     As(Box<Expr>, Ty),           // x as f64
+    Try(Box<Expr>),              // expr? — early-return None/Err, bind the payload
 }
 
 pub struct Parser {
@@ -176,6 +201,20 @@ impl Parser {
                 "i8" => Ty::I8, "i16" => Ty::I16, "i32" => Ty::I32,
                 "u8" => Ty::U8, "u16" => Ty::U16, "u32" => Ty::U32,
                 "f32" => Ty::F32,
+                "Option" if self.peek() == &Tok::Lt => {
+                    self.next(); // <
+                    let inner = self.parse_ty();
+                    self.expect(Tok::Gt, "> to close Option<T>");
+                    Ty::Option(Box::new(inner))
+                }
+                "Result" if self.peek() == &Tok::Lt => {
+                    self.next(); // <
+                    let ok = self.parse_ty();
+                    self.expect(Tok::Comma, ", between Result<T, E> types");
+                    let err = self.parse_ty();
+                    self.expect(Tok::Gt, "> to close Result<T, E>");
+                    Ty::Result(Box::new(ok), Box::new(err))
+                }
                 _ => Ty::Struct(s),
             },
             Tok::LBracket => {
@@ -219,7 +258,15 @@ impl Parser {
             self.expect(Tok::LBrace, "{ to open enum");
             let mut variants = Vec::new();
             while !self.eat(&Tok::RBrace) {
-                variants.push(self.ident("enum variant"));
+                let vname = self.ident("enum variant");
+                let mut payload = Vec::new();
+                if self.eat(&Tok::LParen) {
+                    while !self.eat(&Tok::RParen) {
+                        payload.push(self.parse_ty());
+                        self.eat(&Tok::Comma);
+                    }
+                }
+                variants.push(EnumVariant { name: vname, payload });
                 self.eat(&Tok::Comma);
             }
             return Item::Enum(EnumDecl { line, name, variants });
@@ -670,6 +717,8 @@ impl Parser {
                 let idx = self.parse_expr();
                 self.expect(Tok::RBracket, "] after index");
                 e = Expr::Index(Box::new(e), Box::new(idx));
+            } else if self.eat(&Tok::Question) {
+                e = Expr::Try(Box::new(e));
             } else {
                 break;
             }
@@ -794,6 +843,7 @@ pub fn fold_const(e: &Expr) -> Option<ConstVal> {
         Expr::Str(v) => Some(ConstVal::Str(v.clone())),
         Expr::Bool(v) => Some(ConstVal::Bool(*v)),
         Expr::Char(v) => Some(ConstVal::Int(*v)),
+        Expr::Try(_) => None, // runtime: tag check + early return
         Expr::BinOp(l, op, r) => {
             let lv = fold_const(l)?;
             let rv = fold_const(r)?;
@@ -885,7 +935,7 @@ mod tests {
     fn parses_struct_enum_const() {
         let p = parse("struct P { x: i64, y: i64 } enum C { Red, Green, Blue } const N: i64 = 16");
         assert!(matches!(&p[0], Item::Struct(s) if s.name == "P" && s.fields.len() == 2));
-        assert!(matches!(&p[1], Item::Enum(e) if e.variants == vec!["Red", "Green", "Blue"]));
+        assert!(matches!(&p[1], Item::Enum(e) if e.variants.iter().map(|v| v.name.as_str()).collect::<Vec<_>>() == vec!["Red", "Green", "Blue"]));
         assert!(matches!(&p[2], Item::Const(c) if c.name == "N"));
     }
 

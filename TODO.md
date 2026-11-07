@@ -108,6 +108,15 @@ tests (lexer, parser, pkg) run in CI next to selftest on both gcc and clang.
       same message/exit code on C, JS and Python.
 - [x] ~~String replace/join~~ — DONE (Phase 1): literal replace (empty
       pattern = no-op) and [string].join on all backends.
+- [x] ~~Payload enums / Option / Result / `?`~~ — DONE (Phase 1): variants
+      with payloads (tagged structs), Option/Result construction +
+      matching, `?` propagation, payload bindings usable in guards;
+      semantics recorded in DECISIONS.md. Selftest case 30. Known gaps,
+      all gated with clear compile errors (pick up here):
+  - [ ] Arrays of payload enums / Option / Result (default_val gate).
+  - [ ] Printing a payload enum directly (print must match-and-print).
+  - [ ] `==` on payload enums (C has no struct equality).
+  - [ ] `?` inside expressions (currently statement position via let).
 - [ ] **Tail calls / deep recursion safety** — C backend overflows the stack
       on deep recursion; consider a stack-depth check or trampoline for
       self-tail-calls.

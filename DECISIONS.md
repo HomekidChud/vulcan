@@ -46,3 +46,32 @@ down here, and keep going.
 - C structs copy on assignment (shallow — array fields are shared, because
   C arrays are reference-like headers). JS/Py deep-copy structs but share
   arrays to match the C behavior exactly.
+
+## Payload enums, Option/Result, `?`
+
+- Enums with a payload on any variant ("payload enums") are tagged
+  structs; payload-less enums stay plain i64 tags (existing output
+  unchanged). Each variant gets its own slots (`v<variant>_<slot>`), and
+  constructors zero every slot first so eager match bindings can safely
+  read an unset slot (well-defined on all backends).
+- `Option<T>` / `Result<T, E>` are synthetic payload enums, keyed by the
+  mangled type name (`Option<i64>`, `Result<Pixel, string>`). They are
+  not user-declarable.
+- Construction: `Shape.Circle(2.0)`, `Option.Some(x)`; `Option.None` /
+  `Result.Ok` / `Result.Err` need a type hint from the let annotation
+  or the function return type (clear panic otherwise).
+- `match` on a payload enum compares `__tag` and binds payloads;
+  patterns bind identifiers (`when Shape.Circle(r) { ... }`). Payload
+  bindings are visible in guards. Bindings are emitted eagerly before
+  the tag checks (values unused for non-matching arms).
+- `expr?` propagates None/Err from an Option/Result, requires the
+  enclosing function to return the same family (Result: same error
+  type), and yields the payload value. Propagation constructs a fresh
+  None/Err of the return type.
+- Match is a statement: arms produce values only via explicit `return`
+  (as before). Payload enum values are compared only by matching;
+  direct printing and `==` on payload enums are not supported yet
+  (noted in TODO.md). Arrays of payload enums / Option / Result are
+  gated with a clear compile error (noted in TODO.md).
+- Value semantics: payload enum values copy on assignment/argument/
+  return (like structs) on all backends.

@@ -31,7 +31,21 @@ backends kept byte-identical.**
   locals, params, returns, fields, casts (`x as u8`), arrays; arithmetic
   computes in i64/f64 and wraps at storage; f32 rounds to nearest.
   Semantics recorded in DECISIONS.md.
-- Selftest grew 24 → 29 cases; every case runs on C (gcc), JS and Python
+- **Payload enums** — variants can carry payloads
+  (`enum Shape { Circle(f64), Rect(f64, f64), Point }`). Payload enums
+  are tagged structs; payload-less enums keep their existing i64-tag
+  representation and output. `match` compares the tag and binds
+  payloads (`when Shape.Circle(r) { ... }`), including in guards.
+- **`Option<T>` / `Result<T, E>`** — `Option.Some/None`,
+  `Result.Ok/Err` construction, matching, and value-semantics copying on
+  all backends. `Option.None` / `Result.Ok` / `Result.Err` require a
+  type hint (let annotation or function return type).
+- **`?` propagation** — `expr?` on an Option/Result in a function that
+  returns the same family propagates None/Err and yields the payload.
+- Not yet supported (gated with clear errors): arrays of payload enums /
+  Option / Result, printing payload enums directly, `==` on payload
+  enums. Noted in TODO.md.
+- Selftest grew 24 → 30 cases; every case runs on C (gcc), JS and Python
   and must be byte-identical.
 
 ## 1.10

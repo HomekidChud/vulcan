@@ -8,12 +8,12 @@
 // The end state (later in Phase 1) is a full semantic pass that walks the AST
 // once, annotates it with types, and hands the typed tree to all backends —
 // this module is where that pass will live.
-use crate::parser::{ConstDecl, ConstVal, Item, Ty};
+use crate::parser::{ty_name, ConstDecl, ConstVal, EnumVariant, Expr, Item, Stmt, Ty};
 use std::collections::HashMap;
 
 pub struct Tables {
     pub structs: HashMap<String, Vec<(String, Ty)>>,
-    pub enums: HashMap<String, Vec<String>>,
+    pub enums: HashMap<String, Vec<EnumVariant>>,
 }
 
 impl Tables {
@@ -27,16 +27,30 @@ impl Tables {
                 _ => {}
             }
         }
+        // register every Option<T> / Result<T, E> mentioned anywhere in the
+        // program as a synthetic payload enum (Some/None, Ok/Err)
+        let mut insts = Vec::new();
+        collect_tys(program, &mut insts);
+        for t in insts {
+            register_option_result(&mut enums, &t);
+        }
         Tables { structs, enums }
     }
 
     pub fn is_enum(&self, name: &str) -> bool { self.enums.contains_key(name) }
 
-    // Enums are represented as i64 at runtime (the variant index) in every
-    // backend; `norm` maps an enum struct type down to i64 for type checks.
+    // does this enum have any variant with a payload? (payload enums are
+    // tagged structs at runtime; payload-less enums stay plain i64 tags)
+    pub fn is_payload_enum(&self, name: &str) -> bool {
+        self.enums.get(name).map(|vs| vs.iter().any(|v| !v.payload.is_empty())).unwrap_or(false)
+    }
+
+    // Payload-less enums are represented as i64 at runtime (the variant
+    // index) in every backend; `norm` maps those down to i64 for type
+    // checks. Payload enums and Option/Result keep their identity.
     pub fn norm(&self, t: &Ty) -> Ty {
         match t {
-            Ty::Struct(n) if self.is_enum(n) => Ty::I64,
+            Ty::Struct(n) if self.is_enum(n) && !self.is_payload_enum(n) => Ty::I64,
             Ty::Array(inner) => Ty::Array(Box::new(self.norm(inner))),
             other => other.clone(),
         }
@@ -88,6 +102,125 @@ impl Tables {
             Ty::Array(inner) => (**inner).clone(),
             _ => panic!("vulcan: indexing a non-array value ({t:?})"),
         }
+    }
+}
+
+// ---- Option/Result instantiation ----
+//
+// The parser produces Ty::Option(t) / Ty::Result(t, e) wherever those types
+// are written. There are no user declarations for them, so from_program walks
+// the whole program, collects every Ty it can reach, and registers each
+// distinct Option/Result as a synthetic payload enum keyed by its source
+// name ("Option<i64>", "Result<Pixel, string>", ...).
+
+fn register_option_result(enums: &mut HashMap<String, Vec<EnumVariant>>, t: &Ty) {
+    let (name, variants) = match t {
+        Ty::Option(inner) => (ty_name(t), vec![
+            EnumVariant { name: "Some".into(), payload: vec![(**inner).clone()] },
+            EnumVariant { name: "None".into(), payload: vec![] },
+        ]),
+        Ty::Result(ok, err) => (ty_name(t), vec![
+            EnumVariant { name: "Ok".into(), payload: vec![(**ok).clone()] },
+            EnumVariant { name: "Err".into(), payload: vec![(**err).clone()] },
+        ]),
+        _ => return,
+    };
+    enums.entry(name).or_insert(variants);
+}
+
+// collect every type mentioned in the program (signatures, annotations,
+// payloads, cast targets) into `out`
+fn collect_tys(program: &[Item], out: &mut Vec<Ty>) {
+    for item in program {
+        match item {
+            Item::Fn(f) => {
+                for (_, t) in &f.params { push_ty(out, t); }
+                push_ty(out, &f.ret);
+                walk_stmts(&f.body, out);
+            }
+            Item::Extern(x) => for f in &x.fns {
+                for (_, t) in &f.params { push_ty(out, t); }
+                push_ty(out, &f.ret);
+            },
+            Item::Struct(s) => for (_, t) in &s.fields { push_ty(out, t); },
+            Item::Enum(e) => for v in &e.variants { for t in &v.payload { push_ty(out, t); } },
+            Item::Const(c) => if let Some(t) = &c.ty { push_ty(out, t); },
+            Item::Impl(i) => for f in &i.fns {
+                for (_, t) in &f.params { push_ty(out, t); }
+                push_ty(out, &f.ret);
+                walk_stmts(&f.body, out);
+            },
+            _ => {}
+        }
+    }
+}
+
+fn push_ty(out: &mut Vec<Ty>, t: &Ty) {
+    out.push(t.clone());
+    match t {
+        Ty::Array(i) => push_ty(out, i),
+        Ty::Option(i) => push_ty(out, i),
+        Ty::Result(a, b) => { push_ty(out, a); push_ty(out, b); }
+        _ => {}
+    }
+}
+
+fn walk_stmts(stmts: &[Stmt], out: &mut Vec<Ty>) {
+    for st in stmts {
+        match st {
+            Stmt::Let { ty, init, .. } => {
+                if let Some(t) = ty { push_ty(out, t); }
+                walk_expr(init, out);
+            }
+            Stmt::Assign { target, value } | Stmt::CompoundAssign { target, value, .. } => {
+                walk_expr(target, out); walk_expr(value, out);
+            }
+            Stmt::IncDec { target, .. } => walk_expr(target, out),
+            Stmt::If { cond, then, els } => {
+                walk_expr(cond, out); walk_stmts(then, out);
+                if let Some(e) = els { walk_stmts(e, out); }
+            }
+            Stmt::While { cond, body } => { walk_expr(cond, out); walk_stmts(body, out); }
+            Stmt::Loop { body } => walk_stmts(body, out),
+            Stmt::For { from, to, body, .. } => {
+                walk_expr(from, out); walk_expr(to, out); walk_stmts(body, out);
+            }
+            Stmt::ForIn { arr, body, .. } => { walk_expr(arr, out); walk_stmts(body, out); }
+            Stmt::Match { scrutinee, arms, default } => {
+                walk_expr(scrutinee, out);
+                for a in arms {
+                    for p in &a.pats { walk_expr(p, out); }
+                    if let Some(g) = &a.guard { walk_expr(g, out); }
+                    walk_stmts(&a.body, out);
+                }
+                if let Some(d) = default { walk_stmts(d, out); }
+            }
+            Stmt::Defer(b) => walk_stmts(b, out),
+            Stmt::Assert { cond, msg, .. } => {
+                walk_expr(cond, out);
+                if let Some(m) = msg { walk_expr(m, out); }
+            }
+            Stmt::Return(e) => if let Some(e) = e { walk_expr(e, out); },
+            Stmt::Break | Stmt::Continue => {}
+            Stmt::Expr(e) => walk_expr(e, out),
+        }
+    }
+}
+
+fn walk_expr(e: &Expr, out: &mut Vec<Ty>) {
+    match e {
+        Expr::BinOp(l, _, r) => { walk_expr(l, out); walk_expr(r, out); }
+        Expr::Call { args, .. } | Expr::Method { args, .. } => for a in args { walk_expr(a, out); },
+        Expr::Method { recv, .. } | Expr::Field(recv, _) => walk_expr(recv, out),
+        Expr::Index(a, b) => { walk_expr(a, out); walk_expr(b, out); }
+        Expr::ArrayLit(xs) => for x in xs { walk_expr(x, out); }
+        Expr::StructLit { fields, .. } => for (_, v) in fields { walk_expr(v, out); }
+        Expr::Interp(parts) => for p in parts {
+            if let crate::parser::IPart::E(e) = p { walk_expr(e, out); }
+        },
+        Expr::As(inner, t) => { walk_expr(inner, out); push_ty(out, t); }
+        Expr::Try(inner) => walk_expr(inner, out),
+        Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bool(_) | Expr::Char(_) | Expr::Ident(_) => {}
     }
 }
 
@@ -153,9 +286,9 @@ pub fn check_program(program: &[Item]) -> Vec<crate::diag::Diag> {
                 }
                 let mut seen: HashMap<&str, ()> = HashMap::new();
                 for v in &e.variants {
-                    if seen.insert(v, ()).is_some() {
+                    if seen.insert(v.name.as_str(), ()).is_some() {
                         diags.push(Diag::new(e.line, 1,
-                            format!("duplicate variant `{v}` in enum `{}`", e.name)));
+                            format!("duplicate variant `{}` in enum `{}`", v.name, e.name)));
                     }
                 }
             }

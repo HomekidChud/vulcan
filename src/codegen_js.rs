@@ -323,6 +323,10 @@ pub fn generate_js(program: &[Item]) -> String {
     if !g.fns.contains_key("main") {
         panic!("vulcan: program has no `fn main`");
     }
+    // Option/Result instantiations registered by the semantic tables
+    for (k, v) in &g.sema.enums {
+        g.enums.entry(k.clone()).or_insert(v.clone());
+    }
     let mut out = PRELUDE_JS.to_string();
     for item in program {
         if let Item::Const(c) = item {
@@ -339,7 +343,7 @@ pub fn generate_js(program: &[Item]) -> String {
         if let Item::Enum(e) = item {
             let _ = writeln!(out, "const {} = {{", e.name);
             for (i, v) in e.variants.iter().enumerate() {
-                let _ = writeln!(out, "    {}: {},", v, i);
+                let _ = writeln!(out, "    {}: {},", v.name, i);
             }
             let _ = writeln!(out, "}};");
         }
@@ -410,7 +414,7 @@ pub struct JsGen {
     counter: usize,
     fns: HashMap<String, (Vec<Ty>, Ty)>,
     structs: HashMap<String, Vec<(String, Ty)>>,
-    enums: HashMap<String, Vec<String>>,
+    enums: HashMap<String, Vec<crate::parser::EnumVariant>>,
     sema: crate::sema::Tables,
     consts: HashMap<String, Ty>,
     impls: HashMap<(String, String), FnDecl>,
@@ -431,6 +435,7 @@ impl JsGen {
     }
 
     fn is_enum(&self, name: &str) -> bool { self.sema.is_enum(name) }
+    fn is_payload_enum(&self, name: &str) -> bool { self.sema.is_payload_enum(name) }
 
     fn norm(&self, t: &Ty) -> Ty { self.sema.norm(t) }
 
@@ -458,7 +463,8 @@ impl JsGen {
         // Structs are copied (C struct assignment). Arrays are NOT: the C
         // backend copies the Vec header and SHARES the heap data, so array
         // assignment/argument-passing is reference-like on every backend.
-        matches!(self.norm(t), Ty::Struct(_)) // enums norm to I64
+        // payload enums norm to Struct(name); Option/Result are tagged dicts
+        matches!(self.norm(t), Ty::Struct(_)) || matches!(t, Ty::Option(_) | Ty::Result(_, _))
     }
     fn fresh_expr(e: &Expr) -> bool {
         matches!(e, Expr::StructLit { .. } | Expr::ArrayLit(_))
@@ -575,10 +581,10 @@ impl JsGen {
                     if items.is_empty() {
                         (format!("[]"), ty.clone().unwrap())
                     } else {
-                        self.gen_expr(&init)
+                        self.gen_expr_hint(&init, ty.as_ref())
                     }
                 } else {
-                    self.gen_expr(&init)
+                    self.gen_expr_hint(&init, ty.as_ref())
                 };
                 let final_ty = ty.clone().unwrap_or_else(|| init_ty.clone());
                 self.check_assignable(&init_ty, &final_ty, "let initializer");
@@ -761,6 +767,104 @@ impl JsGen {
                 let (sc, st) = self.gen_expr(scrutinee);
                 let tmp = self.fresh("m");
                 self.line(&format!("const {tmp} = {sc};"));
+                // payload enums / Option / Result: compare __tag, bind payloads
+                let pkey = match &st {
+                    Ty::Struct(n) if self.is_payload_enum(n) => Some(n.clone()),
+                    Ty::Option(_) | Ty::Result(_, _) => Some(crate::parser::ty_name(&st)),
+                    _ => None,
+                };
+                if let Some(key) = pkey {
+                    let variants = self.enums.get(&key).unwrap_or_else(|| panic!("vulcan: unknown enum `{key}`")).clone();
+                    // Bind every arm's payloads up front. Reads of unset slots
+                    // are safe: the value was constructed with all slots
+                    // defined (missing ones are undefined/unused).
+                    let mut arm_binds: Vec<Vec<(String, Ty, String)>> = Vec::new();
+                    for arm in arms.iter() {
+                        let mut binds: Vec<(String, Ty, String)> = Vec::new();
+                        for p in &arm.pats {
+                            if let Expr::Method { recv, name, args } = p {
+                                if let Expr::Ident(base) = &**recv {
+                                    if self.lookup(base).is_none() && !self.consts.contains_key(base) {
+                                        let (idx, v) = variants.iter().enumerate()
+                                            .find(|(_, v)| v.name == *name)
+                                            .unwrap_or_else(|| panic!("vulcan: enum `{key}` has no variant `{name}`"))
+                                            .clone();
+                                        if args.len() != v.payload.len() {
+                                            panic!("vulcan: {key}.{name} takes {} payload binding(s), got {}", v.payload.len(), args.len());
+                                        }
+                                        for (j, (a, pt)) in args.iter().zip(&v.payload).enumerate() {
+                                            match a {
+                                                Expr::Ident(bn) => {
+                                                    let cvar = self.fresh("mb");
+                                                    self.line(&format!("const {cvar} = {tmp}.v{idx}_{j};"));
+                                                    binds.push((bn.clone(), pt.clone(), cvar));
+                                                }
+                                                other => panic!("vulcan: payload pattern must bind identifiers, got {other:?}"),
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        arm_binds.push(binds);
+                    }
+                    for (i, arm) in arms.iter().enumerate() {
+                        let mut conds = Vec::new();
+                        for p in &arm.pats {
+                            let vname = match p {
+                                Expr::Field(recv, fname) => {
+                                    if let Expr::Ident(base) = &**recv {
+                                        if self.lookup(base).is_none() && !self.consts.contains_key(base) {
+                                            fname.clone()
+                                        } else { panic!("vulcan: match pattern type mismatch"); }
+                                    } else { panic!("vulcan: match pattern type mismatch"); }
+                                }
+                                Expr::Method { recv, name, .. } => {
+                                    if let Expr::Ident(base) = &**recv {
+                                        if self.lookup(base).is_none() && !self.consts.contains_key(base) {
+                                            name.clone()
+                                        } else { panic!("vulcan: match pattern type mismatch"); }
+                                    } else { panic!("vulcan: match pattern type mismatch"); }
+                                }
+                                _ => panic!("vulcan: match pattern type mismatch"),
+                            };
+                            let idx = variants.iter().position(|v| v.name == vname)
+                                .unwrap_or_else(|| panic!("vulcan: enum `{key}` has no variant `{vname}`"));
+                            if !variants[idx].payload.is_empty() && !matches!(p, Expr::Method { .. }) {
+                                panic!("vulcan: variant `{vname}` has a payload; bind it in the pattern");
+                            }
+                            conds.push(format!("{tmp}.__tag === {idx}"));
+                        }
+                        let mut cond = conds.join(" || ");
+                        // register this arm's bindings for guard + body
+                        self.locals.push(HashMap::new());
+                        for (bn, pt, cvar) in &arm_binds[i] {
+                            self.locals.last_mut().unwrap().insert(bn.clone(), (pt.clone(), cvar.clone()));
+                        }
+                        if let Some(g) = &arm.guard {
+                            let (gc, gt) = self.gen_expr(g);
+                            if gt != Ty::Bool { panic!("vulcan: match guard must be bool"); }
+                            cond = format!("(({cond}) && {gc})");
+                        }
+                        if i == 0 {
+                            self.line(&format!("if ({cond}) {{"));
+                        } else {
+                            self.line(&format!("}} else if ({cond}) {{"));
+                        }
+                        self.indent += 1;
+                        self.emit_stmts(&arm.body);
+                        self.indent -= 1;
+                        self.locals.pop();
+                    }
+                    if let Some(d) = default {
+                        self.line("} else {");
+                        self.indent += 1;
+                        self.emit_stmts(d);
+                        self.indent -= 1;
+                    }
+                    self.line("}");
+                    return; // payload-enum match handled
+                }
                 for (i, arm) in arms.iter().enumerate() {
                     let mut conds = Vec::new();
                     for p in &arm.pats {
@@ -824,7 +928,7 @@ impl JsGen {
                         }
                     }
                     Some(e) => {
-                        let (ec, et) = self.gen_expr(e);
+                        let (ec, et) = self.gen_expr_hint(e, Some(&self.cur_ret.clone()));
                         if self.cur_ret == Ty::Void { panic!("vulcan: cannot return a value from a void function"); }
                         let cast = self.cast(&ec, &et, &self.cur_ret);
                         let cast = self.val_sem(&cast, e, &self.cur_ret);
@@ -897,7 +1001,86 @@ impl JsGen {
         }
     }
 
-    fn gen_expr(&mut self, e: &Expr) -> (String, Ty) {
+    // Build a payload-enum value: Shape.Circle(2.0), Option.Some(x),
+    // Option.None, Result.Err("msg"). Payload enums (and Option/Result)
+    // are tagged dicts: { __tag: idx, v<variant>_<slot>: value }.
+    fn construct_enum(&mut self, base: &str, vname: &str, args: &[Expr], hint: Option<&Ty>) -> (String, Ty) {
+        let (key, ty, arg_vals): (String, Ty, Vec<(String, Ty)>) = if base == "Option" || base == "Result" {
+            let from_hint = hint.cloned().or_else(|| {
+                let r = self.cur_ret.clone();
+                match (&r, base) {
+                    (Ty::Option(_), "Option") | (Ty::Result(_, _), "Result") => Some(r),
+                    _ => None,
+                }
+            });
+            match (base, vname) {
+                ("Option", "Some") => {
+                    if args.len() != 1 { panic!("vulcan: Option.Some takes exactly 1 payload"); }
+                    let av = self.gen_expr(&args[0]);
+                    let ty = Ty::Option(Box::new(av.1.clone()));
+                    (crate::parser::ty_name(&ty), ty, vec![av])
+                }
+                ("Option", "None") => {
+                    let ty = match from_hint {
+                        Some(t @ Ty::Option(_)) => t,
+                        _ => panic!("vulcan: Option.None needs a type hint (annotate the let, or return an Option)"),
+                    };
+                    (crate::parser::ty_name(&ty), ty, vec![])
+                }
+                ("Result", "Ok") => {
+                    if args.len() != 1 { panic!("vulcan: Result.Ok takes exactly 1 payload"); }
+                    let av = self.gen_expr(&args[0]);
+                    let err_ty = match &from_hint {
+                        Some(Ty::Result(_, e)) => (**e).clone(),
+                        _ => panic!("vulcan: Result.Ok needs the error type from context (annotate the let, or return a Result)"),
+                    };
+                    let ty = Ty::Result(Box::new(av.1.clone()), Box::new(err_ty));
+                    (crate::parser::ty_name(&ty), ty, vec![av])
+                }
+                ("Result", "Err") => {
+                    if args.len() != 1 { panic!("vulcan: Result.Err takes exactly 1 payload"); }
+                    let av = self.gen_expr(&args[0]);
+                    let ok_ty = match &from_hint {
+                        Some(Ty::Result(o, _)) => (**o).clone(),
+                        _ => panic!("vulcan: Result.Err needs the ok type from context (annotate the let, or return a Result)"),
+                    };
+                    let ty = Ty::Result(Box::new(ok_ty), Box::new(av.1.clone()));
+                    (crate::parser::ty_name(&ty), ty, vec![av])
+                }
+                _ => panic!("vulcan: unknown {base} variant `{vname}`"),
+            }
+        } else {
+            let ty = Ty::Struct(base.to_string());
+            let mut arg_vals = Vec::new();
+            for a in args { arg_vals.push(self.gen_expr(a)); }
+            (base.to_string(), ty, arg_vals)
+        };
+
+        let variants = self.enums.get(&key).unwrap_or_else(|| panic!("vulcan: unknown enum `{key}`")).clone();
+        let (idx, v) = variants.iter().enumerate()
+            .find(|(_, v)| v.name == vname)
+            .unwrap_or_else(|| panic!("vulcan: enum `{key}` has no variant `{vname}`"))
+            .clone();
+        if v.payload.len() != arg_vals.len() {
+            panic!("vulcan: {key}.{vname} takes {} payload value(s), got {}", v.payload.len(), arg_vals.len());
+        }
+        if v.payload.is_empty() {
+            (format!("{{ __tag: {idx} }}"), ty)
+        } else {
+            let mut parts = vec![format!("__tag: {idx}")];
+            for (a, pt) in arg_vals.iter().zip(&v.payload) {
+                parts.push(format!("v{idx}_{}: {}", parts.len() - 1, self.cast(&a.0, &a.1, pt)));
+            }
+            (format!("{{ {} }}", parts.join(", ")), ty)
+        }
+    }
+
+    fn gen_expr(&mut self, e: &Expr) -> (String, Ty) { self.gen_expr_hint(e, None) }
+
+    // `hint` carries the expected type from the statement context (let
+    // annotation / function return type) so bare constructions like
+    // `Option.None` can pick the right instantiation
+    fn gen_expr_hint(&mut self, e: &Expr, hint: Option<&Ty>) -> (String, Ty) {
         match e {
             Expr::Int(v) => (v.to_string(), Ty::I64),
             Expr::Float(v) => (v.to_string(), Ty::F64),
@@ -958,7 +1141,41 @@ impl JsGen {
                 }
             }
             Expr::Call { callee, args } => self.gen_call(callee, args),
+            Expr::Try(inner) => {
+                // `expr?` — propagate None/Err, yield the payload
+                let (c, t) = self.gen_expr(inner);
+                let tmp = self.fresh("q");
+                let v = self.fresh("qv");
+                let ret = self.cur_ret.clone();
+                match &t {
+                    Ty::Option(p) => {
+                        if !matches!(ret, Ty::Option(_)) {
+                            panic!("vulcan: `?` on Option requires the enclosing function to return an Option");
+                        }
+                        self.line(&format!("const {tmp} = {c};"));
+                        self.line(&format!("if ({tmp}.__tag === 1) {{ return {{ __tag: 1 }}; }}"));
+                        (format!("{tmp}.v0_0"), (**p).clone())
+                    }
+                    Ty::Result(ok, err) => {
+                        if !matches!(&ret, Ty::Result(_, e2) if e2 == err) {
+                            panic!("vulcan: `?` on Result requires the enclosing function to return a Result with the same error type");
+                        }
+                        self.line(&format!("const {tmp} = {c};"));
+                        self.line(&format!("if ({tmp}.__tag === 1) {{ return {{ __tag: 1, v1_0: {tmp}.v1_0 }}; }}"));
+                        (format!("{tmp}.v0_0"), (**ok).clone())
+                    }
+                    _ => panic!("vulcan: `?` needs an Option or Result"),
+                }
+            }
             Expr::Method { recv, name, args } => {
+                // enum construction: Shape.Circle(2.0) / Option.Some(x)
+                if let Expr::Ident(base) = &**recv {
+                    if self.lookup(base).is_none() && !self.consts.contains_key(base)
+                        && (self.is_enum(base) || base == "Option" || base == "Result")
+                    {
+                        return self.construct_enum(base, name, args, hint);
+                    }
+                }
                 let (recv_c, recv_ty) = self.gen_expr(recv);
                 // user-defined impl methods take priority over same-named builtins
                 if let Ty::Struct(sname) = &recv_ty {
@@ -1127,11 +1344,20 @@ impl JsGen {
                 }
             }
             Expr::Field(recv, fname) => {
-                // enum path: Color.Red
+                // enum path: Color.Red — payload enums (and Option.None)
+                // build a value instead of yielding the tag
                 if let Expr::Ident(base) = &**recv {
                     if self.lookup(base).is_none() && !self.consts.contains_key(base) {
+                        if base == "Option" || base == "Result" {
+                            if matches!(&**fname, "None" | "Err" | "Some" | "Ok") {
+                                return self.construct_enum(base, fname, &[], hint);
+                            }
+                        }
                         if let Some(variants) = self.enums.get(base) {
-                            if variants.contains(fname) {
+                            if variants.iter().any(|v| &v.name == fname) {
+                                if self.is_payload_enum(base) {
+                                    return self.construct_enum(base, fname, &[], hint);
+                                }
                                 return (format!("{base}.{fname}"), Ty::Struct(base.clone()));
                             }
                         }
