@@ -545,7 +545,11 @@ fn main() -> void {
             hud_health_bar(4, 136, 60, s.entities[pi].hp, s.entities[pi].max_hp)
         }
         hud_minimap(s, 200, 4, 52, 60.0)
-        hud_compass(s.camera.yaw, 84, 4, 64)
+        hud_compass(s.camera.yaw, 100, 4, 64)
+        // backing panels so HUD text stays readable against bright sky/ground
+        draw_rect(0.0, 0.0, 96.0, 30.0, 0x101820)
+        draw_rect(192.0, 133.0, 62.0, 10.0, 0x101820)
+        if mounted { draw_rect(192.0, 123.0, 68.0, 10.0, 0x101820) }
         draw_text(4, 4, "VULCAN FRONTIER", 0xFFFFFF)
         let bosses_left = count_named(s, "boss")
         let obj = "BOUNTIES LEFT: " + to_string(bosses_left)
@@ -554,9 +558,10 @@ fn main() -> void {
         let ammo_s = "AMMO " + to_string(weapon.ammo)
         if weapon.reloading > 0.0 { ammo_s = "RELOADING" }
         draw_text(196, 136, ammo_s, 0xFFD54F)
-        if mounted { draw_text(196, 128, "ON HORSEBACK", 0x66BB6A) }
+        if mounted { draw_text(196, 125, "ON HORSEBACK", 0x66BB6A) }
         if msg_timer > 0.0 {
             msg_timer = msg_timer - dt
+            draw_rect(96.0 - msg.len() * 2, 57.0, msg.len() as f64 * 4.0 + 8.0, 11.0, 0x101820)
             draw_text(100 - msg.len() * 2, 60, msg, 0xFFD54F)
         }
         if muzzle_flash > 0.0 {
