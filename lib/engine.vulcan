@@ -115,9 +115,9 @@ pub fn scene_flat_terrain(s: Scene, n: i64, height: f64) -> Scene {
 pub fn scene_spawn(s: Scene, name: string, kind: i64, pos: Vec3) -> Scene {
     let id = s.next_id
     s.next_id = id + 1
-    // copy pos so the new entity never aliases the caller's Vec3
-    // (JS/Python backends share struct objects by reference)
-    let p = Vec3 { x: pos.x, y: pos.y, z: pos.z }
+    // `pos` is already a per-call copy: the compiler clones struct arguments
+    // on every backend (value semantics), so no manual defensive copy here
+    let p = pos
     s.entities.push(Entity {
         id: id,
         active: true,
@@ -145,7 +145,7 @@ pub fn scene_spawn(s: Scene, name: string, kind: i64, pos: Vec3) -> Scene {
 pub fn scene_spawn_pickup(s: Scene, name: string, pos: Vec3) -> Scene {
     let id = s.next_id
     s.next_id = id + 1
-    let p = Vec3 { x: pos.x, y: pos.y, z: pos.z }
+    let p = pos // per-call copy (value semantics)
     s.entities.push(Entity {
         id: id,
         active: true,
@@ -511,11 +511,8 @@ pub fn scene_shoot(s: Scene, shooter_id: i64, origin: Vec3, dir: Vec3, range: f6
 pub fn scene_fire_projectile(s: Scene, shooter_id: i64, origin: Vec3, dir: Vec3, speed: f64, damage: f64, lifetime: f64) -> Scene {
     let d = dir.normalized()
     let vel = d.scaled(speed)
-    // copy the origin: JS/Python backends pass structs by reference, so
-    // storing `origin` directly would alias the shooter's position object
-    // (the C backend copies by value, and all backends must agree)
-    let o = Vec3 { x: origin.x, y: origin.y, z: origin.z }
-    s = scene_spawn(s, "bullet", ENTITY_KIND_PROJECTILE, o)
+    // `origin` is a per-call copy (value semantics) — no defensive copy needed
+    s = scene_spawn(s, "bullet", ENTITY_KIND_PROJECTILE, origin)
     let i = s.entities.len() - 1
     s.entities[i].vel = vel
     s.entities[i].damage = damage
@@ -699,8 +696,8 @@ pub fn scene_spawn_particle(s: Scene, pos: Vec3, vel: Vec3, life: f64, color: i6
         // recycle the first slot
         s.particles[0] = Particle {
             active: true,
-            pos: Vec3 { x: pos.x, y: pos.y, z: pos.z },
-            vel: Vec3 { x: vel.x, y: vel.y, z: vel.z },
+            pos: pos, // struct literal fields are cloned (value semantics)
+            vel: vel,
             life: life,
             max_life: life,
             color: color,
@@ -709,8 +706,8 @@ pub fn scene_spawn_particle(s: Scene, pos: Vec3, vel: Vec3, life: f64, color: i6
     }
     s.particles.push(Particle {
         active: true,
-        pos: Vec3 { x: pos.x, y: pos.y, z: pos.z },
-        vel: Vec3 { x: vel.x, y: vel.y, z: vel.z },
+        pos: pos, // struct literal fields are cloned (value semantics)
+        vel: vel,
         life: life,
         max_life: life,
         color: color,
