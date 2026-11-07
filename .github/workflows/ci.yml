@@ -6,17 +6,34 @@ on:
   pull_request:
 
 jobs:
-  build-and-selftest:
+  build-test:
     runs-on: ubuntu-latest
-    env:
-      VULCAN_CC: gcc
     steps:
       - uses: actions/checkout@v4
       - name: Install toolchain
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc nodejs python3
-      - name: Build
+      - name: Build (release)
         run: cargo build --release
-      - name: Selftest (C + JS + Python backends)
+      - name: Rust unit tests (lexer, parser, pkg)
+        run: cargo test --release
+      - name: Selftest (gcc)
+        env:
+          VULCAN_CC: gcc
+        run: ./target/release/vulcan selftest
+
+  selftest-clang:
+    runs-on: ubuntu-latest
+    env:
+      VULCAN_CC: clang
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang nodejs python3
+      - name: Build (release)
+        run: cargo build --release
+      - name: Selftest (clang)
         run: ./target/release/vulcan selftest
