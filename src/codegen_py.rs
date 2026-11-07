@@ -62,9 +62,18 @@ def _sclone(x):
         return n
     return x
 def _b(x): return 'true' if x else 'false'
+def _vpanic(msg):
+    sys.stderr.write('vulcan: ' + msg + '\n'); sys.exit(1)
 def _idiv(a, b):
+    if b == 0: _vpanic('division by zero')
     q = _abs(a) // _abs(b)
     return q if (a < 0) == (b < 0) else -q
+def _imod(a, b):
+    if b == 0: _vpanic('modulo by zero')
+    return a - _idiv(a, b) * b
+def _fdiv(a, b):
+    if b == 0: _vpanic('division by zero')
+    return a / b
 def _get(a, i):
     if i < 0 or i >= _len(a):
         sys.stderr.write('vulcan: index out of bounds\n'); sys.exit(1)
@@ -861,8 +870,10 @@ impl PyGen {
     fn apply_op(&self, lhs: &str, bare_op: &str, val_c: &str, target_ty: &Ty) -> String {
         if bare_op == "/" && self.norm(target_ty) == Ty::I64 {
             format!("_idiv({lhs}, {val_c})")
+        } else if bare_op == "/" && self.norm(target_ty) == Ty::F64 {
+            format!("_fdiv({lhs}, {val_c})")
         } else if bare_op == "%" {
-            format!("(({lhs}) - (_idiv({lhs}, {val_c}) * ({val_c})))")
+            format!("_imod({lhs}, {val_c})")
         } else {
             format!("(({lhs}) {bare_op} ({val_c}))")
         }
@@ -923,12 +934,12 @@ impl PyGen {
                     }
                     "/" => {
                         if lt == Ty::F64 || rt == Ty::F64 {
-                            (format!("({lc} / {rc})"), Ty::F64)
+                            (format!("_fdiv({lc}, {rc})"), Ty::F64)
                         } else {
                             (format!("_idiv({lc}, {rc})"), Ty::I64)
                         }
                     }
-                    "%" => (format!("(({lc}) - (_idiv({lc}, {rc}) * ({rc})))"), Ty::I64),
+                    "%" => (format!("_imod({lc}, {rc})"), Ty::I64),
                     "==" | "!=" | "<" | "<=" | ">" | ">=" | "&&" | "||" => {
                         let pyop = match op.as_str() {
                             "&&" => "and",

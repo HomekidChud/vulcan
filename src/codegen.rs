@@ -74,6 +74,10 @@ static int8_t vstr_contains_val(VecStr* v, char* x){ for(int64_t i=0;i<v->len;i+
 static int64_t vi64_last(VecI64* v){ return v->len>0 ? v->data[v->len-1] : 0; }
 static double vf64_last(VecF64* v){ return v->len>0 ? v->data[v->len-1] : 0; }
 
+static void vrt_panic(const char* msg){ fprintf(stderr, "vulcan: %s\n", msg); exit(1); }
+static int64_t vdiv_i64(int64_t a, int64_t b){ if(b==0) vrt_panic("division by zero"); return a/b; }
+static double vdiv_f64(double a, double b){ if(b==0.0) vrt_panic("division by zero"); return a/b; }
+static int64_t vmod_i64(int64_t a, int64_t b){ if(b==0) vrt_panic("modulo by zero"); return a%b; }
 static char* vstr_concat(const char* a, const char* b){
     size_t la = strlen(a), lb = strlen(b);
     char* s = malloc(la+lb+1); memcpy(s, a, la); memcpy(s+la, b, lb+1); return s;
@@ -890,7 +894,14 @@ impl Codegen {
                     Expr::Ident(name) => {
                         let (var_ty, cvar) = self.lookup(name).unwrap_or_else(|| panic!("vulcan: assign to undeclared `{name}`"));
                         let cast = self.cast(&val_c, &val_ty, &var_ty);
-                        self.line(&format!("{cvar} {op} {cast};"));
+                        if op == "/=" || op == "%=" {
+                            let f = if op == "/=" {
+                                if self.norm(&var_ty) == Ty::F64 { "vdiv_f64" } else { "vdiv_i64" }
+                            } else { "vmod_i64" };
+                            self.line(&format!("{cvar} = {f}({cvar}, {cast});"));
+                        } else {
+                            self.line(&format!("{cvar} {op} {cast};"));
+                        }
                     }
                     Expr::Field(recv, fname) => {
                         if let Expr::Index(arr, idx) = &**recv {
@@ -904,12 +915,27 @@ impl Codegen {
                             let cast = self.cast(&val_c, &val_ty, &fty);
                             let tmp = self.fresh("tmp");
                             self.line(&format!("{{ {} {} = {}(&{}, {});", self.ctype(&elem), tmp, get, arr_c, idx_c));
-                            self.line(&format!("    {tmp}.{fname} {op} {cast};"));
+                            if op == "/=" || op == "%=" {
+                                let f = if op == "/=" {
+                                    if self.norm(&fty) == Ty::F64 { "vdiv_f64" } else { "vdiv_i64" }
+                                } else { "vmod_i64" };
+                                self.line(&format!("    {tmp}.{fname} = {f}({tmp}.{fname}, {cast});"));
+                            } else {
+                                self.line(&format!("    {tmp}.{fname} {op} {cast};"));
+                            }
                             self.line(&format!("    {set}(&{arr_c}, {idx_c}, {tmp}); }}"));
                         } else {
                             let (recv_c, recv_ty) = self.gen_expr(recv);
-                            let cast = self.cast(&val_c, &val_ty, &self.field_ty(&recv_ty, fname));
-                            self.line(&format!("{recv_c}.{fname} {op} {cast};"));
+                            let fty = self.field_ty(&recv_ty, fname);
+                            let cast = self.cast(&val_c, &val_ty, &fty);
+                            if op == "/=" || op == "%=" {
+                                let f = if op == "/=" {
+                                    if self.norm(&fty) == Ty::F64 { "vdiv_f64" } else { "vdiv_i64" }
+                                } else { "vmod_i64" };
+                                self.line(&format!("{recv_c}.{fname} = {f}({recv_c}.{fname}, {cast});"));
+                            } else {
+                                self.line(&format!("{recv_c}.{fname} {op} {cast};"));
+                            }
                         }
                     }
                     Expr::Index(recv, idx) => {
@@ -928,7 +954,14 @@ impl Codegen {
                         let get = self.vec_helper(&recv_ty, "get");
                         let idx_c = self.cast(&idx_c, &idx_ty, &Ty::I64);
                         let cast = self.cast(&val_c, &val_ty, &elem);
-                        self.line(&format!("{set}(&{recv_c}, {idx_c}, {get}(&{recv_c}, {idx_c}) {bare_op} {cast});"));
+                        if bare_op == "/" || bare_op == "%" {
+                            let f = if bare_op == "/" {
+                                if self.norm(&elem) == Ty::F64 { "vdiv_f64" } else { "vdiv_i64" }
+                            } else { "vmod_i64" };
+                            self.line(&format!("{set}(&{recv_c}, {idx_c}, {f}({get}(&{recv_c}, {idx_c}), {cast}));"));
+                        } else {
+                            self.line(&format!("{set}(&{recv_c}, {idx_c}, {get}(&{recv_c}, {idx_c}) {bare_op} {cast});"));
+                        }
                     }
                     _ => panic!("vulcan: invalid compound-assignment target"),
                 }
@@ -1253,14 +1286,17 @@ impl Codegen {
                         if lt == Ty::F64 || rt == Ty::F64 {
                             let lc = self.cast(&lc, &lt, &Ty::F64);
                             let rc = self.cast(&rc, &rt, &Ty::F64);
-                            (format!("({lc} {op} {rc})"), Ty::F64)
+                            if op == "/" { (format!("vdiv_f64({lc}, {rc})"), Ty::F64) }
+                            else { (format!("({lc} {op} {rc})"), Ty::F64) }
+                        } else if op == "/" {
+                            (format!("vdiv_i64({lc}, {rc})"), Ty::I64)
                         } else {
                             (format!("({lc} {op} {rc})"), Ty::I64)
                         }
                     }
                     "%" => {
                         if lt != Ty::I64 || rt != Ty::I64 { panic!("vulcan: % is i64 only"); }
-                        (format!("({lc} % {rc})"), Ty::I64)
+                        (format!("vmod_i64({lc}, {rc})"), Ty::I64)
                     }
                     "&" | "|" | "^" | "<<" | ">>" => {
                         if self.norm(&lt) != Ty::I64 || self.norm(&rt) != Ty::I64 {

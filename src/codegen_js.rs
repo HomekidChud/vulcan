@@ -29,7 +29,10 @@ function __g6(x) { // mimic C %.6g
     }
     return s.includes(".") ? s.replace(/0+$/, "").replace(/\.$/, "") : s;
 }
-function __idiv(a, b) { return Math.trunc(a / b); }
+function __vpanic(msg) { process.stderr.write("vulcan: " + msg + "\n"); process.exit(1); }
+function __idiv(a, b) { if (b === 0) __vpanic("division by zero"); return Math.trunc(a / b); }
+function __imod(a, b) { if (b === 0) __vpanic("modulo by zero"); return ((a) % (b)); }
+function __fdiv(a, b) { if (b === 0) __vpanic("division by zero"); return a / b; }
 function __band(a, b) { return Number(BigInt(a) & BigInt(b)); }
 function __bor(a, b) { return Number(BigInt(a) | BigInt(b)); }
 function __bxor(a, b) { return Number(BigInt(a) ^ BigInt(b)); }
@@ -796,8 +799,10 @@ impl JsGen {
     fn apply_op(&self, lhs: &str, bare_op: &str, val_c: &str, val_ty: &Ty, target_ty: &Ty) -> String {
         if bare_op == "/" && self.norm(target_ty) == Ty::I64 {
             format!("__idiv({lhs}, {val_c})")
+        } else if bare_op == "/" && self.norm(target_ty) == Ty::F64 {
+            format!("__fdiv({lhs}, {val_c})")
         } else if bare_op == "%" {
-            format!("(({lhs}) % ({val_c}))")
+            format!("__imod({lhs}, {val_c})")
         } else {
             format!("(({lhs}) {bare_op} ({val_c}))")
         }
@@ -865,12 +870,12 @@ impl JsGen {
                     }
                     "/" => {
                         if lt == Ty::F64 || rt == Ty::F64 {
-                            (format!("({lc} / {rc})"), Ty::F64)
+                            (format!("__fdiv({lc}, {rc})"), Ty::F64)
                         } else {
                             (format!("__idiv({lc}, {rc})"), Ty::I64)
                         }
                     }
-                    "%" => (format!("(({lc}) % ({rc}))"), Ty::I64),
+                    "%" => (format!("__imod({lc}, {rc})"), Ty::I64),
                     "==" | "!=" | "<" | "<=" | ">" | ">=" => (format!("({lc} {op} {rc})"), Ty::Bool),
                     "&&" | "||" => (format!("({lc} {op} {rc})"), Ty::Bool),
                     "!" => (format!("(!{rc})"), Ty::Bool),
