@@ -774,17 +774,19 @@ pub fn cam_spectator(pos: Vec3, yaw: f64, pitch: f64) -> Camera {
     return Camera { x: pos.x, y: pos.y, z: pos.z, yaw: yaw, pitch: pitch }
 }
 
-// Third-person: camera behind and above the target, looking forward
-// along `yaw`. `pitch` tilts the boom up/down.
+// Third-person: camera behind and above the target on a boom, looking AT
+// the target (positive pitch = camera higher, angled down). The camera
+// always centers on the target so it can never slide off-screen.
 pub fn cam_third_person(target: Vec3, yaw: f64, dist: f64, pitch: f64) -> Camera {
     let cp = cos(pitch)
-    return cam_first_person(
-        Vec3 {
-            x: target.x - sin(yaw) * cp * dist,
-            y: target.y + sin(pitch) * dist,
-            z: target.z - cos(yaw) * cp * dist,
-        },
-        yaw, pitch)
+    // build the Camera directly (cam_first_person adds a +1.6 eye-height
+    // offset that would push the target off-center here)
+    return Camera {
+        x: target.x - sin(yaw) * cp * dist,
+        y: target.y + sin(pitch) * dist,
+        z: target.z - cos(yaw) * cp * dist,
+        yaw: yaw, pitch: -pitch,
+    }
 }
 
 // ---------------------------------------------------------------------------

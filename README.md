@@ -13,6 +13,44 @@ fn main() {
 }
 ```
 
+## Vulcan 1.10 — what's new
+
+**VULCAN OBBY: a complete Roblox-style obstacle course, and a real
+third-person camera.**
+
+- **`examples/obby.vulcan`** — a full game built with the engine: an
+  obstacle course in the classic Roblox style, informed by published
+  Roblox references. It has:
+  - the classic **R6 "noob" avatar** with the canonical colors —
+    Bright yellow head/arms (245,205,48), Bright blue torso
+    (13,105,172), Br. yellowish green legs (164,189,71) — with walk
+    animation (arm/leg swing) and body-yaw facing
+  - **Roblox physics numbers**: WalkSpeed 16, JumpPower 50,
+    gravity 196.2 studs/s² — the jump arc covers ~8 studs, exactly
+    like the real thing
+  - obby conventions: green **checkpoints** every few obstacles,
+    red **kill bricks** (touch = OOF + respawn), a sine-tween
+    **moving platform**, a vertical **elevator**, a **jump pad**
+    that launches you to a high road, a narrow **beam walk**, and a
+    gold **finish** platform with a win screen
+  - stage/deaths/time HUD, messages (CHECKPOINT / OOF! / BOING!),
+    a restart key (R), and mobile touch controls from the standard
+    web bundle
+- **`cam_third_person` fixed** — it used to build on top of the
+  first-person camera helper (with its +1.6 eye offset), which put
+  the orbit target off-screen below the bottom of the view. It now
+  constructs the camera directly and orbits cleanly.
+- **Touch joystick key codes fixed** — the joystick sent uppercase
+  codes (87/65/83/68) while the engine expects lowercase (119/97/
+  115/100), so mobile WASD never moved. All input paths now agree.
+- **Jump buffering** in the obby player controller — a Space tap
+  between frames is buffered 0.15s and fires on the next landing,
+  so quick taps are never lost.
+
+Play it: `vulcan package examples/obby.vulcan --platform web` and
+open the emitted `index.html` (or the `--platform mobile` Gradle /
+Xcode projects for phones).
+
 ## Vulcan 1.9 — what's new
 
 **Input fixed for real, and Vulcan's own packaging — no more Electron or
@@ -522,6 +560,7 @@ The physics engine (`import physics`) follows the copy-in/copy-out discipline th
 - `examples/fib.vulcan` — classic recursion
 - `examples/tour.vulcan` — a tour of every feature (runs identically on all backends)
 - `examples/impl_demo.vulcan` — struct methods (`impl`) across all three backends
+- `examples/obby.vulcan` — VULCAN OBBY, a Roblox-style obstacle course game (checkpoints, kill bricks, jump pad, moving platforms, R6 avatar)
 - `examples/todo.vulcan` — a CLI todo app: subcommands, file persistence, struct lists with impl methods
 - `examples/ffi_demo.vulcan` — calling C libraries (`extern "c"` + `link`)
 - `lib/engine.vulcan` — the Vulcan Engine (entities, terrain, player controller, HUD)

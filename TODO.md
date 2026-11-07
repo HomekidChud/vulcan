@@ -224,7 +224,16 @@ proprietary product) — it is vulcan's own engine, built in pure vulcan.
       declarations for windowed GPU rendering, textures, and input at native
       speed. This is the real path to Fortnite-scale visuals.
 - [x] ~~Camera modes~~ — DONE in v0.3 (`cam_first_person`, `cam_orbit`,
-      `cam_spectator`); v0.4 adds `cam_third_person` (boom camera).
+      `cam_spectator`); v0.4 adds `cam_third_person` (boom camera);
+      v1.10 fixes its target offset (it built on the first-person
+      helper's +1.6 eye offset, pushing the target off-screen).
+- [x] ~~First full game on the engine: VULCAN OBBY~~ — DONE in v1.10
+      (`examples/obby.vulcan`): Roblox-style obstacle course with the
+      R6 noob avatar (canonical BrickColors), Roblox physics numbers
+      (WalkSpeed 16 / JumpPower 50 / gravity 196.2), checkpoints,
+      kill bricks, moving platform, elevator, jump pad, beam walk,
+      finish + win screen, stage/deaths/time HUD. Every mechanic
+      verified end-to-end in a real browser.
 - [x] ~~Weapon system~~ — DONE in v0.3 (`Weapon` struct: fire-rate gating,
       ammo magazine, reload timing; `weapon_tick` / `weapon_can_fire` /
       `weapon_fire` / `weapon_reload`).

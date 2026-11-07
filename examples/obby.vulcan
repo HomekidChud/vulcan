@@ -1,0 +1,407 @@
+// examples/obby.vulcan — VULCAN OBBY, a Roblox-style obstacle course.
+//
+// Built from researched Roblox conventions:
+//  - classic "noob" avatar: yellow head+arms (245,205,48), blue torso
+//    (13,105,172), green legs (164,189,71) — the original 2006 default look
+//  - Roblox physics feel: WalkSpeed 16, JumpPower 50, gravity 196.2
+//  - obby rules: one spawn, GREEN checkpoints every few obstacles,
+//    RED neon kill bricks, moving platforms, jump pads, gold finish
+//  - death = "OOF!" and respawn at the last checkpoint
+//
+// Controls: WASD move, SPACE jump, drag mouse / right side of screen to
+// orbit the camera, R restarts. Touch: joystick + JUMP button.
+
+import engine
+
+// platform kinds
+const K_SOLID: i64 = 0
+const K_KILL: i64 = 1
+const K_CHECK: i64 = 2
+const K_FINISH: i64 = 3
+const K_PAD: i64 = 4
+const K_MOVING: i64 = 5
+
+// researched Roblox BrickColor RGB values
+const C_NOOB_YELLOW: i64 = 0xF5CD30   // Bright yellow  (245,205,48)
+const C_NOOB_BLUE: i64 = 0x0D69AC     // Bright blue    (13,105,172)
+const C_NOOB_GREEN: i64 = 0xA4BD47    // Br. yellowish green (164,189,71)
+const C_BASEPLATE: i64 = 0xA3A2A5     // Medium stone grey (163,162,165)
+const C_KILL: i64 = 0xFF0000          // Really red
+const C_CHECK: i64 = 0x32D74B         // checkpoint green
+const C_GOLD: i64 = 0xFFD54F
+const C_PAD: i64 = 0x29B6F6
+
+struct Platform {
+    x: f64, y: f64, z: f64,          // base center
+    hx: f64, hy: f64, hz: f64,       // half extents
+    color: i64,
+    kind: i64,
+    stage: i64,                       // checkpoint number
+    ax: f64, ay: f64, az: f64,       // movement axis (0 = static)
+    amp: f64, speed: f64, phase: f64,
+    mesh: Mesh
+}
+
+// box mesh with per-axis half extents (R6 body parts + platforms)
+fn mesh_box(hx: f64, hy: f64, hz: f64, color: i64) -> Mesh {
+    let m = mesh_new(color)
+    m = mesh_vert(m, Vec3 { x: -hx, y: -hy, z: -hz })
+    m = mesh_vert(m, Vec3 { x:  hx, y: -hy, z: -hz })
+    m = mesh_vert(m, Vec3 { x:  hx, y: -hy, z:  hz })
+    m = mesh_vert(m, Vec3 { x: -hx, y: -hy, z:  hz })
+    m = mesh_vert(m, Vec3 { x: -hx, y:  hy, z: -hz })
+    m = mesh_vert(m, Vec3 { x:  hx, y:  hy, z: -hz })
+    m = mesh_vert(m, Vec3 { x:  hx, y:  hy, z:  hz })
+    m = mesh_vert(m, Vec3 { x: -hx, y:  hy, z:  hz })
+    m = mesh_face(m, 1, 2, 6); m = mesh_face(m, 1, 6, 5)
+    m = mesh_face(m, 0, 4, 7); m = mesh_face(m, 0, 7, 3)
+    m = mesh_face(m, 4, 5, 6); m = mesh_face(m, 4, 6, 7)
+    m = mesh_face(m, 0, 3, 2); m = mesh_face(m, 0, 2, 1)
+    m = mesh_face(m, 2, 3, 7); m = mesh_face(m, 2, 7, 6)
+    m = mesh_face(m, 0, 1, 5); m = mesh_face(m, 0, 5, 4)
+    return m
+}
+
+// platform factory: static
+fn mk_p(x: f64, y: f64, z: f64, hx: f64, hy: f64, hz: f64, color: i64, kind: i64, stage: i64) -> Platform {
+    return Platform {
+        x: x, y: y, z: z, hx: hx, hy: hy, hz: hz,
+        color: color, kind: kind, stage: stage,
+        ax: 0.0, ay: 0.0, az: 0.0, amp: 0.0, speed: 0.0, phase: 0.0,
+        mesh: mesh_box(hx, hy, hz, color)
+    }
+}
+
+// platform factory: moving (sine tween along an axis)
+fn mk_m(x: f64, y: f64, z: f64, hx: f64, hy: f64, hz: f64, color: i64, ax: f64, ay: f64, az: f64, amp: f64, speed: f64, phase: f64) -> Platform {
+    return Platform {
+        x: x, y: y, z: z, hx: hx, hy: hy, hz: hz,
+        color: color, kind: K_MOVING, stage: 0,
+        ax: ax, ay: ay, az: az, amp: amp, speed: speed, phase: phase,
+        mesh: mesh_box(hx, hy, hz, color)
+    }
+}
+
+// current world position of a platform (moving ones oscillate, sine tween)
+fn plat_pos(p: Platform, t: f64) -> Vec3 {
+    let o = sin(t * p.speed + p.phase) * p.amp
+    return Vec3 { x: p.x + p.ax * o, y: p.y + p.ay * o, z: p.z + p.az * o }
+}
+
+fn main() -> void {
+    let s = scene_new()
+    s.gravity = -196.2   // Roblox's actual gravity (studs/s^2)
+
+    s = scene_spawn(s, "player", ENTITY_KIND_PLAYER, Vec3 { x: 0.0, y: 6.0, z: 0.0 })
+    let player = scene_last_id(s)
+    let pi = scene_find(s, player)
+    s.entities[pi].speed = 16.0     // Roblox default WalkSpeed
+    s.entities[pi].radius = 0.5
+    s.entities[pi].max_hp = 100.0   // Roblox default MaxHealth
+    s.entities[pi].hp = 100.0
+
+    // ---- the course (easy start, checkpoints every few obstacles) ----
+    let plats: [Platform] = []
+    // stage 0: spawn baseplate (classic gray). Jump arc at WalkSpeed 16 +
+    // JumpPower 50 covers ~8 studs, so gaps are 4-5 with wide landings
+    // (research: first stages easy, checkpoint every few obstacles).
+    plats.push(mk_p(0.0, 0.0, 0.0, 8.0, 1.0, 8.0, C_BASEPLATE, K_SOLID, 0))
+    // easy first jumps
+    plats.push(mk_p(0.0, 1.0, 15.0, 2.5, 0.5, 3.0, C_BASEPLATE, K_SOLID, 0))
+    plats.push(mk_p(0.0, 2.0, 23.0, 2.5, 0.5, 3.0, C_BASEPLATE, K_SOLID, 0))
+    plats.push(mk_p(3.0, 3.0, 31.0, 2.5, 0.5, 3.0, C_BASEPLATE, K_SOLID, 0))
+    // CHECKPOINT 1 (green)
+    plats.push(mk_p(3.0, 3.0, 38.0, 3.0, 0.5, 3.0, C_CHECK, K_CHECK, 1))
+    // kill-brick corridor: red neon bricks flanking a narrow gray path
+    plats.push(mk_p(3.0, 3.0, 45.0, 1.0, 0.5, 1.0, C_BASEPLATE, K_SOLID, 0))
+    plats.push(mk_p(0.5, 3.0, 45.0, 1.0, 0.5, 1.0, C_KILL, K_KILL, 0))
+    plats.push(mk_p(5.5, 3.0, 45.0, 1.0, 0.5, 1.0, C_KILL, K_KILL, 0))
+    plats.push(mk_p(3.0, 3.0, 50.0, 2.0, 0.5, 2.0, C_BASEPLATE, K_SOLID, 0))
+    // moving platform (sine tween, like Roblox TweenService)
+    plats.push(mk_m(3.0, 4.0, 57.0, 2.0, 0.5, 2.0, C_NOOB_BLUE, 1.0, 0.0, 0.0, 3.5, 1.5, 0.0))
+    plats.push(mk_p(3.0, 5.0, 64.0, 2.5, 0.5, 3.0, C_BASEPLATE, K_SOLID, 0))
+    // CHECKPOINT 2
+    plats.push(mk_p(3.0, 5.0, 70.0, 3.0, 0.5, 3.0, C_CHECK, K_CHECK, 2))
+    // jump pad (blue) launches you up to the high road (hold W in the air)
+    plats.push(mk_p(3.0, 5.0, 76.0, 2.5, 0.5, 2.5, C_PAD, K_PAD, 0))
+    plats.push(mk_p(3.0, 17.0, 84.0, 3.0, 0.5, 3.0, C_BASEPLATE, K_SOLID, 0))
+    // narrow beam walk
+    plats.push(mk_p(3.0, 17.0, 94.0, 1.0, 0.5, 5.0, C_BASEPLATE, K_SOLID, 0))
+    // kill corridor up high
+    plats.push(mk_p(3.0, 17.0, 102.0, 1.25, 0.5, 1.25, C_BASEPLATE, K_SOLID, 0))
+    plats.push(mk_p(0.9, 17.0, 102.0, 1.25, 0.5, 1.25, C_KILL, K_KILL, 0))
+    plats.push(mk_p(5.1, 17.0, 102.0, 1.25, 0.5, 1.25, C_KILL, K_KILL, 0))
+    // CHECKPOINT 3
+    plats.push(mk_p(3.0, 17.0, 107.0, 3.0, 0.5, 3.0, C_CHECK, K_CHECK, 3))
+    // vertical elevator platform
+    plats.push(mk_m(3.0, 19.0, 114.0, 2.0, 0.5, 2.0, C_NOOB_BLUE, 0.0, 1.0, 0.0, 2.5, 1.2, 0.0))
+    plats.push(mk_p(3.0, 22.0, 120.0, 2.5, 0.5, 3.0, C_BASEPLATE, K_SOLID, 0))
+    // final hops
+    plats.push(mk_p(1.0, 23.0, 127.0, 2.0, 0.5, 2.0, C_BASEPLATE, K_SOLID, 0))
+    plats.push(mk_p(-1.0, 24.0, 133.0, 2.0, 0.5, 2.0, C_BASEPLATE, K_SOLID, 0))
+    // FINISH (gold)
+    plats.push(mk_p(-1.0, 25.0, 140.0, 3.0, 0.5, 3.0, C_GOLD, K_FINISH, 0))
+
+    // ---- avatar part meshes (classic R6 noob) ----
+    let m_head = mesh_box(0.5, 0.5, 0.5, C_NOOB_YELLOW)
+    let m_torso = mesh_box(1.0, 1.0, 0.5, C_NOOB_BLUE)
+    let m_arm = mesh_box(0.45, 1.0, 0.45, C_NOOB_YELLOW)
+    let m_leg = mesh_box(0.45, 1.0, 0.45, C_NOOB_GREEN)
+
+    // ---- game state ----
+    let yaw = 0.0
+    let pitch = 0.25
+    let stage = 0            // checkpoints reached
+    let deaths = 0
+    let won = false
+    let start_t = s.time
+    let msg = ""
+    let msg_t = 0.0
+    let body_yaw = 0.0
+    let jump_buf = 0.0
+    let t0 = s.time
+
+    while true {
+        let dt = 1.0 / 60.0
+        s.time = s.time + dt   // custom physics: advance the clock ourselves
+
+        // camera orbit: drag to look
+        yaw = yaw + mouse_dx() * 0.005
+        pitch = pitch + mouse_dy() * 0.004
+        if pitch < -0.2 { pitch = -0.2 }
+        if pitch > 1.1 { pitch = 1.1 }
+
+        // one-shot keys: R restart, SPACE taps buffer a jump (so a quick
+        // tap between frames is never lost)
+        if key_ready() > 0 {
+            let k = read_key()
+            if k == KEY_SPACE { jump_buf = 0.15 }
+            if k == KEY_R {
+                let i = scene_find(s, player)
+                s.entities[i].pos = Vec3 { x: 0.0, y: 6.0, z: 0.0 }
+                s.entities[i].vel = Vec3 { x: 0.0, y: 0.0, z: 0.0 }
+                stage = 0
+                deaths = 0
+                won = false
+                start_t = s.time
+                t0 = s.time
+            }
+        }
+
+        let i = scene_find(s, player)
+        if i < 0 { present(); sleep_ms(16); continue }
+        let e = s.entities[i]
+
+        if !won {
+            // --- movement: camera-relative WASD at WalkSpeed 16 ---
+            let cam = cam_third_person(e.pos, yaw, 9.0, pitch)
+            let fwd = cam_forward(cam)
+            let right = cam_right(cam)
+            let mx = 0.0
+            let mz = 0.0
+            if key_down(KEY_W) { mx = mx + fwd.x; mz = mz + fwd.z }
+            if key_down(KEY_S) { mx = mx - fwd.x; mz = mz - fwd.z }
+            if key_down(KEY_D) { mx = mx + right.x; mz = mz + right.z }
+            if key_down(KEY_A) { mx = mx - right.x; mz = mz - right.z }
+            let len = sqrt(mx * mx + mz * mz)
+            if len > 0.0 {
+                e.vel.x = mx / len * 16.0
+                e.vel.z = mz / len * 16.0
+            } else {
+                e.vel.x = 0.0
+                e.vel.z = 0.0
+            }
+            // face the direction we're moving
+            if len > 0.0 {
+                let target = atan2(e.vel.x, e.vel.z)
+                let d = target - body_yaw
+                while d > 3.14159 { d = d - 6.28318 }
+                while d < -3.14159 { d = d + 6.28318 }
+                body_yaw = body_yaw + d * 0.25
+            }
+
+            // --- jump (Roblox JumpPower 50) ---
+            // inline ground check: highest platform top at/below our feet
+            let gbest = -1000.0
+            let gi = 0
+            let gt0 = s.time - t0
+            while gi < plats.len() {
+                let gp = plats[gi]
+                let gpp = plat_pos(gp, gt0)
+                if gp.kind != K_KILL && abs(e.pos.x - gpp.x) < gp.hx + 0.5 && abs(e.pos.z - gpp.z) < gp.hz + 0.5 {
+                    let gtop = gpp.y + gp.hy
+                    if gtop <= e.pos.y - 2.4 && gtop > gbest { gbest = gtop }
+                }
+                gi = gi + 1
+            }
+            let on_ground = false
+            let stand_plat = -1
+            if key_down(KEY_SPACE) { jump_buf = 0.15 }
+            if jump_buf > 0.0 {
+                jump_buf = jump_buf - dt
+                if e.pos.y <= gbest + 2.51 {
+                    e.vel.y = 50.0
+                    jump_buf = 0.0
+                }
+            }
+            // integrate gravity (196.2)
+            e.vel.y = e.vel.y + s.gravity * dt
+            let prev_y = e.pos.y
+            e.pos.x = e.pos.x + e.vel.x * dt
+            e.pos.y = e.pos.y + e.vel.y * dt
+            e.pos.z = e.pos.z + e.vel.z * dt
+
+            // --- collide with platforms ---
+            let gt = s.time - t0
+            let idx = 0
+            let died = false
+            while idx < plats.len() {
+                let p = plats[idx]
+                let pp = plat_pos(p, gt)
+                let inx = abs(e.pos.x - pp.x) < p.hx + 0.5
+                let inz = abs(e.pos.z - pp.z) < p.hz + 0.5
+                if inx && inz {
+                    let top = pp.y + p.hy
+                    if p.kind == K_KILL && abs(e.pos.y - pp.y) < p.hy + 2.9 {
+                        died = true
+                    }
+                    if p.kind != K_KILL && e.vel.y <= 0.0 && prev_y - 2.5 >= top - 0.6 && e.pos.y - 2.5 <= top {
+                        e.pos.y = top + 2.5
+                        if p.kind == K_PAD {
+                            e.vel.y = 80.0
+                            msg = "BOING!"
+                            msg_t = 0.8
+                        } else {
+                            e.vel.y = 0.0
+                            on_ground = true
+                            stand_plat = idx
+                        }
+                        if p.kind == K_CHECK && p.stage > stage {
+                            stage = p.stage
+                            msg = "CHECKPOINT " + to_string(stage)
+                            msg_t = 1.5
+                            s = scene_spawn_particle(s, pp, Vec3 { x: 0.0, y: 4.0, z: 0.0 }, 0.6, C_CHECK)
+                        }
+                        if p.kind == K_FINISH {
+                            won = true
+                            let ci = 0
+                            while ci < 24 {
+                                s = scene_spawn_particle(s,
+                                    Vec3 { x: pp.x - 2.0 + rand() * 0.004, y: pp.y + 1.0, z: pp.z - 2.0 + rand() * 0.004 },
+                                    Vec3 { x: (rand() * 0.008 - 4.0), y: 8.0 + rand() * 0.008, z: (rand() * 0.008 - 4.0) },
+                                    1.6, C_GOLD)
+                                ci = ci + 1
+                            }
+                        }
+                    }
+                }
+                idx = idx + 1
+            }
+
+            // ride moving platforms
+            if stand_plat >= 0 {
+                let p = plats[stand_plat]
+                if p.kind == K_MOVING {
+                    let o_now = sin(gt * p.speed + p.phase) * p.amp
+                    let o_prev = sin((gt - dt) * p.speed + p.phase) * p.amp
+                    e.pos.x = e.pos.x + p.ax * (o_now - o_prev)
+                    e.pos.y = e.pos.y + p.ay * (o_now - o_prev)
+                    e.pos.z = e.pos.z + p.az * (o_now - o_prev)
+                }
+            }
+
+            // fell off the world / killed
+            if e.pos.y < -25.0 { died = true }
+            if died {
+                deaths = deaths + 1
+                msg = "OOF!"
+                msg_t = 1.0
+                s = scene_spawn_particle(s, e.pos, Vec3 { x: 0.0, y: 3.0, z: 0.0 }, 0.5, C_KILL)
+                // respawn at the last checkpoint
+                if stage == 0 {
+                    e.pos = Vec3 { x: 0.0, y: 6.0, z: 0.0 }
+                }
+                if stage == 1 {
+                    e.pos = Vec3 { x: 3.0, y: 6.0, z: 38.0 }
+                }
+                if stage == 2 {
+                    e.pos = Vec3 { x: 3.0, y: 8.0, z: 70.0 }
+                }
+                if stage == 3 {
+                    e.pos = Vec3 { x: 3.0, y: 20.0, z: 107.0 }
+                }
+                e.vel = Vec3 { x: 0.0, y: 0.0, z: 0.0 }
+            }
+
+            s.entities[i] = e
+        }
+
+        // ---- render ----
+        let pe = s.entities[scene_find(s, player)]
+        s.camera = cam_third_person(pe.pos, yaw, 9.0, pitch)
+        clear(0x8FC7EE)
+        draw_sky_gradient(0x6FB2E4, 0xE8F6FF, 110)
+        let gt2 = s.time - t0
+        let idx2 = 0
+        while idx2 < plats.len() {
+            let p = plats[idx2]
+            let pp = plat_pos(p, gt2)
+            let m = p.mesh
+            if p.kind == K_KILL {
+                // neon pulse
+                let pulse = 0.75 + 0.25 * sin(gt2 * 6.0)
+                m.color = color_shade(C_KILL, pulse)
+            }
+            if p.kind == K_PAD {
+                let pulse = 0.8 + 0.2 * sin(gt2 * 8.0)
+                m.color = color_shade(C_PAD, pulse)
+            }
+            mesh_draw(m, s.camera, pp, 0.0)
+            idx2 = idx2 + 1
+        }
+
+        // ---- avatar (classic R6 noob, rotated to body_yaw) ----
+        let cy = cos(body_yaw)
+        let sy = sin(body_yaw)
+        let moving = abs(pe.vel.x) + abs(pe.vel.z) > 0.5
+        let swing = 0.0
+        if moving { swing = sin(s.time * 12.0) * 0.45 }
+        let pxv = pe.pos.x
+        let pyv = pe.pos.y
+        let pzv = pe.pos.z
+        // torso (center), head above, arms at sides, legs below (with walk swing)
+        mesh_draw(m_torso, s.camera, Vec3 { x: pxv, y: pyv, z: pzv }, body_yaw)
+        mesh_draw(m_head, s.camera, Vec3 { x: pxv, y: pyv + 1.5, z: pzv }, body_yaw)
+        mesh_draw(m_arm, s.camera, Vec3 { x: pxv - 1.45 * cy, y: pyv + 0.1, z: pzv + 1.45 * sy }, body_yaw)
+        mesh_draw(m_arm, s.camera, Vec3 { x: pxv + 1.45 * cy, y: pyv + 0.1, z: pzv - 1.45 * sy }, body_yaw)
+        mesh_draw(m_leg, s.camera, Vec3 { x: pxv - 0.5 * cy + swing * sy, y: pyv - 2.0, z: pzv + 0.5 * sy + swing * cy }, body_yaw)
+        mesh_draw(m_leg, s.camera, Vec3 { x: pxv + 0.5 * cy - swing * sy, y: pyv - 2.0, z: pzv - 0.5 * sy - swing * cy }, body_yaw)
+
+        draw_particles(s)
+
+        // ---- HUD ----
+        draw_text(4, 4, "VULCAN OBBY", 0xFFFFFF)
+        draw_text(4, 12, "STAGE " + to_string(stage) + "/3", 0xFFFFFF)
+        draw_text(4, 20, "DEATHS " + to_string(deaths), 0xFF8A80)
+        let elapsed = s.time - start_t
+        let mins = (elapsed / 60.0) as i64
+        let secs = ((elapsed - (mins as f64) * 60.0) as i64)
+        let tstr = to_string(mins) + ":"
+        if secs < 10 { tstr = tstr + "0" }
+        tstr = tstr + to_string(secs)
+        draw_text(4, 28, "TIME " + tstr, 0xFFFFFF)
+        if msg_t > 0.0 {
+            msg_t = msg_t - dt
+            draw_text(112, 40, msg, 0xFFD54F)
+        }
+        if won {
+            draw_rect(48.0, 56.0, 160.0, 32.0, 0x101820)
+            draw_text(92, 62, "YOU WIN!", 0xFFD54F)
+            draw_text(60, 74, "DEATHS " + to_string(deaths) + "  TIME " + tstr + "  R", 0x9FB4C7)
+        }
+
+        present()
+        sleep_ms(16)
+    }
+}
+

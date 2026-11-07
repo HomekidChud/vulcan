@@ -451,7 +451,7 @@ document.addEventListener("mousemove", (e) => {
 const isTouch = "ontouchstart" in window || navigator.maxTouchPoints > 0;
 const touchUI = document.getElementById("touchui");
 if (isTouch) touchUI.style.display = "block";
-const K = { w: 87, a: 65, s: 83, d: 68, f: 102, space: 32 };
+const K = { w: 119, a: 97, s: 115, d: 100, f: 102, space: 32 }; // lowercase codes, same as engine KEY_*
 let joyId = null, joyX0 = 0, joyY0 = 0, joyKeys = [];
 let lookId = null, lookX = 0, lookY = 0;
 function joyUpdate(dx, dy) {
