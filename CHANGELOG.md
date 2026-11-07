@@ -3,6 +3,37 @@
 Per-version history, newest first. The version number lives in Cargo.toml
 (single source of truth, exposed by `vulcan --version`).
 
+## Unreleased — language upgrade (Phase 1)
+
+**The compiler core grows a semantic layer, real diagnostics, value
+semantics, and the most-requested language features — with all three
+backends kept byte-identical.**
+
+- **`vulcan check <file>`** — collect every error in one pass (lexer
+  diagnostics, duplicate fn/struct/field/variant/const declarations,
+  impl-for-unknown-type, type mismatches) rendered with line, column and
+  a caret, instead of aborting on the first panic.
+- **Struct value semantics on JS/Python** — struct assignment, argument
+  passing and returns now copy (arrays are shared, matching C Vec-header
+  copy semantics exactly). The engine's defensive copies were removed.
+- **Match guards** — `when pats if cond` on all backends.
+- **Compile-time constant folding** for const arithmetic (refuses to fold
+  division by zero so the runtime check still fires).
+- **String methods** — `s.replace(old, new)` (literal, empty pattern is a
+  no-op) and `[string].join(sep)` on all backends.
+- **`lib/strbuf.vulcan`** — StrBuf string builder (amortized O(1) push,
+  one join at the end).
+- **Checked division** — `/`/`%` by zero (int and float, including
+  compound forms) aborts with `vulcan: division by zero` on stderr and
+  exit 1 on all three backends. Behavior change: float division by zero
+  no longer yields inf on C/JS; it is an error (matching Python).
+- **Smaller numeric types** — `i8 i16 i32 u8 u16 u32 f32` on all backends:
+  locals, params, returns, fields, casts (`x as u8`), arrays; arithmetic
+  computes in i64/f64 and wraps at storage; f32 rounds to nearest.
+  Semantics recorded in DECISIONS.md.
+- Selftest grew 24 → 29 cases; every case runs on C (gcc), JS and Python
+  and must be byte-identical.
+
 ## 1.10
 
 **VULCAN OBBY: a complete Roblox-style obstacle course, and a real

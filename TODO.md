@@ -87,20 +87,30 @@ tests (lexer, parser, pkg) run in CI next to selftest on both gcc and clang.
       `scene_fire_projectile`), but the real fix is deep-copy on struct
       assignment/passing in codegen_js/codegen_py. Big change; must keep
       all 24 selftest cases byte-identical.
-- [ ] **Smaller int/float types** — `i32` / `f32` / `u8` for memory-heavy
-      games (heightmaps, voxel data). C backend only at first; keep `i64`/`f64`
-      the default.
 - [ ] **`elif`-style `when` guards in match arms** and destructuring struct
-      patterns in match.
-- [ ] **Compile-time constant folding** for `const` arithmetic (e.g. grid
-      sizes), so `const N: i64 = 16` can size arrays without runtime cost.
-- [ ] **Better errors** — replace `panic!` with line-numbered diagnostics
-      collected per file instead of aborting the compiler.
+      patterns in match (plain guards are DONE, Phase 1).
+- [x] ~~Compile-time constant folding~~ — DONE (Phase 1): `fold_const` in the
+      parser folds const int/float/bool/string expressions at compile time;
+      refuses to fold division by zero so the runtime check still fires.
+- [x] ~~Better errors~~ — DONE (Phase 1): `vulcan check <file>` collects all
+      errors (lexer diagnostics, duplicate decls, type mismatches) with
+      line/col + caret rendering instead of aborting on the first.
+- [x] ~~String builder~~ — DONE (Phase 1): `lib/strbuf.vulcan` (StrBuf with
+      push/push_num/build/build_sep, backed by a parts array + join).
+- [x] ~~Struct copy on assignment for JS/Py~~ — DONE (Phase 1): `__sclone`/
+      `_sclone` deep-copy structs (share arrays, matching C headers) at
+      let/assign/call/return/element-store/field-store; selftest-guarded.
+- [x] ~~Smaller int/float types~~ — DONE (Phase 1): i8/i16/i32/u8/u16/u32/f32
+      on all three backends; arithmetic computes wide and wraps at storage;
+      semantics recorded in DECISIONS.md.
+- [x] ~~Match guards~~ — DONE (Phase 1): `when pats if cond`.
+- [x] ~~Checked division~~ — DONE (Phase 1): / and % by zero abort with the
+      same message/exit code on C, JS and Python.
+- [x] ~~String replace/join~~ — DONE (Phase 1): literal replace (empty
+      pattern = no-op) and [string].join on all backends.
 - [ ] **Tail calls / deep recursion safety** — C backend overflows the stack
       on deep recursion; consider a stack-depth check or trampoline for
       self-tail-calls.
-- [ ] **String builder** — repeated `+` on strings is O(n²); a `StringBuilder`
-      type (VecStr-backed) with `push`/`to_string`.
 - [ ] **Bitwise ops on enums** — treat enums as flags (`|`/`&`/`^` already
       emit on i64 via `__bor` etc. on JS; make the type checker accept
       enum-typed operands).
