@@ -930,6 +930,129 @@ pub fn mesh_draw(m: Mesh, cam: Camera, pos: Vec3, yaw: f64) -> void {
 }
 
 // ---------------------------------------------------------------------------
+// Character rigs (Engine v0.4) — a jointed humanoid drawn from boxes,
+// with a walk cycle. The building block for NPCs, players and crowds.
+// ---------------------------------------------------------------------------
+
+// A box mesh with independent half-extents (12 triangles) — the universal
+// building block for characters, vehicles and architecture.
+pub fn mesh_box(hx: f64, hy: f64, hz: f64, color: i64) -> Mesh {
+    let m = mesh_new(color)
+    m = mesh_vert(m, Vec3 { x: -hx, y: -hy, z: -hz })
+    m = mesh_vert(m, Vec3 { x:  hx, y: -hy, z: -hz })
+    m = mesh_vert(m, Vec3 { x:  hx, y: -hy, z:  hz })
+    m = mesh_vert(m, Vec3 { x: -hx, y: -hy, z:  hz })
+    m = mesh_vert(m, Vec3 { x: -hx, y:  hy, z: -hz })
+    m = mesh_vert(m, Vec3 { x:  hx, y:  hy, z: -hz })
+    m = mesh_vert(m, Vec3 { x:  hx, y:  hy, z:  hz })
+    m = mesh_vert(m, Vec3 { x: -hx, y:  hy, z:  hz })
+    m = mesh_face(m, 1, 2, 6); m = mesh_face(m, 1, 6, 5)  // +X
+    m = mesh_face(m, 0, 4, 7); m = mesh_face(m, 0, 7, 3)  // -X
+    m = mesh_face(m, 4, 5, 6); m = mesh_face(m, 4, 6, 7)  // +Y
+    m = mesh_face(m, 0, 3, 2); m = mesh_face(m, 0, 2, 1)  // -Y
+    m = mesh_face(m, 2, 3, 7); m = mesh_face(m, 2, 7, 6)  // +Z
+    m = mesh_face(m, 0, 1, 5); m = mesh_face(m, 0, 5, 4)  // -Z
+    return m
+}
+
+// Draw a mesh rotated yaw around Y then pitch around the yawed X axis
+// (lean forward/back relative to heading). Used by rig_draw for swinging
+// limbs and by games for tilted props and sloped vehicles.
+pub fn mesh_draw_rot(m: Mesh, cam: Camera, pos: Vec3, yaw: f64, pitch: f64) -> void {
+    let light = Vec3 { x: 0.4, y: 1.0, z: 0.3 }.normalized()
+    let cy = cos(yaw)
+    let sy = sin(yaw)
+    let cp = cos(pitch)
+    let sp = sin(pitch)
+    for f in 0 .. m.faces.len() {
+        let face = m.faces[f]
+        if face.len() < 3 { continue }
+        let a = m.verts[face[0]]
+        let b = m.verts[face[1]]
+        let c = m.verts[face[2]]
+        // rotate around Y (heading), then around the yawed X axis (lean)
+        let x1 = a.x * cy + a.z * sy
+        let z1 = -a.x * sy + a.z * cy
+        let ra = Vec3 { x: x1, y: a.y * cp - z1 * sp, z: a.y * sp + z1 * cp }.add(pos)
+        let x2 = b.x * cy + b.z * sy
+        let z2 = -b.x * sy + b.z * cy
+        let rb = Vec3 { x: x2, y: b.y * cp - z2 * sp, z: b.y * sp + z2 * cp }.add(pos)
+        let x3 = c.x * cy + c.z * sy
+        let z3 = -c.x * sy + c.z * cy
+        let rc = Vec3 { x: x3, y: c.y * cp - z3 * sp, z: c.y * sp + z3 * cp }.add(pos)
+        let n = rb.sub(ra).cross(rc.sub(ra)).normalized()
+        let lum = n.dot(light)
+        if lum < 0.0 { lum = -lum }
+        let col = color_shade(m.color, 0.35 + 0.65 * lum)
+        let pa = project(cam, ra)
+        let pb = project(cam, rb)
+        let pc = project(cam, rc)
+        if pa.visible + pb.visible + pc.visible == 3 {
+            draw_tri(pa.sx, pa.sy, pa.depth, pb.sx, pb.sy, pb.depth, pc.sx, pc.sy, pc.depth, col)
+        }
+    }
+}
+
+// A humanoid character skin: colors for shirt, pants, skin and hair.
+// ~1.8 units tall, ~72 triangles.
+pub struct Rig {
+    shirt: i64,
+    pants: i64,
+    skin: i64,
+    hair: i64,
+}
+
+pub fn rig_new(shirt: i64, pants: i64, skin: i64, hair: i64) -> Rig {
+    return Rig { shirt: shirt, pants: pants, skin: skin, hair: hair }
+}
+
+// Draw one limb (a box) hanging from pivot, swung `ang` radians forward
+// (positive = ahead) in the character's sagittal plane.
+fn rig_limb(cam: Camera, color: i64, pivot: Vec3, yaw: f64, ang: f64, len: f64, w: f64) -> void {
+    let h = len * 0.5
+    let cy = cos(yaw)
+    let sy = sin(yaw)
+    let sa = sin(ang) * h
+    let center = Vec3 {
+        x: pivot.x + sa * sy,
+        y: pivot.y - cos(ang) * h,
+        z: pivot.z + sa * cy,
+    }
+    let limb = mesh_box(w, h, w, color)
+    mesh_draw_rot(limb, cam, center, yaw, ang)
+}
+
+// Draw a ~1.8-unit humanoid at `pos` facing `yaw`, walking when `moving` > 0.
+// `phase` drives the walk cycle — advance it ~10 rad/s while moving and let
+// it ease to a multiple of pi when stopping (legs return to center).
+pub fn rig_draw(rig: Rig, cam: Camera, pos: Vec3, yaw: f64, phase: f64, moving: f64) -> void {
+    let cy = cos(yaw)
+    let sy = sin(yaw)
+    let right = Vec3 { x: cy, y: 0.0, z: -sy }
+    let swing = sin(phase) * 0.55 * moving
+    let bob = abs(sin(phase)) * 0.02 * moving
+    // legs: pivot at the hips (y 0.95), length 0.85
+    let hips = Vec3 { x: pos.x, y: pos.y + 0.95, z: pos.z }
+    let hipL = hips.add(right.scaled(-0.10))
+    let hipR = hips.add(right.scaled(0.10))
+    rig_limb(cam, rig.pants, hipL, yaw, swing, 0.85, 0.075)
+    rig_limb(cam, rig.pants, hipR, yaw, -swing, 0.85, 0.075)
+    // torso (y 0.98..1.58, lifted by the walk bob)
+    let torso = mesh_box(0.17, 0.30, 0.10, rig.shirt)
+    mesh_draw_rot(torso, cam, Vec3 { x: pos.x, y: pos.y + 1.28 + bob, z: pos.z }, yaw, 0.0)
+    // arms: pivot at the shoulders (y 1.50), length 0.62, opposite swing
+    let shL = Vec3 { x: pos.x, y: pos.y + 1.50 + bob, z: pos.z }.add(right.scaled(-0.23))
+    let shR = Vec3 { x: pos.x, y: pos.y + 1.50 + bob, z: pos.z }.add(right.scaled(0.23))
+    rig_limb(cam, rig.skin, shL, yaw, -swing * 0.8, 0.62, 0.055)
+    rig_limb(cam, rig.skin, shR, yaw, swing * 0.8, 0.62, 0.055)
+    // head + hair cap
+    let head = mesh_box(0.10, 0.11, 0.10, rig.skin)
+    mesh_draw_rot(head, cam, Vec3 { x: pos.x, y: pos.y + 1.70 + bob, z: pos.z }, yaw, 0.0)
+    let hair = mesh_box(0.105, 0.045, 0.105, rig.hair)
+    mesh_draw_rot(hair, cam, Vec3 { x: pos.x, y: pos.y + 1.79 + bob, z: pos.z }, yaw, 0.0)
+}
+
+// ---------------------------------------------------------------------------
 // Weapons (Engine v0.3)
 // ---------------------------------------------------------------------------
 

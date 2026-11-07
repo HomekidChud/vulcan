@@ -163,12 +163,18 @@ const WORKER_SHIM: &str = r#"// Vulcan web worker shim: stdin/stdout/terminal/fi
 let __vkeys = [];
 let __held = new Set();
 let __vfs = new Map();
+let __touches = [];
 onmessage = (e) => {
     const d = e.data || {};
-    if (d.init) { for (const k in d.fs) __vfs.set(k, d.fs[k]); runMain(); }
+    if (d.init) {
+        for (const k in d.fs) __vfs.set(k, d.fs[k]);
+        globalThis.__VULCAN_TOUCH = !!d.touch;
+        runMain();
+    }
     if (d.keys) { for (const k of d.keys) { __vkeys.push(k); __held.add(k); } }
     if (d.keysup) { for (const k of d.keysup) __held.delete(k); }
     if (d.mouse) { __mdx += d.mouse[0]; __mdy += d.mouse[1]; }
+    if (d.touches) { __touches = d.touches; }
 };
 const process = {
     argv: ["vulcan", "app"],
@@ -291,7 +297,7 @@ const HTML_TEMPLATE: &str = r##"<!DOCTYPE html>
 </head>
 <body>
 <header><span><b>__TITLE__</b> — built with <a href="https://github.com/HomekidChud/vulcan">Vulcan</a></span><span>WASD move · F fire · R restart · drag to look</span></header>
-<main><canvas id="vscreen" width="256" height="144"></canvas><div id="term"><pre id="screen"></pre></div></main>
+<main><canvas id="vscreen" width="512" height="288"></canvas><div id="term"><pre id="screen"></pre></div></main>
 <div id="touchui"><div id="joy"><div id="knob"></div></div><div class="tbtn" id="firebtn">FIRE</div><div class="tbtn" id="jumpbtn">JUMP</div><div class="sbtn" id="rstbtn">RST</div></div>
 <div id="status">running…</div>
 <script>
@@ -397,6 +403,7 @@ const WORKER_SRC = "__WORKER_JSON__";
 const worker = new Worker(URL.createObjectURL(new Blob([WORKER_SRC], {type: "application/javascript"})));
 // in-memory file storage (the app's file_write/file_read work per session)
 const savedFs = {};
+let customTouch = false; // set true when the game calls touch_custom()
 worker.onmessage = (e) => {
     const d = e.data || {};
     if (d.out !== undefined) { term.feed(d.out); term.render(); }
@@ -420,6 +427,13 @@ worker.onmessage = (e) => {
         ctx.putImageData(img, 0, 0);
     }
     if (d.fswrite) { savedFs[d.fswrite.path] = d.fswrite.contents; }
+    if (d.touchui === 0) {
+        // the game drew its own touch controls — hide the default UI and give
+        // it the whole screen (raw touch points are forwarded either way)
+        customTouch = true;
+        const tui = document.getElementById("touchui");
+        if (tui) tui.style.display = "none";
+    }
     if (d.exit !== undefined) { document.getElementById("status").textContent = "program exited with code " + d.exit; worker.terminate(); }
     if (d.error) { document.getElementById("status").textContent = "error: " + d.error; }
 };
@@ -446,14 +460,28 @@ window.addEventListener("mouseup", () => { __mdown = false; });
 document.addEventListener("mousemove", (e) => {
     if (__mdown) worker.postMessage({ mouse: [e.movementX || 0, e.movementY || 0] });
 });
-// touch controls: left half = virtual joystick (WASD), right half = look,
-// FIRE and JUMP buttons (shown only on touch devices)
+// touch input: raw touch points are ALWAYS forwarded to the game in logical
+// canvas coords (0-255 x 0-143) via touch_count()/touch_x()/touch_y().
+// A game that wants full control calls touch_custom() — the default UI then
+// disappears and every touch belongs to the game (right-side drag = look).
+// Without touch_custom() the default joystick + FIRE/JUMP/RST UI stays on.
 const isTouch = "ontouchstart" in window || navigator.maxTouchPoints > 0;
 const touchUI = document.getElementById("touchui");
 if (isTouch) touchUI.style.display = "block";
 const K = { w: 119, a: 97, s: 115, d: 100, f: 102, space: 32 }; // lowercase codes, same as engine KEY_*
 let joyId = null, joyX0 = 0, joyY0 = 0, joyKeys = [];
 let lookId = null, lookX = 0, lookY = 0;
+function sendTouches(e) {
+    const r = vscreen.getBoundingClientRect();
+    const pts = [];
+    for (const t of e.touches) {
+        pts.push([
+            Math.round((t.clientX - r.left) / r.width * 255),
+            Math.round((t.clientY - r.top) / r.height * 143)
+        ]);
+    }
+    worker.postMessage({ touches: pts });
+}
 function joyUpdate(dx, dy) {
     const want = [];
     if (dy < -18) want.push(K.w);
@@ -470,7 +498,7 @@ vscreen.addEventListener("touchstart", (e) => {
     e.preventDefault();
     for (const t of e.changedTouches) {
         const r = vscreen.getBoundingClientRect();
-        if (t.clientX - r.left < r.width * 0.45 && joyId === null) {
+        if (!customTouch && t.clientX - r.left < r.width * 0.45 && joyId === null) {
             joyId = t.identifier; joyX0 = t.clientX; joyY0 = t.clientY;
             const joy = document.getElementById("joy");
             joy.style.left = (t.clientX - 48) + "px";
@@ -480,6 +508,7 @@ vscreen.addEventListener("touchstart", (e) => {
             lookId = t.identifier; lookX = t.clientX; lookY = t.clientY;
         }
     }
+    sendTouches(e);
 }, { passive: false });
 vscreen.addEventListener("touchmove", (e) => {
     e.preventDefault();
@@ -490,6 +519,7 @@ vscreen.addEventListener("touchmove", (e) => {
             lookX = t.clientX; lookY = t.clientY;
         }
     }
+    sendTouches(e);
 }, { passive: false });
 vscreen.addEventListener("touchend", (e) => {
     for (const t of e.changedTouches) {
@@ -500,6 +530,7 @@ vscreen.addEventListener("touchend", (e) => {
         }
         if (t.identifier === lookId) lookId = null;
     }
+    sendTouches(e);
 });
 function holdBtn(el, code) {
     el.addEventListener("touchstart", (e) => { e.preventDefault(); worker.postMessage({ keys: [code] }); }, { passive: false });
@@ -514,7 +545,7 @@ rstBtn.addEventListener("touchstart", (e) => {
     e.preventDefault();
     worker.postMessage({ keys: [114], keysup: [114] });
 }, { passive: false });
-worker.postMessage({ init: true, fs: savedFs });
+worker.postMessage({ init: true, fs: savedFs, touch: isTouch });
 </script>
 </body>
 </html>

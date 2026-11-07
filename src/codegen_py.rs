@@ -309,6 +309,11 @@ def _mouse_dy(): return 0.0
 def _mouse_y(): return -1.0
 def _mouse_down(): return False
 def _key_down(c): return False
+def _touch_count(): return 0
+def _touch_x(i): return -1.0
+def _touch_y(i): return -1.0
+def _is_touch(): return False
+def _touch_custom(): pass
 "#;
 
 pub fn generate_py(program: &[Item]) -> String {
@@ -1726,6 +1731,15 @@ impl PyGen {
             "mouse_dy" => ("_mouse_dy()".into(), Ty::F64),
             "mouse_y" => ("_mouse_y()".into(), Ty::F64),
             "mouse_down" => ("_mouse_down()".into(), Ty::Bool),
+            "touch_count" => ("_touch_count()".into(), Ty::I64),
+            "touch_x" | "touch_y" => {
+                if args.len() != 1 { panic!("vulcan: touch_x/touch_y takes 1 arg"); }
+                let (i, t) = self.gen_expr(&args[0]);
+                let i = self.cast(&i, &t, &Ty::I64);
+                (format!("_{}({i})", if callee == "touch_x" { "touch_x" } else { "touch_y" }), Ty::F64)
+            }
+            "is_touch" => ("_is_touch()".into(), Ty::Bool),
+            "touch_custom" => ("(_touch_custom(), None)".into(), Ty::Void),
             "key_down" => {
                 if args.len() != 1 { panic!("vulcan: key_down(code) takes 1 arg"); }
                 let (c, t) = self.gen_expr(&args[0]);

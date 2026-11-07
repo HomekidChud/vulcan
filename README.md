@@ -156,6 +156,26 @@ The canvas is a fixed 256x144 framebuffer (colors are `0xRRGGBB` integers). Draw
 | `present()` | show the frame (IDE canvas / terminal) |
 | `mouse_x()`, `mouse_y()`, `mouse_down()` | live mouse (IDE only; -1 / false elsewhere) |
 | `key_down(code)` | key held (IDE only; ASCII codes + arrows 37-40) |
+| `is_touch()` | true when running on a touch device (web bundle) |
+| `touch_count()` | number of fingers currently on the screen |
+| `touch_x(i)`, `touch_y(i)` | finger `i` position in logical canvas coords (0-255, 0-143) |
+| `touch_custom()` | hide the default touch UI — the game draws its own controls |
+
+**Touch input (web/mobile).** Every touch point is forwarded to the game in
+logical canvas coordinates, so a game can lay out any control scheme it
+wants (joysticks, wheels, gesture pads) and hit-test with `touch_x` /
+`touch_y`. Calling `touch_custom()` hides the default joystick + FIRE/JUMP
+overlay and gives the game the whole screen — `examples/liberty.vulcan`
+is the reference implementation. Right-side drag still steers the camera.
+
+**3D meshes and character rigs** (`import engine`): `mesh_box(hx, hy, hz,
+color)` builds a box with independent half-extents; `mesh_draw_rot(m, cam,
+pos, yaw, pitch)` rotates around Y then the yawed X axis (swinging limbs,
+tilted props). On top of those sits the humanoid rig: `rig_new(shirt,
+pants, skin, hair)` and `rig_draw(rig, cam, pos, yaw, phase, moving)` draw
+a ~1.8-unit character with a walk cycle (advance `phase` ~10 rad/s while
+walking) — legs and arms swing, the torso bobs. `examples/liberty.vulcan`
+uses it for the player and every pedestrian.
 
 The physics engine (`import physics`) follows the copy-in/copy-out discipline that makes one source work on value-semantics (C) and reference-semantics (JS/Python) backends: always re-assign `w = world_step(w, dt)`.
 

@@ -227,9 +227,21 @@ function __downsample() {
 }
 function __present() {
     if (typeof importScripts === "function" && typeof postMessage === "function") {
-        // running in the Vulcan IDE worker — ship the resolved frame to the canvas
-        const frame = __downsample();
-        postMessage({ __vulcan_frame: frame.buffer, w: __OUT_W, h: __OUT_H }, [frame.buffer]);
+        // running in a worker — ship the FULL supersampled framebuffer (512x288)
+        // for crisp visuals on the canvas (no 2x2 average, same vignette look)
+        const frame = new Int32Array(__FB_W * __FB_H);
+        for (let y = 0; y < __FB_H; y++) {
+            for (let x = 0; x < __FB_W; x++) {
+                const v = __fb[y * __FB_W + x];
+                const dx = (x - (__FB_W - 1) / 2) / ((__FB_W - 1) / 2);
+                const dy = (y - (__FB_H - 1) / 2) / ((__FB_H - 1) / 2);
+                let f = 1.0 - (dx * dx + dy * dy) * 0.30;
+                if (f < 0.0) f = 0.0; if (f > 1.0) f = 1.0;
+                const r = Math.trunc(((v >> 16) & 255) * f), g = Math.trunc(((v >> 8) & 255) * f), b = Math.trunc((v & 255) * f);
+                frame[y * __FB_W + x] = (r << 16) | (g << 8) | b;
+            }
+        }
+        postMessage({ __vulcan_frame: frame.buffer, w: __FB_W, h: __FB_H }, [frame.buffer]);
         return;
     }
     // terminal: downsample to 64x18 half-block cells (same output as the C backend)
@@ -266,6 +278,16 @@ function __mouse_dy() { const d = __mdy; __mdy = 0; return d; }
 function __mouse_y() { const s = __input_state(); return s ? s[1] / 100 : -1.0; }
 function __mouse_down() { const s = __input_state(); return s ? s[2] !== 0 : false; }
 function __key_down(c) { const s = __input_state(); return s ? s[3 + c] !== 0 : false; }
+// ---- touch input (mobile): raw touch points in logical canvas coords (0-255, 0-143) ----
+function __touches_arr() { return (typeof __touches !== "undefined" && __touches) ? __touches : []; }
+function __touch_count() { return __touches_arr().length; }
+function __touch_x(i) { const t = __touches_arr()[i | 0]; return t ? t[0] : -1.0; }
+function __touch_y(i) { const t = __touches_arr()[i | 0]; return t ? t[1] : -1.0; }
+function __is_touch() { return typeof globalThis !== "undefined" && globalThis.__VULCAN_TOUCH === true; }
+function __touch_custom() {
+    // tell the hosting page to hide the default touch UI so the game can draw its own
+    if (typeof postMessage === "function") { try { postMessage({ touchui: 0 }); } catch (e) {} }
+}
 // ---- FFI: `extern` functions resolve through the host __ffi table ----
 // Embedders/IDE plugins can extend it by defining globalThis.__vulcan_ffi
 // (an object of name -> function) before the compiled program runs.
@@ -1698,6 +1720,15 @@ impl JsGen {
             "mouse_dy" => ("__mouse_dy()".into(), Ty::F64),
             "mouse_y" => ("__mouse_y()".into(), Ty::F64),
             "mouse_down" => ("__mouse_down()".into(), Ty::Bool),
+            "touch_count" => ("__touch_count()".into(), Ty::I64),
+            "touch_x" | "touch_y" => {
+                if args.len() != 1 { panic!("vulcan: touch_x/touch_y takes 1 arg"); }
+                let (i, t) = self.gen_expr(&args[0]);
+                let i = self.cast(&i, &t, &Ty::I64);
+                (format!("__{}({i})", if callee == "touch_x" { "touch_x" } else { "touch_y" }), Ty::F64)
+            }
+            "is_touch" => ("__is_touch()".into(), Ty::Bool),
+            "touch_custom" => ("(__touch_custom(), undefined)".into(), Ty::Void),
             "key_down" => {
                 if args.len() != 1 { panic!("vulcan: key_down(code) takes 1 arg"); }
                 let (c, t) = self.gen_expr(&args[0]);

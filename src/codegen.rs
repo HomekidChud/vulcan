@@ -272,6 +272,11 @@ static double vmouse_y(void){ return -1.0; }
 static int8_t vmouse_down(void){ return 0; }
 static void vdrain(void){ unsigned char c; while(key_ready()&&read(STDIN_FILENO,&c,1)==1){ vheld[c]=1; } }
 static int8_t vkey_down(int64_t c){ if(c<0||c>255) return 0; vdrain(); if(vheld[c]){ vheld[c]=0; return 1; } return 0; }
+static int64_t vtouch_count(void){ return 0; }
+static double vtouch_x(int64_t i){ (void)i; return -1.0; }
+static double vtouch_y(int64_t i){ (void)i; return -1.0; }
+static int8_t vis_touch(void){ return 0; }
+static void vtouch_custom(void){ }
 "#;
 
 pub fn generate(program: &[Item]) -> String {
@@ -1899,7 +1904,7 @@ impl Codegen {
                     }
                     "starts_with" | "ends_with" => {
                         if recv_ty != Ty::Str { panic!("vulcan: {name} is a string method"); }
-                        if args.len() != 1 { panic!("vulcan: {name} takes 1 arg"); }
+                        if args.len() != 1 { panic!("vulcan: touch_x/touch_y takes 1 arg"); }
                         let (ac, at) = self.gen_expr(&args[0]);
                         if at != Ty::Str { panic!("vulcan: {name} needs a string arg"); }
                         let f = if name == "starts_with" { "vstr_starts_with" } else { "vstr_ends_with" };
@@ -2262,6 +2267,15 @@ impl Codegen {
             "mouse_dy" => ("vmouse_dy()".into(), Ty::F64),
             "mouse_y" => ("vmouse_y()".into(), Ty::F64),
             "mouse_down" => ("vmouse_down()".into(), Ty::Bool),
+            "touch_count" => ("vtouch_count()".into(), Ty::I64),
+            "touch_x" | "touch_y" => {
+                if args.len() != 1 { panic!("vulcan: touch_x/touch_y takes 1 arg"); }
+                let (i, t) = self.gen_expr(&args[0]);
+                let i = self.cast(&i, &t, &Ty::I64);
+                (format!("v{}({i})", if callee == "touch_x" { "touch_x" } else { "touch_y" }), Ty::F64)
+            }
+            "is_touch" => ("(vis_touch() != 0)".into(), Ty::Bool),
+            "touch_custom" => ("(vtouch_custom(), (void)0)".into(), Ty::Void),
             "key_down" => {
                 if args.len() != 1 { panic!("vulcan: key_down(code) takes 1 arg"); }
                 let (c, t) = self.gen_expr(&args[0]);

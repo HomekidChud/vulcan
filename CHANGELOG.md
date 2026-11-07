@@ -3,6 +3,38 @@
 Per-version history, newest first. The version number lives in Cargo.toml
 (single source of truth, exposed by `vulcan --version`).
 
+## 1.12.0 — touch freedom, crisp 2x rendering, character rigs, LIBERTY CITY
+
+**Mobile controls are no longer hardcoded.** New builtins — `is_touch()`,
+`touch_count()`, `touch_x(i)`, `touch_y(i)`, `touch_custom()` — give every
+game raw touch points in logical canvas coordinates (0-255 x 0-143) on all
+three backends (C and Python stub them). The web bundle forwards every
+touch start/move/end to the worker, and a game that calls `touch_custom()`
+hides the default joystick/FIRE/JUMP overlay and owns the whole screen.
+`examples/liberty.vulcan` is the reference implementation: it draws its
+own joystick, E and R buttons and hit-tests them against `touch_x/y`.
+
+**The web canvas is now 512x288 (2x supersampled), fixing the aliasing.**
+`present()` in the worker used to average the 2x2 supersample blocks down
+to 256x144; it now ships the full 512x288 framebuffer to the page (same
+rasterization cost, four times the detail — lane dashes, HUD text and
+distant buildings are crisp). Game coordinates are unchanged: every draw
+call still works in 256x144 logical space and scales internally.
+
+**Character rigs** (`import engine`): `mesh_box` (independent
+half-extents), `mesh_draw_rot` (yaw + local pitch rotation for swinging
+limbs), and a full humanoid — `rig_new(shirt, pants, skin, hair)` +
+`rig_draw(rig, cam, pos, yaw, phase, moving)` — ~72 triangles with a walk
+cycle: legs and arms swing in opposition, the torso bobs.
+
+**`examples/liberty.vulcan` — LIBERTY CITY**, a GTA-style open world: a
+5x5 block city grid with sidewalks, lane-dashed asphalt roads, two-tier
+buildings, glowing street lights, park trees, wandering pedestrians
+(full rigs, they can be run over for a WANTED level), four drivable cars
+with grip/drift handbrake physics and building collisions, 15 cash drops
+to collect, day/night cycle, and a GTA-style HUD (minimap, cash, wanted
+stars, speedometer). Packages to web and Android (`--platform android`).
+
 ## 1.11.1 — VULCAN FRONTIER + codegen fixes
 
 **`examples/frontier.vulcan` — an open-world western adventure game** in the
