@@ -4,8 +4,20 @@ use crate::lexer::Tok;
 #[derive(Debug, Clone, PartialEq)]
 pub enum Ty {
     I64, F64, Bool, Str, Void,
+    I8, I16, I32, U8, U16, U32, F32,
     Array(Box<Ty>),
     Struct(String),
+}
+
+impl Ty {
+    // integer kinds (i64 and the smaller signed/unsigned sizes)
+    pub fn is_int(&self) -> bool {
+        matches!(self, Ty::I64 | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U16 | Ty::U32)
+    }
+    // floating kinds
+    pub fn is_float(&self) -> bool {
+        matches!(self, Ty::F64 | Ty::F32)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -161,6 +173,9 @@ impl Parser {
             Tok::Ident(s) => match s.as_str() {
                 "i64" => Ty::I64, "f64" => Ty::F64, "bool" => Ty::Bool,
                 "string" => Ty::Str, "void" => Ty::Void,
+                "i8" => Ty::I8, "i16" => Ty::I16, "i32" => Ty::I32,
+                "u8" => Ty::U8, "u16" => Ty::U16, "u32" => Ty::U32,
+                "f32" => Ty::F32,
                 _ => Ty::Struct(s),
             },
             Tok::LBracket => {

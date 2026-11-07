@@ -33,6 +33,14 @@ function __vpanic(msg) { process.stderr.write("vulcan: " + msg + "\n"); process.
 function __idiv(a, b) { if (b === 0) __vpanic("division by zero"); return Math.trunc(a / b); }
 function __imod(a, b) { if (b === 0) __vpanic("modulo by zero"); return ((a) % (b)); }
 function __fdiv(a, b) { if (b === 0) __vpanic("division by zero"); return a / b; }
+// small-int wraps: truncate toward zero, then wrap to the target width
+function __to_i8(x) { return (Math.trunc(x) << 24 >> 24); }
+function __to_i16(x) { return (Math.trunc(x) << 16 >> 16); }
+function __to_i32(x) { return (Math.trunc(x) | 0); }
+function __to_u8(x) { return (Math.trunc(x) & 255); }
+function __to_u16(x) { return (Math.trunc(x) & 65535); }
+function __to_u32(x) { return (Math.trunc(x) >>> 0); }
+function __fround(x) { return Math.fround(x); }
 function __band(a, b) { return Number(BigInt(a) & BigInt(b)); }
 function __bor(a, b) { return Number(BigInt(a) | BigInt(b)); }
 function __bxor(a, b) { return Number(BigInt(a) ^ BigInt(b)); }
@@ -465,6 +473,28 @@ impl JsGen {
         if from == to { return c.to_string(); }
         if from == Ty::I64 && to == Ty::F64 { return c.to_string(); }
         if from == Ty::F64 && to == Ty::I64 { return format!("Math.trunc({c})"); }
+        if from.is_int() && to.is_int() {
+            // wrap to the target width (helpers also truncate float inputs)
+            let f = match to { Ty::I8 => "__to_i8", Ty::I16 => "__to_i16", Ty::I32 => "__to_i32",
+                              Ty::U8 => "__to_u8", Ty::U16 => "__to_u16", Ty::U32 => "__to_u32",
+                              _ => unreachable!() };
+            return format!("{f}({c})");
+        }
+        if from.is_float() && to.is_float() {
+            // f64 -> f32 rounds to nearest; f32 -> f64 is exact
+            return format!("__fround({c})");
+        }
+        if from.is_int() && to.is_float() {
+            if to == Ty::F32 { return format!("__fround({c})"); }
+            return c.to_string();
+        }
+        if from.is_float() && to.is_int() {
+            // truncate toward zero, then wrap to the target width
+            let f = match to { Ty::I8 => "__to_i8", Ty::I16 => "__to_i16", Ty::I32 => "__to_i32",
+                              Ty::U8 => "__to_u8", Ty::U16 => "__to_u16", Ty::U32 => "__to_u32",
+                              _ => unreachable!() };
+            return format!("{f}({c})");
+        }
         panic!("vulcan: invalid cast {from:?} -> {to:?}");
     }
 
@@ -579,6 +609,7 @@ impl JsGen {
                         // struct references mean no copy dance is needed, even through array elements
                         let (recv_c, recv_ty) = self.gen_expr(recv);
                         let fty = self.field_ty(&recv_ty, fname);
+                        let val_c = self.cast(&val_c, &val_ty, &fty);
                         let val_c = self.val_sem(&val_c, value, &fty);
                         self.line(&format!("{recv_c}.{} = {val_c};", js_field(fname)));
                     }
@@ -605,7 +636,9 @@ impl JsGen {
                         let idx_c = self.cast(&idx_c, &idx_ty, &Ty::I64);
                         let elem = self.array_elem(&recv_ty);
                         let lhs = format!("__get({recv_c}, {idx_c})");
-                        let applied = self.apply_op(&lhs, &bare_op, &val_c, &val_ty, &elem);
+                        let val_c = self.cast(&val_c, &val_ty, &elem);
+                        let applied = self.apply_op(&lhs, &bare_op, &val_c, &elem, &elem);
+                        let applied = self.wrap_to(&applied, &elem);
                         self.line(&format!("__set({recv_c}, {idx_c}, {applied});"));
                     }
                     _ => panic!("vulcan: invalid compound-assignment target"),
@@ -615,18 +648,33 @@ impl JsGen {
                 let op = if *delta > 0 { "++" } else { "--" };
                 match target {
                     Expr::Ident(name) => {
-                        let (_, cvar) = self.lookup(name).unwrap_or_else(|| panic!("vulcan: use of undeclared `{name}`"));
-                        self.line(&format!("{cvar}{op};"));
+                        let (var_ty, cvar) = self.lookup(name).unwrap_or_else(|| panic!("vulcan: use of undeclared `{name}`"));
+                        if self.norm(&var_ty) == Ty::I64 || !(self.norm(&var_ty).is_int() || self.norm(&var_ty) == Ty::F32) {
+                            self.line(&format!("{cvar}{op};"));
+                        } else {
+                            // small kinds: increment in i64/f64, then wrap back
+                            let w = self.wrap_to(&format!("({cvar} + {delta})"), &var_ty);
+                            self.line(&format!("{cvar} = {w};"));
+                        }
                     }
                     Expr::Field(recv, fname) => {
-                        let (recv_c, _) = self.gen_expr(recv);
-                        self.line(&format!("{recv_c}.{}{op};", js_field(fname)));
+                        let (recv_c, recv_ty) = self.gen_expr(recv);
+                        let fty = self.field_ty(&recv_ty, fname);
+                        let fl = js_field(fname);
+                        if self.norm(&fty) == Ty::I64 || !(self.norm(&fty).is_int() || self.norm(&fty) == Ty::F32) {
+                            self.line(&format!("{recv_c}.{fl}{op};"));
+                        } else {
+                            let w = self.wrap_to(&format!("({recv_c}.{fl} + {delta})"), &fty);
+                            self.line(&format!("{recv_c}.{fl} = {w};"));
+                        }
                     }
                     Expr::Index(recv, idx) => {
                         let (recv_c, recv_ty) = self.gen_expr(recv);
                         let (idx_c, idx_ty) = self.gen_expr(idx);
                         let idx_c = self.cast(&idx_c, &idx_ty, &Ty::I64);
-                        self.line(&format!("__set({recv_c}, {idx_c}, __get({recv_c}, {idx_c}) + {delta});"));
+                        let elem = self.array_elem(&recv_ty);
+                        let w = self.wrap_to(&format!("(__get({recv_c}, {idx_c}) + {delta})"), &elem);
+                        self.line(&format!("__set({recv_c}, {idx_c}, {w});"));
                     }
                     _ => panic!("vulcan: invalid ++/-- target"),
                 }
@@ -811,13 +859,25 @@ impl JsGen {
     fn emit_op_assign(&mut self, lhs: &str, bare_op: &str, _op: &str, val_c: &str, val_ty: &Ty, target_ty: &Ty) {
         let val = self.cast(val_c, val_ty, target_ty);
         let applied = self.apply_op(lhs, bare_op, &val, target_ty, target_ty);
+        // narrow the result back to the target kind (small ints / f32)
+        let applied = self.wrap_to(&applied, target_ty);
         self.line(&format!("{lhs} = {applied};"));
+    }
+
+    // re-wrap a computed value to a small numeric kind (narrow ints / f32)
+    fn wrap_to(&self, c: &str, t: &Ty) -> String {
+        let t = self.norm(t);
+        if t.is_int() && t != Ty::I64 { self.cast(c, &Ty::I64, &t) }
+        else if t == Ty::F32 { format!("__fround({c})") }
+        else { c.to_string() }
     }
 
     fn fmt_val(&self, c: &str, t: &Ty) -> String {
         match self.norm(t) {
             Ty::I64 => format!("String({c})"),
             Ty::F64 => format!("__g6({c})"),
+            Ty::F32 => format!("__g6({c})"),
+            t if t.is_int() => format!("String({c})"),
             Ty::Bool => format!("(({c}) ? \"true\" : \"false\")"),
             Ty::Str => c.to_string(),
             Ty::Array(_) => {
@@ -825,6 +885,8 @@ impl JsGen {
                 let mapper = match self.norm(&elem) {
                     Ty::I64 => "String",
                     Ty::F64 => "__g6",
+                    Ty::F32 => "__g6",
+                    t if t.is_int() => "String",
                     Ty::Bool => "(__b) => __b ? \"true\" : \"false\"",
                     Ty::Str => "(x) => x",
                     _ => panic!("vulcan: cannot print {t:?}"),
@@ -862,14 +924,14 @@ impl JsGen {
                     "+" if lt == Ty::Str && rt == Ty::Str => (format!("({lc} + {rc})"), Ty::Str),
                     "+" | "-" | "*" => {
                         if lt == Ty::Str || rt == Ty::Str { panic!("vulcan: + on strings requires both strings"); }
-                        if lt == Ty::F64 || rt == Ty::F64 {
+                        if lt.is_float() || rt.is_float() {
                             (format!("({lc} {op} {rc})"), Ty::F64)
                         } else {
                             (format!("({lc} {op} {rc})"), Ty::I64)
                         }
                     }
                     "/" => {
-                        if lt == Ty::F64 || rt == Ty::F64 {
+                        if lt.is_float() || rt.is_float() {
                             (format!("__fdiv({lc}, {rc})"), Ty::F64)
                         } else {
                             (format!("__idiv({lc}, {rc})"), Ty::I64)
@@ -1175,6 +1237,9 @@ impl JsGen {
             Ty::Array(_) => "[]".into(),
             Ty::Struct(_) => "null".into(),
             Ty::Void => "null".into(),
+            Ty::F32 => "0.0".into(),
+            // remaining kinds are the smaller ints
+            _ => "0".into(),
         }
     }
 

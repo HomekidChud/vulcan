@@ -62,7 +62,22 @@ impl Tables {
     pub fn check_assignable(&self, from: &Ty, to: &Ty, what: &str) {
         let from = self.norm(from);
         let to = self.norm(to);
-        let ok = from == to || (from == Ty::I64 && to == Ty::F64);
+        // numeric kinds convert implicitly among themselves: ints may narrow
+        // (with wrap-around at runtime, use `as` to be explicit), ints widen to
+        // floats, and f64 may narrow to f32 (rounds to nearest)
+        let ok = from == to
+            || (from.is_int() && to.is_int())
+            || (from.is_int() && to.is_float())
+            || (from.is_float() && to.is_float())
+            // arrays convert when their elements do
+            || (matches!(from, Ty::Array(_)) && matches!(to, Ty::Array(_)) && {
+                let fe = self.array_elem(&from);
+                let te = self.array_elem(&to);
+                fe == te
+                    || (fe.is_int() && te.is_int())
+                    || (fe.is_int() && te.is_float())
+                    || (fe.is_float() && te.is_float())
+            });
         if !ok {
             panic!("vulcan: type mismatch in {what}: {from:?} vs {to:?}");
         }

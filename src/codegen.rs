@@ -661,6 +661,9 @@ impl Codegen {
             Ty::Bool => "int8_t".into(),
             Ty::Str => "char*".into(),
             Ty::Void => "void".into(),
+            Ty::I8 => "int8_t".into(), Ty::I16 => "int16_t".into(), Ty::I32 => "int32_t".into(),
+            Ty::U8 => "uint8_t".into(), Ty::U16 => "uint16_t".into(), Ty::U32 => "uint32_t".into(),
+            Ty::F32 => "float".into(),
             Ty::Array(_) => self.vec_cname(t),
             Ty::Struct(name) => {
                 if self.is_enum(name) { "int64_t".into() } else { name.clone() }
@@ -677,6 +680,10 @@ impl Codegen {
             Ty::F64 => "VecF64".into(),
             Ty::Bool => "VecBool".into(),
             Ty::Str => "VecStr".into(),
+            // small numeric kinds are backed by the wide vector (values are
+            // already wrapped to the element type on every store)
+            t if t.is_int() => "VecI64".into(),
+            Ty::F32 => "VecF64".into(),
             Ty::Struct(name) if self.is_enum(name) => "VecI64".into(),
             Ty::Struct(name) => format!("Vec_{name}"),
             Ty::Array(_) => format!("Vec_{}", self.vec_cname(&elem)),
@@ -954,13 +961,19 @@ impl Codegen {
                         let get = self.vec_helper(&recv_ty, "get");
                         let idx_c = self.cast(&idx_c, &idx_ty, &Ty::I64);
                         let cast = self.cast(&val_c, &val_ty, &elem);
+                        let wrap = |v: String| -> String {
+                            // narrow the stored value back to the element kind
+                            if (self.norm(&elem).is_int() && self.norm(&elem) != Ty::I64) || self.norm(&elem) == Ty::F32 {
+                                format!("({})({})", self.ctype(&elem), v)
+                            } else { v }
+                        };
                         if bare_op == "/" || bare_op == "%" {
                             let f = if bare_op == "/" {
                                 if self.norm(&elem) == Ty::F64 { "vdiv_f64" } else { "vdiv_i64" }
                             } else { "vmod_i64" };
-                            self.line(&format!("{set}(&{recv_c}, {idx_c}, {f}({get}(&{recv_c}, {idx_c}), {cast}));"));
+                            self.line(&format!("{set}(&{recv_c}, {idx_c}, {});", wrap(format!("{f}({get}(&{recv_c}, {idx_c}), {cast})"))));
                         } else {
-                            self.line(&format!("{set}(&{recv_c}, {idx_c}, {get}(&{recv_c}, {idx_c}) {bare_op} {cast});"));
+                            self.line(&format!("{set}(&{recv_c}, {idx_c}, {});", wrap(format!("{get}(&{recv_c}, {idx_c}) {bare_op} {cast}"))));
                         }
                     }
                     _ => panic!("vulcan: invalid compound-assignment target"),
@@ -1004,7 +1017,12 @@ impl Codegen {
                         let set = self.vec_helper(&recv_ty, "set");
                         let get = self.vec_helper(&recv_ty, "get");
                         let idx_c = self.cast(&idx_c, &idx_ty, &Ty::I64);
-                        self.line(&format!("{set}(&{recv_c}, {idx_c}, {get}(&{recv_c}, {idx_c}) + {delta});"));
+                        let elem = self.array_elem(&recv_ty);
+                        let rhs = format!("{get}(&{recv_c}, {idx_c}) + {delta}");
+                        let rhs = if (self.norm(&elem).is_int() && self.norm(&elem) != Ty::I64) || self.norm(&elem) == Ty::F32 {
+                            format!("({})({})", self.ctype(&elem), rhs)
+                        } else { rhs };
+                        self.line(&format!("{set}(&{recv_c}, {idx_c}, {rhs});"));
                     }
                     _ => panic!("vulcan: invalid ++/-- target"),
                 }
@@ -1190,8 +1208,21 @@ impl Codegen {
         let from = self.norm(from);
         let to = self.norm(to);
         if from == to { return c.to_string(); }
-        if from == Ty::I64 && to == Ty::F64 { return format!("(double)({c})"); }
-        if from == Ty::F64 && to == Ty::I64 { return format!("(int64_t)({c})"); }
+        if from.is_int() && to.is_int() {
+            // C integer cast: wraps out-of-range values (two's complement)
+            return format!("({})({})", self.ctype(&to), c);
+        }
+        if from.is_float() && to.is_float() {
+            // (float) rounds to nearest f32; (double) is exact
+            return format!("({})({})", self.ctype(&to), c);
+        }
+        if from.is_int() && to.is_float() {
+            return format!("({})({})", self.ctype(&to), c);
+        }
+        if from.is_float() && to.is_int() {
+            // truncate toward zero, then wrap to the target width
+            return format!("({})({})", self.ctype(&to), c);
+        }
         panic!("vulcan: invalid cast {from:?} -> {to:?}");
     }
 
@@ -1214,6 +1245,8 @@ impl Codegen {
                 Ty::F64 => "vf64".to_string(),
                 Ty::Bool => "vbool".to_string(),
                 Ty::Str => "vstr".to_string(),
+                t if t.is_int() => "vi64".to_string(),
+                Ty::F32 => "vf64".to_string(),
                 _ => panic!("vulcan: unsupported array element type"),
             }
         };
@@ -1283,25 +1316,32 @@ impl Codegen {
                     "+" if lt == Ty::Str && rt == Ty::Str => (format!("vstr_concat({lc}, {rc})"), Ty::Str),
                     "+" | "-" | "*" | "/" => {
                         if lt == Ty::Str || rt == Ty::Str { panic!("vulcan: + on strings requires both strings"); }
-                        if lt == Ty::F64 || rt == Ty::F64 {
+                        if lt.is_float() || rt.is_float() {
+                            // floats compute in f64 (f32 operands widen exactly)
                             let lc = self.cast(&lc, &lt, &Ty::F64);
                             let rc = self.cast(&rc, &rt, &Ty::F64);
                             if op == "/" { (format!("vdiv_f64({lc}, {rc})"), Ty::F64) }
                             else { (format!("({lc} {op} {rc})"), Ty::F64) }
-                        } else if op == "/" {
-                            (format!("vdiv_i64({lc}, {rc})"), Ty::I64)
                         } else {
-                            (format!("({lc} {op} {rc})"), Ty::I64)
+                            // ints compute in i64 (small kinds widen exactly)
+                            let lc = if lt.is_int() && lt != Ty::I64 { self.cast(&lc, &lt, &Ty::I64) } else { lc };
+                            let rc = if rt.is_int() && rt != Ty::I64 { self.cast(&rc, &rt, &Ty::I64) } else { rc };
+                            if op == "/" { (format!("vdiv_i64({lc}, {rc})"), Ty::I64) }
+                            else { (format!("({lc} {op} {rc})"), Ty::I64) }
                         }
                     }
                     "%" => {
-                        if lt != Ty::I64 || rt != Ty::I64 { panic!("vulcan: % is i64 only"); }
+                        if !lt.is_int() || !rt.is_int() { panic!("vulcan: % is int only"); }
+                        let lc = if lt.is_int() && lt != Ty::I64 { self.cast(&lc, &lt, &Ty::I64) } else { lc };
+                        let rc = if rt.is_int() && rt != Ty::I64 { self.cast(&rc, &rt, &Ty::I64) } else { rc };
                         (format!("vmod_i64({lc}, {rc})"), Ty::I64)
                     }
                     "&" | "|" | "^" | "<<" | ">>" => {
-                        if self.norm(&lt) != Ty::I64 || self.norm(&rt) != Ty::I64 {
-                            panic!("vulcan: bitwise {op} requires i64 operands");
+                        if !self.norm(&lt).is_int() || !self.norm(&rt).is_int() {
+                            panic!("vulcan: bitwise {op} requires int operands");
                         }
+                        let lc = if lt.is_int() && lt != Ty::I64 { self.cast(&lc, &lt, &Ty::I64) } else { lc };
+                        let rc = if rt.is_int() && rt != Ty::I64 { self.cast(&rc, &rt, &Ty::I64) } else { rc };
                         (format!("({lc} {op} {rc})"), Ty::I64)
                     }
                     "==" | "!=" | "<" | ">" | "<=" | ">=" => {
@@ -1312,7 +1352,7 @@ impl Codegen {
                                 _ => panic!("vulcan: strings support == and != only"),
                             }
                         } else {
-                            let (lc, rc) = if lt == Ty::F64 || rt == Ty::F64 {
+                            let (lc, rc) = if lt.is_float() || rt.is_float() {
                                 (self.cast(&lc, &lt, &Ty::F64), self.cast(&rc, &rt, &Ty::F64))
                             } else { (lc, rc) };
                             (format!("({lc} {op} {rc})"), Ty::Bool)
@@ -1626,6 +1666,8 @@ impl Codegen {
                     match t {
                         Ty::I64 => self.line(&format!("printf(\"%lld\", (long long){c});")),
                         Ty::F64 => self.line(&format!("printf(\"%.6g\", {c});")),
+                        Ty::F32 => self.line(&format!("printf(\"%.6g\", (double)({c}));")),
+                        t if t.is_int() => self.line(&format!("printf(\"%lld\", (long long){c});")),
                         Ty::Bool => self.line(&format!("printf(\"%s\", ({c} ? \"true\" : \"false\"));")),
                         Ty::Str => self.line(&format!("printf(\"%s\", {c});")),
                         Ty::Array(_) => {
@@ -1636,6 +1678,8 @@ impl Codegen {
                                 Ty::F64 => ("VecF64", "{v}.data[{i}]"),
                                 Ty::Bool => ("VecBool", "{v}.data[{i}] ? \"true\" : \"false\""),
                                 Ty::Str => ("VecStr", "{v}.data[{i}]"),
+                                t if t.is_int() => ("VecI64", "{v}.data[{i}]"),
+                                Ty::F32 => ("VecF64", "{v}.data[{i}]"),
                                 _ if is_enum_elem => ("VecI64", "{v}.data[{i}]"),
                                 _ => panic!("vulcan: cannot print {t:?}"),
                             };
@@ -1644,12 +1688,16 @@ impl Codegen {
                             let fmt_elem = fmt_elem.replace("{v}", &v).replace("{i}", &i);
                             let fmt_elem = match self.norm(&elem) {
                                 Ty::I64 => format!("(long long){fmt_elem}"),
+                                t if t.is_int() => format!("(long long){fmt_elem}"),
+                                Ty::F32 => format!("(double)({fmt_elem})"),
                                 _ if is_enum_elem => format!("(long long){fmt_elem}"),
                                 _ => fmt_elem,
                             };
                             let fmt_str = match self.norm(&elem) {
                                 Ty::I64 => "%lld",
+                                t if t.is_int() => "%lld",
                                 Ty::F64 => "%.6g",
+                                Ty::F32 => "%.6g",
                                 _ => "%s",
                             };
                             self.line(&format!("{{ {vec_ty} {v} = {c}; printf(\"[\");"));
@@ -1912,7 +1960,9 @@ impl Codegen {
                 match t {
                     Ty::I64 => self.line(&format!("char {tmp}[32]; snprintf({tmp}, 32, \"%lld\", (long long){c});")),
                     Ty::F64 => self.line(&format!("char {tmp}[40]; snprintf({tmp}, 40, \"%.6g\", {c});")),
-                    _ => panic!("vulcan: to_string needs i64 or f64"),
+                    Ty::F32 => self.line(&format!("char {tmp}[40]; snprintf({tmp}, 40, \"%.6g\", (double)({c}));")),
+                    t if t.is_int() => self.line(&format!("char {tmp}[32]; snprintf({tmp}, 32, \"%lld\", (long long){c});")),
+                    _ => panic!("vulcan: to_string needs a number"),
                 }
                 (tmp, Ty::Str)
             }

@@ -529,6 +529,50 @@ fn main() -> void {
         expected: "p = 4 6\nlen2 = 52\nscaled = 8 12\npts[1].y = 3\n",
     },
     Case {
+        name: "small numeric types (all backends)",
+        src: r#"
+struct Pixel { r: u8, g: u8, b: u8, a: u8 }
+fn half(n: i32) -> i32 { return n / 2 }
+
+fn main() -> void {
+    let a: i32 = 5
+    let b: i32 = 3
+    print("i32:", a + b, a * b, a - b, a / b, a % b)
+    let big: i64 = 300
+    print("u8 wrap:", big as u8)
+    print("casts:", 1000 as u16, 2.9 as i64, (-7) as u8, 70000 as u16)
+    let f: f32 = 0.5
+    let g: f32 = 0.25
+    print("f32:", f + g, f * 4.0, f / g)
+    let h: f32 = 16777217
+    print("f32 round:", h)
+    let arr: [i32] = [1, 2, 3]
+    arr.push(300)
+    print("arr:", arr.len(), arr[0], arr[3], arr[1] + arr[2])
+    let fa: [f32] = [0.5, 0.25]
+    print("farr:", fa[0] + fa[1])
+    let p = Pixel { r: 255, g: 128, b: 0, a: 300 }
+    print("pixel:", p.r, p.g, p.a)
+    p.r = p.r + 1
+    print("pixel mut:", p.r)
+    let x: u8 = 250
+    x += 10
+    print("u8 +=:", x)
+    x++
+    print("u8 ++:", x)
+    let xs: [i8] = [120, 121]
+    xs[0] += 10
+    print("i8 arr:", xs[0])
+    let neg: i8 = -128
+    print("i8:", neg, neg - 1)
+    let u: u32 = 4000000000
+    print("u32:", u)
+    print("fn:", half(9), half(-9))
+}
+"#,
+        expected: "i32: 8 15 2 1 2\nu8 wrap: 44\ncasts: 1000 2 249 4464\nf32: 0.75 2 2\nf32 round: 1.67772e+07\narr: 4 1 300 5\nfarr: 0.75\npixel: 255 128 44\npixel mut: 0\nu8 +=: 4\nu8 ++: 5\ni8 arr: -126\ni8: -128 -129\nu32: 4000000000\nfn: 4 -4\n",
+    },
+    Case {
         name: "const folding (all backends)",
         src: r#"
 const N: i64 = 16 * 4
@@ -792,6 +836,9 @@ fn doc_ty(t: &crate::parser::Ty) -> String {
     match t {
         I64 => "i64".into(), F64 => "f64".into(), Bool => "bool".into(),
         Str => "string".into(), Void => "void".into(),
+        I8 => "i8".into(), I16 => "i16".into(), I32 => "i32".into(),
+        U8 => "u8".into(), U16 => "u16".into(), U32 => "u32".into(),
+        F32 => "f32".into(),
         Array(inner) => format!("[{}]", doc_ty(inner)),
         Struct(n) => n.clone(),
     }
