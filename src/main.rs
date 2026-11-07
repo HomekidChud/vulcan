@@ -211,7 +211,11 @@ fn main() {
             "run" | "bench" => {
                 std::fs::write(&out_path, &src).unwrap();
                 let t0 = std::time::Instant::now();
-                let status = Command::new(runner).arg(&out_path).args(&prog_args).status().unwrap();
+                let status = Command::new(runner).arg(&out_path).args(&prog_args).status()
+                    .unwrap_or_else(|e| {
+                        eprintln!("vulcan: cannot run `{runner}` ({e}) — is it installed and on your PATH?");
+                        std::process::exit(1);
+                    });
                 let dt = t0.elapsed();
                 if cmd == "bench" {
                     println!("exit: {:?}  time: {:.3}s", status.code(), dt.as_secs_f64());
@@ -271,7 +275,11 @@ fn main() {
         "run" | "test" => {
             std::fs::write(&c_path, &c_src).unwrap();
             compile_c(&c_path, &bin_path, safe, &link_libs);
-            let status = Command::new(&run_path).args(&prog_args).status().unwrap();
+            let status = Command::new(&run_path).args(&prog_args).status()
+                    .unwrap_or_else(|e| {
+                        eprintln!("vulcan: cannot run {}: {e}", run_path.display());
+                        std::process::exit(1);
+                    });
             if !status.success() {
                 std::process::exit(status.code().unwrap_or(1));
             }
@@ -280,7 +288,11 @@ fn main() {
             std::fs::write(&c_path, &c_src).unwrap();
             compile_c(&c_path, &bin_path, safe, &link_libs);
             let t0 = std::time::Instant::now();
-            let status = Command::new(&run_path).args(&prog_args).status().unwrap();
+            let status = Command::new(&run_path).args(&prog_args).status()
+                    .unwrap_or_else(|e| {
+                        eprintln!("vulcan: cannot run {}: {e}", run_path.display());
+                        std::process::exit(1);
+                    });
             let dt = t0.elapsed();
             println!("exit: {:?}  time: {:.3}s", status.code(), dt.as_secs_f64());
         }

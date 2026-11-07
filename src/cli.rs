@@ -798,15 +798,27 @@ fn run_case(name: &str, src: &str, expected: &str, dir: &std::path::Path) -> usi
     };
     std::fs::write(&c_path, c_src).unwrap();
     let cc = crate::pick_cc();
-    let status = Command::new(&cc)
+    let status = match Command::new(&cc)
         .args(["-O3", c_path.to_str().unwrap(), "-lm", "-o", out_path.to_str().unwrap()])
         .output()
-        .expect("no C compiler found");
+    {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[FAIL] {}: cannot run C compiler `{cc}`: {e}\n  (install gcc or clang, or set VULCAN_CC)", name);
+            return 1;
+        }
+    };
     if !status.status.success() {
         eprintln!("[FAIL] {}: compile failed:\n{}", name, String::from_utf8_lossy(&status.stderr));
         return 1;
     }
-    let run = Command::new(&out_path).output().unwrap();
+    let run = match Command::new(&out_path).output() {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("[FAIL] {}: cannot run {}: {e}", name, out_path.display());
+            return 1;
+        }
+    };
     let stdout = String::from_utf8_lossy(&run.stdout);
     if stdout != expected {
         eprintln!("[FAIL] {}: output mismatch\n--- got ---\n{stdout}--- expected ---\n{}", name, expected);
