@@ -5,7 +5,14 @@ effort. Verify with `cargo build --release && VULCAN_CC=gcc ./target/release/vul
 after every change — all 24 cases must pass byte-identically on C, JS, and
 Python backends before pushing.
 
-## Current state (v1.9)
+## Current state (v1.10.0)
+
+Phase 0 of the mega-upgrade (see docs/baseline.md) is done: versions
+reconciled to Cargo.toml as the single source of truth (`vulcan --version`),
+README history moved to CHANGELOG.md, the pkg.rs path-traversal and
+git-clone-option-injection bugs fixed, lexer literals no longer silently
+overflow, process-spawn failures print clean errors, and cargo test unit
+tests (lexer, parser, pkg) run in CI next to selftest on both gcc and clang.
 
 - Language: structs, enums, impl methods, match, f-strings, defer, FFI
   (`extern "c"` + `link`), nested arrays `[[T]]` (scalar bases in struct

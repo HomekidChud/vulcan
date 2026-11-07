@@ -414,3 +414,24 @@ The 0.2.0 release roughly doubles the language:
 
 Run the tour: `vulcan run examples/tour.vulcan`.
 
+
+## 1.10.0 (unreleased — Phase 0 of the mega-upgrade)
+
+- Versions reconciled: Cargo.toml is the single source of truth (1.10.0),
+  exposed via the new `vulcan --version` / `-V` and the usage banner.
+  README per-version history moved here (see sections above).
+- Security: `vulcan add` sanitizes dependency folder names and refuses to
+  `remove_dir_all` anything outside `deps/` (a source ending in `/..` could
+  previously delete project files); `git clone` now receives `--` before the
+  URL so a leading-dash URL can't be read as a git option.
+- Lexer: hex and binary literals use checked arithmetic — an out-of-range
+  literal is an error with the line number instead of a silently wrapped
+  value. Decimal literal overflow reports the literal and line instead of a
+  raw unwrap panic.
+- CLI: missing compilers/interpreters (gcc/clang/node/python3) now print
+  clean error messages instead of panicking with a Rust backtrace.
+- Tests: new Rust unit tests for the lexer, parser (all examples and stdlib
+  files parse) and pkg path safety; CI runs `cargo test` and selftest on
+  both gcc and clang.
+- Docs: `docs/architecture.md` (pipeline overview) and `docs/baseline.md`
+  (Phase 0 baseline: 24/24 selftest, bench numbers, confirmed bugs).
