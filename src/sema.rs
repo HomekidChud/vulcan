@@ -89,3 +89,118 @@ pub fn const_ty(c: &ConstDecl) -> Ty {
         },
     }
 }
+
+// Early semantic checks over the whole program (the seed of the real
+// semantic pass). Today: duplicate definitions, duplicate struct fields,
+// duplicate enum variants, unknown impl target. Everything reports a Diag
+// with the declaration's line; more checks move here as Phase 1 continues.
+pub fn check_program(program: &[Item]) -> Vec<crate::diag::Diag> {
+    use crate::diag::Diag;
+    let mut diags: Vec<Diag> = Vec::new();
+    let mut fns: HashMap<&str, usize> = HashMap::new();
+    let mut structs: HashMap<&str, usize> = HashMap::new();
+    let mut enums: HashMap<&str, usize> = HashMap::new();
+    let mut consts: HashMap<&str, usize> = HashMap::new();
+
+    for item in program {
+        match item {
+            Item::Fn(f) => {
+                if let Some(&prev) = fns.get(f.name.as_str()) {
+                    diags.push(Diag::new(f.line, 1,
+                        format!("duplicate function `{}` (first defined on line {prev})", f.name)));
+                } else {
+                    fns.insert(&f.name, f.line);
+                }
+            }
+            Item::Struct(s) => {
+                if let Some(&prev) = structs.get(s.name.as_str()) {
+                    diags.push(Diag::new(s.line, 1,
+                        format!("duplicate struct `{}` (first defined on line {prev})", s.name)));
+                } else {
+                    structs.insert(&s.name, s.line);
+                }
+                let mut seen: HashMap<&str, usize> = HashMap::new();
+                for (fname, _) in &s.fields {
+                    if let Some(&prev) = seen.get(fname.as_str()) {
+                        diags.push(Diag::new(s.line, 1,
+                            format!("duplicate field `{fname}` in struct `{}` (first on line {prev})", s.name)));
+                    } else {
+                        seen.insert(fname, s.line);
+                    }
+                }
+            }
+            Item::Enum(e) => {
+                if let Some(&prev) = enums.get(e.name.as_str()) {
+                    diags.push(Diag::new(e.line, 1,
+                        format!("duplicate enum `{}` (first defined on line {prev})", e.name)));
+                } else {
+                    enums.insert(&e.name, e.line);
+                }
+                let mut seen: HashMap<&str, ()> = HashMap::new();
+                for v in &e.variants {
+                    if seen.insert(v, ()).is_some() {
+                        diags.push(Diag::new(e.line, 1,
+                            format!("duplicate variant `{v}` in enum `{}`", e.name)));
+                    }
+                }
+            }
+            Item::Const(c) => {
+                if let Some(&prev) = consts.get(c.name.as_str()) {
+                    diags.push(Diag::new(c.line, 1,
+                        format!("duplicate const `{}` (first defined on line {prev})", c.name)));
+                } else {
+                    consts.insert(&c.name, c.line);
+                }
+            }
+            Item::Impl(i) => {
+                if !structs.contains_key(i.struct_name.as_str()) && !enums.contains_key(i.struct_name.as_str()) {
+                    diags.push(Diag::new(0, 0,
+                        format!("impl for unknown type `{}`", i.struct_name)));
+                }
+            }
+            _ => {}
+        }
+    }
+    diags
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::diag::Diag;
+    use crate::lexer::lex;
+    use crate::parser::parse_program;
+
+    fn check(src: &str) -> Vec<Diag> {
+        check_program(&parse_program(&lex(src)))
+    }
+
+    #[test]
+    fn clean_program_has_no_diags() {
+        assert!(check("fn main() -> void { print(1) }").is_empty());
+    }
+
+    #[test]
+    fn duplicate_fn_reported_with_lines() {
+        let d = check("fn f() -> i64 { return 1 }\nfn f() -> i64 { return 2 }");
+        assert_eq!(d.len(), 1);
+        assert!(d[0].msg.contains("duplicate function `f`"));
+        assert!(d[0].msg.contains("line 1"));
+        assert_eq!(d[0].line, 2);
+    }
+
+    #[test]
+    fn duplicate_fields_and_variants() {
+        let d = check("struct S { x: i64, x: f64 }\nenum E { A, A }");
+        assert_eq!(d.len(), 2);
+        assert!(d[0].msg.contains("duplicate field `x`"));
+        assert!(d[1].msg.contains("duplicate variant `A`"));
+    }
+
+    #[test]
+    fn impl_for_unknown_type() {
+        let d = check("impl Q { fn z(self) -> i64 { return 0 } }");
+        assert_eq!(d.len(), 1);
+        assert!(d[0].msg.contains("unknown type `Q`"));
+    }
+}

@@ -42,15 +42,20 @@ fn lex_escape(c: char) -> char {
     }
 }
 
-pub fn lex(src: &str) -> Vec<(Tok, usize)> {
+// Lex with diagnostics: literal errors are collected (with line AND column)
+// instead of aborting, so `vulcan check` can report several at once.
+pub fn lex_diags(src: &str) -> (Vec<(Tok, usize)>, Vec<crate::diag::Diag>) {
     let mut toks: Vec<(Tok, usize)> = Vec::new();
+    let mut diags: Vec<crate::diag::Diag> = Vec::new();
     let chars: Vec<char> = src.chars().collect();
     let mut i = 0;
     let mut line = 1usize;
+    let mut line_start = 0usize; // char index where the current line begins
     let n = chars.len();
+    let col = |i: usize, line_start: usize| i - line_start + 1;
     while i < n {
         let c = chars[i];
-        if c == '\n' { line += 1; i += 1; continue; }
+        if c == '\n' { line += 1; line_start = i + 1; i += 1; continue; }
         if c.is_whitespace() { i += 1; continue; }
         // comments
         if c == '/' && i + 1 < n && chars[i + 1] == '/' {
@@ -85,30 +90,47 @@ pub fn lex(src: &str) -> Vec<(Tok, usize)> {
         }
         // numbers: hex, binary, decimal, float
         if c.is_ascii_digit() {
+            let lit_start = i;
             if c == '0' && i + 1 < n && (chars[i + 1] == 'x' || chars[i + 1] == 'X') {
+                let lit_start = i;
                 i += 2;
                 let mut v: i64 = 0;
+                let mut bad = false;
                 while i < n && chars[i].is_ascii_hexdigit() {
                     // checked arithmetic: a hex literal that does not fit i64
                     // is an error, not a silently wrapped value
-                    v = v.checked_mul(16)
-                        .and_then(|v| v.checked_add(chars[i].to_digit(16).unwrap() as i64))
-                        .unwrap_or_else(|| panic!("vulcan: integer literal out of range for i64 (line {line})"));
+                    match v.checked_mul(16).and_then(|v| v.checked_add(chars[i].to_digit(16).unwrap() as i64)) {
+                        Some(x) => v = x,
+                        None => bad = true,
+                    }
                     i += 1;
                 }
-                toks.push((Tok::Int(v), line));
+                if bad {
+                    diags.push(crate::diag::Diag::new(line, col(lit_start, line_start),
+                        "integer literal out of range for i64"));
+                } else {
+                    toks.push((Tok::Int(v), line));
+                }
                 continue;
             }
             if c == '0' && i + 1 < n && (chars[i + 1] == 'b' || chars[i + 1] == 'B') {
+                let lit_start = i;
                 i += 2;
                 let mut v: i64 = 0;
+                let mut bad = false;
                 while i < n && (chars[i] == '0' || chars[i] == '1') {
-                    v = v.checked_mul(2)
-                        .and_then(|v| v.checked_add((chars[i] == '1') as i64))
-                        .unwrap_or_else(|| panic!("vulcan: integer literal out of range for i64 (line {line})"));
+                    match v.checked_mul(2).and_then(|v| v.checked_add((chars[i] == '1') as i64)) {
+                        Some(x) => v = x,
+                        None => bad = true,
+                    }
                     i += 1;
                 }
-                toks.push((Tok::Int(v), line));
+                if bad {
+                    diags.push(crate::diag::Diag::new(line, col(lit_start, line_start),
+                        "integer literal out of range for i64"));
+                } else {
+                    toks.push((Tok::Int(v), line));
+                }
                 continue;
             }
             let mut s = String::new();
@@ -129,9 +151,15 @@ pub fn lex(src: &str) -> Vec<(Tok, usize)> {
                 }
             }
             if is_float {
-                toks.push((Tok::Float(s.parse().unwrap_or_else(|_| panic!("vulcan: bad float literal `{s}` (line {line})"))), line));
+                match s.parse::<f64>() {
+                    Ok(v) => toks.push((Tok::Float(v), line)),
+                    Err(_) => diags.push(crate::diag::Diag::new(line, col(lit_start, line_start), format!("bad float literal `{s}`"))),
+                }
             } else {
-                toks.push((Tok::Int(s.parse().unwrap_or_else(|_| panic!("vulcan: integer literal `{s}` out of range for i64 (line {line})"))), line));
+                match s.parse::<i64>() {
+                    Ok(v) => toks.push((Tok::Int(v), line)),
+                    Err(_) => diags.push(crate::diag::Diag::new(line, col(lit_start, line_start), format!("integer literal `{s}` out of range for i64"))),
+                }
             }
             continue;
         }
@@ -217,6 +245,16 @@ pub fn lex(src: &str) -> Vec<(Tok, usize)> {
         i += 1;
     }
     toks.push((Tok::EOF, line));
+    (toks, diags)
+}
+
+// Historic entry point: lex and abort with a rendered diagnostic on the first
+// literal error. New code should prefer lex_diags.
+pub fn lex(src: &str) -> Vec<(Tok, usize)> {
+    let (toks, diags) = lex_diags(src);
+    if let Some(d) = diags.first() {
+        panic!("vulcan: line {}:{}: {}", d.line, d.col, d.msg);
+    }
     toks
 }
 

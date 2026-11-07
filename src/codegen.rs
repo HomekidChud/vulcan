@@ -544,6 +544,7 @@ fn generate_inner(program: &[Item], tests: Option<&[String]>) -> String {
             args: vec![Expr::Str("all tests passed".into())],
         }));
         let main_decl = FnDecl {
+            line: 0, // synthesized (not from source)
             name: "main".into(),
             params: vec![],
             ret: Ty::Void,

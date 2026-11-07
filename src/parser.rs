@@ -37,6 +37,7 @@ pub struct ImplDecl {
 
 #[derive(Debug, Clone)]
 pub struct FnDecl {
+    pub line: usize, // 1-based source line of the `fn` keyword
     pub name: String,
     pub params: Vec<(String, Ty)>,
     pub ret: Ty,
@@ -45,18 +46,21 @@ pub struct FnDecl {
 
 #[derive(Debug, Clone)]
 pub struct StructDecl {
+    pub line: usize, // 1-based source line of the `struct` keyword
     pub name: String,
     pub fields: Vec<(String, Ty)>,
 }
 
 #[derive(Debug, Clone)]
 pub struct EnumDecl {
+    pub line: usize, // 1-based source line of the `enum` keyword
     pub name: String,
     pub variants: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
 pub struct ConstDecl {
+    pub line: usize, // 1-based source line of the `const` keyword
     pub name: String,
     pub ty: Option<Ty>,
     pub value: ConstVal,
@@ -115,10 +119,11 @@ pub enum Expr {
 pub struct Parser {
     toks: Vec<(Tok, usize)>,
     pos: usize,
+    fn_line: usize, // line of the most recent `fn` keyword (decl line stamp)
 }
 
 pub fn parse_program(toks: &[(Tok, usize)]) -> Vec<Item> {
-    let mut p = Parser { toks: toks.to_vec(), pos: 0 };
+    let mut p = Parser { toks: toks.to_vec(), pos: 0, fn_line: 0 };
     let mut items = Vec::new();
     while p.peek() != &Tok::EOF {
         items.push(p.parse_item());
@@ -176,7 +181,9 @@ impl Parser {
             };
             return Item::Import(spec);
         }
-        if self.eat(&Tok::KwConst) {
+        if self.peek() == &Tok::KwConst {
+            let line = self.peek_line();
+            self.next();
             let name = self.ident("const name");
             let ty = if self.eat(&Tok::Colon) {
                 Some(self.parse_ty())
@@ -192,9 +199,11 @@ impl Parser {
                 Tok::KwFalse => ConstVal::Bool(false),
                 other => self.err(format!("const value must be a literal, got {other:?}")),
             };
-            return Item::Const(ConstDecl { name, ty, value });
+            return Item::Const(ConstDecl { line, name, ty, value });
         }
-        if self.eat(&Tok::KwEnum) {
+        if self.peek() == &Tok::KwEnum {
+            let line = self.peek_line();
+            self.next();
             let name = self.ident("enum name");
             self.expect(Tok::LBrace, "{ to open enum");
             let mut variants = Vec::new();
@@ -202,9 +211,11 @@ impl Parser {
                 variants.push(self.ident("enum variant"));
                 self.eat(&Tok::Comma);
             }
-            return Item::Enum(EnumDecl { name, variants });
+            return Item::Enum(EnumDecl { line, name, variants });
         }
-        if self.eat(&Tok::KwStruct) {
+        if self.peek() == &Tok::KwStruct {
+            let line = self.peek_line();
+            self.next();
             let name = self.ident("struct name");
             self.expect(Tok::LBrace, "{");
             let mut fields = Vec::new();
@@ -215,7 +226,7 @@ impl Parser {
                 fields.push((fname, fty));
                 self.eat(&Tok::Comma);
             }
-            return Item::Struct(StructDecl { name, fields });
+            return Item::Struct(StructDecl { line, name, fields });
         }
         if self.eat(&Tok::KwExtern) {
             // extern "c" { fn sig; fn sig; }   (abi defaults to "c")
@@ -229,6 +240,7 @@ impl Parser {
             self.expect(Tok::LBrace, "{ to open extern block");
             let mut fns = Vec::new();
             while !self.eat(&Tok::RBrace) {
+                self.fn_line = self.peek_line();
                 self.expect(Tok::KwFn, "fn signature in extern block");
                 fns.push(self.parse_fn_sig());
             }
@@ -251,11 +263,13 @@ impl Parser {
             self.expect(Tok::LBrace, "{ to open impl");
             let mut fns = Vec::new();
             while !self.eat(&Tok::RBrace) {
+                self.fn_line = self.peek_line();
                 self.expect(Tok::KwFn, "fn in impl block");
                 fns.push(self.parse_fn());
             }
             return Item::Impl(ImplDecl { struct_name, fns });
         }
+        self.fn_line = self.peek_line(); // line of the `fn` keyword (peek is KwFn here)
         self.expect(Tok::KwFn, "fn (or struct/enum/const/import) at top level");
         self.parse_fn_as_item()
     }
@@ -266,6 +280,8 @@ impl Parser {
     }
 
     fn parse_fn(&mut self) -> FnDecl {
+        let line = self.fn_line;
+        self.fn_line = 0;
         let name = self.ident("fn name");
         self.expect(Tok::LParen, "(");
         let mut params = Vec::new();
@@ -289,11 +305,13 @@ impl Parser {
         };
         self.expect(Tok::LBrace, "{ to open fn body");
         let body = self.parse_block();
-        FnDecl { name, params, ret, body }
+        FnDecl { line, name, params, ret, body }
     }
 
     // signature-only fn (inside extern blocks): `fn name(params) -> ret;`
     fn parse_fn_sig(&mut self) -> FnDecl {
+        let line = self.fn_line;
+        self.fn_line = 0;
         let name = self.ident("extern fn name");
         self.expect(Tok::LParen, "(");
         let mut params = Vec::new();
@@ -310,7 +328,7 @@ impl Parser {
             Ty::Void
         };
         self.eat(&Tok::Semi);
-        FnDecl { name, params, ret, body: Vec::new() }
+        FnDecl { line, name, params, ret, body: Vec::new() }
     }
 
     fn parse_block(&mut self) -> Vec<Stmt> {
@@ -736,7 +754,7 @@ impl Parser {
                 if inner.trim().is_empty() { self.err("empty {} in f-string (use a positional print, or put an expression inside: {x})".into()); }
                 if !lit.is_empty() { parts.push(IPart::Lit(std::mem::take(&mut lit))); }
                 let toks = crate::lexer::lex(&inner);
-                let mut p = Parser { toks, pos: 0 };
+                let mut p = Parser { toks, pos: 0, fn_line: 0 };
                 let e = p.parse_expr();
                 if p.peek() != &Tok::EOF { p.err(format!("unexpected token after f-string expression")); }
                 parts.push(IPart::E(e));

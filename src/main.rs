@@ -5,6 +5,7 @@ mod lexer;
 mod parser;
 mod codegen;
 mod sema;
+mod diag;
 mod codegen_js;
 mod codegen_py;
 mod cli;
@@ -31,6 +32,7 @@ USAGE (single file):
   vulcan bench <file.vulcan>  compile, run, time it
   vulcan package <file.vulcan> --platform <p>   ship it: web, desktop, android, ios,
                                mobile (iOS+Android), linux, windows, macos
+  vulcan check <file.vulcan>  type-check without building (file:line:col errors)
   vulcan test <file.vulcan>   run every fn test_*() in the file
   vulcan doc <file|dir>       print the public API (structs, fns, consts)
 
@@ -105,6 +107,14 @@ fn main() {
     }
     if matches!(cmd.as_str(), "version" | "--version" | "-V") {
         println!("vulcan {VERSION}");
+        return;
+    }
+    if cmd == "check" {
+        if args.len() < 3 {
+            eprintln!("usage: vulcan check <file.vulcan>");
+            std::process::exit(1);
+        }
+        check_file(&args[2]);
         return;
     }
     if matches!(cmd.as_str(), "help" | "--help" | "-h") {
@@ -357,4 +367,59 @@ fn cc_on_path(name: &str) -> Option<String> {
         }
     }
     None
+}
+
+// `vulcan check <file>` — lex, parse (with imports) and run the semantic
+// checks WITHOUT building. Reports in file:line:col format with a caret,
+// collecting as many errors as possible per run.
+fn check_file(path_str: &str) {
+    let path = Path::new(path_str);
+    let src = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => { eprintln!("vulcan: cannot read {path_str}: {e}"); std::process::exit(1); }
+    };
+    let mut diags: Vec<diag::Diag> = Vec::new();
+
+    // 1. lexer errors (collected, not first-abort). If the source does not
+    // lex cleanly, parsing it is meaningless — report and stop here.
+    let (_, lex_errs) = lexer::lex_diags(&src);
+    if !lex_errs.is_empty() {
+        eprint!("{}", diag::render(&src, path_str, &lex_errs));
+        eprintln!("vulcan check: {} error(s) in {path_str}", lex_errs.len());
+        std::process::exit(1);
+    }
+
+    // 2. parse + imports + semantic checks; a panic (syntax error, missing
+    // import) is converted into a Diag with its line number if we can find one
+    let result = {
+        let prev_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {})); // silence the default panic printer
+        let r = std::panic::catch_unwind(|| {
+            let program = modules::load_program(path);
+            sema::check_program(&program)
+        });
+        std::panic::set_hook(prev_hook);
+        r
+    };
+    match result {
+        Ok(mut d) => diags.extend(d),
+        Err(payload) => {
+            let msg = if let Some(s) = payload.downcast_ref::<String>() { s.clone() }
+                else if let Some(s) = payload.downcast_ref::<&str>() { s.to_string() }
+                else { "unknown error".to_string() };
+            let msg = msg.strip_prefix("vulcan: ").unwrap_or(&msg).to_string();
+            let line = msg.split("line ").nth(1)
+                .and_then(|rest| rest.chars().take_while(|c| c.is_ascii_digit()).collect::<String>().parse().ok())
+                .unwrap_or(0);
+            diags.push(diag::Diag::new(line, 0, msg));
+        }
+    }
+
+    if diags.is_empty() {
+        println!("vulcan check: ok ({path_str})");
+    } else {
+        eprint!("{}", diag::render(&src, path_str, &diags));
+        eprintln!("vulcan check: {} error(s) in {path_str}", diags.len());
+        std::process::exit(1);
+    }
 }
