@@ -139,10 +139,28 @@ fn main() -> void {
     print("loaded terrain n:", ld.terrain.len(), "h[0][0]:", ld.terrain[0][0])
     print("loaded ents:", ld.entities.len(), "bot hp:", ld.entities[1].hp, "bot name:", ld.entities[1].name)
     print("loaded bot pos:", ld.entities[1].pos.x, ld.entities[1].pos.y, ld.entities[1].pos.z)
+    // ---- v0.4: atmosphere, fog, third-person camera, pickups, compass ----
+    let sky0 = sky_colors(0.0)
+    let sky30 = sky_colors(30.0)
+    let sky90 = sky_colors(90.0)
+    print("sky dawn:", sky0[0], sky0[1])
+    print("sky noon:", sky30[0], sky30[1])
+    print("sky midnight:", sky90[0], sky90[1])
+    print("sun light noon:", sun_light(30.0), "midnight:", sun_light(90.0))
+    print("fog near:", fog_mix(0xFF0000, 10.0, 0x8ECAE6), "far:", fog_mix(0xFF0000, 200.0, 0x8ECAE6))
+    print("sea:", sea_color(0.0, sky0[1]), sea_color(1.0, sky0[1]))
+    let c3 = cam_third_person(Vec3 { x: 0.0, y: 0.0, z: 0.0 }, 0.5, 5.0, 0.3)
+    print("third cam:", c3.x, c3.y, c3.z, c3.yaw)
+    let pk = scene_new()
+    pk = scene_spawn_pickup(pk, "medkit", Vec3 { x: 2.0, y: 1.0, z: 2.0 })
+    print("pickup:", pk.entities[0].kind, pk.entities[0].name, pk.entities[0].radius)
+    draw_sky_gradient(0x0000FF, 0xFF0000, 144)
+    hud_compass(0.0, 4, 4, 40)
+    print("atmosphere drawn")
 }
 "#;
 
-const ENGINE_TEST_EXPECTED: &str = "spawned: 1 2 3 alive bots: 2\nplayer settled at y: 0.5 time: 2\nterrain at (0,0): 0 at (16,16): 0\nafter reap, bots alive: 1\nafter tick, time: 2.1\nray_sphere hit: 9\nray_sphere miss: -1\nray_aabb hit: 5\nray_aabb miss: false\nterrain corners flat: 0 0\nterrain center: 3.76924\nbot state: 3 vel z: -8\nbot hp after hit: 70\nentities now: 4\nbot hp after projectile: 45 steps: 4\nfp cam: 1 3.6 3 0.5 -0.2\norbit cam: 10 5 0\ncube verts: 8 faces: 12\nparticles: 2\nafter step p0 life: 0.4 p0 y: 2.01 p1 life: 1.4\np0 active: false p1 life: 0.9\nweapon: rifle ammo: 5 can fire: true\nafter fire ammo: 4 can fire: false\nafter tick can fire: true\ntotal shots: 4 ammo: 0\nreloading: true\nafter reload ammo: 5 reloading: 0\nloaded time: 0 gravity: -30 next_id: 3\nloaded terrain n: 8 h[0][0]: 0\nloaded ents: 2 bot hp: 70 bot name: bot\nloaded bot pos: -4 0.5 6\n";
+const ENGINE_TEST_EXPECTED: &str = "spawned: 1 2 3 alive bots: 2\nplayer settled at y: 0.5 time: 2\nterrain at (0,0): 0 at (16,16): 0\nafter reap, bots alive: 1\nafter tick, time: 2.1\nray_sphere hit: 9\nray_sphere miss: -1\nray_aabb hit: 5\nray_aabb miss: false\nterrain corners flat: 0 0\nterrain center: 3.76924\nbot state: 3 vel z: -8\nbot hp after hit: 70\nentities now: 4\nbot hp after projectile: 45 steps: 4\nfp cam: 1 3.6 3 0.5 -0.2\norbit cam: 10 5 0\ncube verts: 8 faces: 12\nparticles: 2\nafter step p0 life: 0.4 p0 y: 2.01 p1 life: 1.4\np0 active: false p1 life: 0.9\nweapon: rifle ammo: 5 can fire: true\nafter fire ammo: 4 can fire: false\nafter tick can fire: true\ntotal shots: 4 ammo: 0\nreloading: true\nafter reload ammo: 5 reloading: 0\nloaded time: 0 gravity: -30 next_id: 3\nloaded terrain n: 8 h[0][0]: 0\nloaded ents: 2 bot hp: 70 bot name: bot\nloaded bot pos: -4 0.5 6\nsky dawn: 3483214 10972492\nsky noon: 9292261 13430524\nsky midnight: 461590 1054760\nsun light noon: 1 midnight: 0.22\nfog near: 16711680 far: 10398659\nsea: 3764885 4228009\nthird cam: -2.29006 3.0776 -4.19193 0.5\npickup: 3 medkit 0.4\natmosphere drawn\n";
 
 // 3D renderer selftest main — concatenated after lib/render3d.vulcan
 const RENDER3D_TEST_MAIN: &str = r#"

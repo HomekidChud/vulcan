@@ -5,7 +5,7 @@ effort. Verify with `cargo build --release && VULCAN_CC=gcc ./target/release/vul
 after every change — all 24 cases must pass byte-identically on C, JS, and
 Python backends before pushing.
 
-## Current state (v1.6)
+## Current state (v1.7)
 
 - Language: structs, enums, impl methods, match, f-strings, defer, FFI
   (`extern "c"` + `link`), nested arrays `[[T]]` (scalar bases in struct
@@ -24,10 +24,17 @@ Python backends before pushing.
   `scene_shoot` hitscan, `scene_fire_projectile` with swept-impact
   anti-tunneling test, `bot_think` wander/chase/attack AI with steering,
   player controller, HUD, fixed-timestep loop, meshes with flat shading,
-  first-person/orbit/spectator cameras, particles, weapons with
-  ammo/reload, save/load level format).
+  first-person/orbit/spectator/third-person cameras, particles, weapons with
+  ammo/reload, save/load level format, **v0.4**: 2x2 supersampled
+  antialiasing + vignette in ALL backends (512x288 render, 256x144 resolve),
+  day/night cycle (`sky_colors`, `sun_light`), distance fog (`fog_mix`),
+  animated sea (`sea_color`), sky gradient (`draw_sky_gradient`), heading
+  compass (`hud_compass`), pickups (`scene_spawn_pickup`), `mouse_dx/dy`
+  builtins with web pointer-lock mouse look).
 - Tooling: IDE, package manager, `vulcan test`, `vulcan package`
   (web/desktop/mobile/native bundles), selftest (24 cases). `vulcan doc` + GitHub Actions CI.
+- Web bundles: single index.html with terminal + 256x144 AA canvas output,
+  keyboard AND mouse input (pointer lock), filesystem shim.
 
 ## Compiler / language (highest impact first)
 
@@ -71,6 +78,70 @@ Python backends before pushing.
 - [ ] **Bitwise ops on enums** — treat enums as flags (`|`/`&`/`^` already
       emit on i64 via `__bor` etc. on JS; make the type checker accept
       enum-typed operands).
+
+## Roadmap: what "compete with Unity/Unreal" actually requires
+
+Unity and Unreal are decades of engineering: GPU renderers, editors,
+asset pipelines, networking, and huge ecosystems. Nobody closes that in
+one repo. The honest plan is phases, each shippable on its own:
+
+### Phase 1 — software renderer polish (v0.4, DONE)
+- [x] ~~Antialiasing~~ — 2x2 supersampling in all three backends,
+      byte-identical resolve (selftest-guarded).
+- [x] ~~Day/night cycle, fog, animated water, sky gradient~~ — v0.4.
+- [x] ~~Third-person camera + web mouse look~~ — v0.4.
+
+### Phase 2 — rendering depth (next 1-3 sessions)
+- [ ] **Textures on triangles** — per-face color + checker/noise
+      procedural textures; then bitmap textures via `file_read` (BMP/PPM
+      first, no external deps).
+- [ ] **Shadows** — blob shadows (cheap, one quad) then a single
+      directional shadow pass (project terrain silhouettes to a depth
+      map, sample when shading).
+- [ ] **LOD terrain** — far cells merge into bigger quads; keeps the
+      20x20 grid fast at 64x64 and beyond.
+- [ ] **MSAA 4x option** — supersampling is 4x fill cost; edge-only
+      MSAA at tri boundaries would halve it.
+- [ ] **Sprite/billboard entities** — camera-facing quads with alpha,
+      for trees/particles at distance.
+
+### Phase 3 — engine systems (sessions 4-8)
+- [ ] **Animation component** — keyframed transform tracks on entities
+      (position/rotation/scale curves), driven by scene time.
+- [ ] **2D physics integration** — bolt `lib/physics.vulcan` bodies to
+      entities (they currently only do gravity + terrain rest).
+- [ ] **Slope collision + step-up** — finite-difference terrain gradient,
+      wall push-out, slope sliding.
+- [ ] **A\* pathfinding** over the terrain grid; bots route around water.
+- [ ] **Audio via FFI** — miniaudio: `sound_play(name, vol, pitch)`,
+      no-op stubs on JS/Py (like the graphics builtins).
+- [ ] **Inventory + items** — pickup -> inventory -> equip/use flow on
+      top of `scene_spawn_pickup`.
+- [ ] **UI toolkit** — anchored panels, buttons, text wrapping, built on
+      draw_rect/draw_text; enough for menus and a lobby.
+
+### Phase 4 — GPU rendering (the real leap)
+- [ ] **Raylib binding layer** (`lib/raylib.vulcan`) — `extern "c"` +
+      `link "raylib"`: real GPU triangles, textures, shaders, models.
+      Software renderer stays as the portable fallback (web/IDE).
+- [ ] **WebGL2 output for web bundles** — the worker already posts
+      frames; post draw lists instead and render on the page GPU.
+- [ ] **Asset pipeline** — load meshes/textures from the package fs
+      into engine types.
+
+### Phase 5 — platform & shipping
+- [ ] **Android APK** — `vulcan package --platform mobile` scaffold
+      exists; needs Capacitor + Android SDK on a real machine, then
+      `./gradlew assembleDebug` produces the APK. Document the exact
+      steps in README once tested on hardware.
+- [ ] **Desktop binaries** — the Electron desktop bundle works today;
+      add a pure-native window (SDL) path.
+- [ ] ** itch.io / web publishing** — the single-file web bundle is
+      already drop-in for itch.io uploads.
+
+### Phase 6 — the game (private repo: vulcan-royale)
+See the section at the bottom. The engine phases above are its
+prerequisites.
 
 ## Performance path to "beat C++" (realistic framing)
 
@@ -124,7 +195,7 @@ proprietary product) — it is vulcan's own engine, built in pure vulcan.
       declarations for windowed GPU rendering, textures, and input at native
       speed. This is the real path to Fortnite-scale visuals.
 - [x] ~~Camera modes~~ — DONE in v0.3 (`cam_first_person`, `cam_orbit`,
-      `cam_spectator`; chase remains the default scene camera).
+      `cam_spectator`); v0.4 adds `cam_third_person` (boom camera).
 - [x] ~~Weapon system~~ — DONE in v0.3 (`Weapon` struct: fire-rate gating,
       ammo magazine, reload timing; `weapon_tick` / `weapon_can_fire` /
       `weapon_fire` / `weapon_reload`).
@@ -132,6 +203,10 @@ proprietary product) — it is vulcan's own engine, built in pure vulcan.
       `MAX_PARTICLES`, gravity + lifetime, `draw_particles` with fading).
 - [x] ~~Save states~~ — DONE in v0.3 (`scene_save` / `scene_load` text
       format; %.6g floats round-trip identically on all backends).
+- [x] ~~Atmosphere~~ — DONE in v0.4 (day/night `sky_colors`/`sun_light`,
+      `fog_mix`, `sea_color`, `draw_sky_gradient`, `hud_compass`,
+      `scene_spawn_pickup`, `mouse_dx`/`mouse_dy` builtins + web pointer
+      lock).
 - [ ] **Multiplayer-ready determinism** — fixed timestep already helps;
       document + test that identical input sequences give identical
       scenes across backends (extend selftest with a 1000-tick

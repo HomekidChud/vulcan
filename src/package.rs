@@ -123,6 +123,7 @@ onmessage = (e) => {
     const d = e.data || {};
     if (d.init) { for (const k in d.fs) __vfs.set(k, d.fs[k]); runMain(); }
     if (d.keys) __vkeys.push(...d.keys);
+    if (d.mouse) { __mdx += d.mouse[0]; __mdy += d.mouse[1]; }
 };
 const process = {
     argv: ["vulcan", "app"],
@@ -349,6 +350,12 @@ document.addEventListener("keydown", (e) => {
     if (e.key.length === 1) code = e.key.charCodeAt(0);
     else if (KEYMAP[e.key] !== undefined) code = KEYMAP[e.key];
     if (code !== null) { e.preventDefault(); worker.postMessage({ keys: [code] }); }
+});
+// mouse look: click the canvas to lock the pointer, move to look, Esc to release
+const vscreen = document.getElementById("vscreen");
+vscreen.addEventListener("click", () => { if (vscreen.requestPointerLock) vscreen.requestPointerLock(); });
+document.addEventListener("mousemove", (e) => {
+    if (document.pointerLockElement === vscreen) worker.postMessage({ mouse: [e.movementX || 0, e.movementY || 0] });
 });
 worker.postMessage({ init: true, fs: savedFs });
 </script>

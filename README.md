@@ -13,6 +13,28 @@ fn main() {
 }
 ```
 
+## Vulcan 1.7 — what's new
+
+**Vulcan Engine v0.4** — antialiasing, a living atmosphere, and mouse look.
+
+- **Supersampled antialiasing (all backends)** — every program now renders
+  internally at 512x288 and resolves to 256x144 with a 2x2 box filter plus
+  a subtle vignette. Edges on lines, circles, triangles, and text are
+  smooth; the resolve is byte-identical across the C, JS, and Python
+  backends (selftest-guarded).
+- **Day/night cycle** — `sky_colors(time)` (dawn/noon/dusk/midnight sky
+  gradients) and `sun_light(time)` ambient light; a full cycle is 120
+  simulated seconds.
+- **Atmosphere** — `fog_mix` distance fog blending toward the sky,
+  `sea_color` animated water, `draw_sky_gradient` cheap skybox.
+- **Third-person camera + mouse look** — `cam_third_person` boom camera,
+  new `mouse_dx()` / `mouse_dy()` builtins; the web bundle uses pointer
+  lock so FPS-style mouse look works in the browser.
+- **HUD + gameplay** — `hud_compass` heading strip, `scene_spawn_pickup`
+  health/ammo pickups (bobbing, on the minimap).
+- **Island demo v2** — the example now has a full day/night cycle, fog,
+  animated sea, pickups, a compass, and three camera modes (C to cycle).
+
 ## Vulcan 1.6 — what's new
 
 **Vulcan Engine v0.3** — meshes, cameras, particles, weapons, save files — plus `vulcan doc` and CI.

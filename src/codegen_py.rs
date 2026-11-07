@@ -145,8 +145,9 @@ def _min(a, b): return a if a < b else b
 def _max(a, b): return a if a > b else b
 def _exit(c): sys.exit(c)
 import shutil
-# ---- graphics: 256x144 framebuffer, presented to the terminal (IDE canvas via the JS backend) ----
-__FB_W, __FB_H = 256, 144
+# ---- graphics: 512x288 supersampled framebuffer (2x2 SSAA), resolved to 256x144 on present ----
+__FB_W, __FB_H = 512, 288
+__VAA, __OUT_W, __OUT_H = 2, 256, 144
 _fb = [0] * (__FB_W * __FB_H)
 _zbuf = [1e30] * (__FB_W * __FB_H)
 __FONT_CHARS = " 0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ.:-!?/+%"
@@ -159,6 +160,7 @@ def _clear(c):
 # depth-buffered triangle: z compared with < (near = smaller); winding-insensitive
 def _draw_tri(x0, y0, z0, x1, y1, z1, x2, y2, z2, c):
     c = int(c)
+    x0 *= 2; y0 *= 2; x1 *= 2; y1 *= 2; x2 *= 2; y2 *= 2
     area = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0)
     if area == 0: return
     if area < 0:
@@ -185,6 +187,7 @@ def _draw_tri(x0, y0, z0, x1, y1, z1, x2, y2, z2, c):
                     _fb[idx] = c
 def _draw_rect(x, y, w, h, c):
     c = int(c)
+    x *= 2; y *= 2; w *= 2; h *= 2
     x0 = max(0, math.ceil(x - 0.5)); x1 = min(__FB_W - 1, math.floor(x + w - 0.5))
     y0 = max(0, math.ceil(y - 0.5)); y1 = min(__FB_H - 1, math.floor(y + h - 0.5))
     for py in range(y0, y1 + 1):
@@ -193,6 +196,7 @@ def _draw_rect(x, y, w, h, c):
 def _draw_circle(x, y, r, c):
     if r < 0: return
     c = int(c)
+    x *= 2; y *= 2; r *= 2
     x0 = max(0, math.ceil(x - r - 0.5)); x1 = min(__FB_W - 1, math.floor(x + r + 0.5))
     y0 = max(0, math.ceil(y - r - 0.5)); y1 = min(__FB_H - 1, math.floor(y + r + 0.5))
     r2 = r * r
@@ -202,6 +206,7 @@ def _draw_circle(x, y, r, c):
             if dx * dx + dy * dy <= r2: _fb[py * __FB_W + px] = c
 def _draw_line(x0, y0, x1, y1, c):
     c = int(c)
+    x0 *= 2; y0 *= 2; x1 *= 2; y1 *= 2
     px, py = round(x0), round(y0)
     ex, ey = round(x1), round(y1)
     dx, dy = abs(ex - px), abs(ey - py)
@@ -209,7 +214,9 @@ def _draw_line(x0, y0, x1, y1, c):
     sy = 1 if py < ey else -1
     err = dx - dy
     while True:
-        if 0 <= px < __FB_W and 0 <= py < __FB_H: _fb[py * __FB_W + px] = c
+        for oy in range(2):
+            for ox in range(2):
+                if 0 <= px + ox < __FB_W and 0 <= py + oy < __FB_H: _fb[(py + oy) * __FB_W + px + ox] = c
         if px == ex and py == ey: break
         e2 = 2 * err
         if e2 > -dy:
@@ -220,7 +227,7 @@ def _draw_text(x, y, s, c):
     if not isinstance(s, str): s = str(int(s)) if float(s).is_integer() else _g6(s)
     c = int(c)
     s = s.upper()
-    bx, by = round(x), round(y)
+    bx, by = round(x) * 2, round(y) * 2
     for i, ch in enumerate(s):
         gi = __FONT_CHARS.find(ch)
         if gi < 0: continue
@@ -228,9 +235,29 @@ def _draw_text(x, y, s, c):
             bits = ord(__FONT_DATA[gi * 5 + row]) - 48
             for col in range(3):
                 if bits & (4 >> col):
-                    px, py = bx + i * 4 + col, by + row
-                    if 0 <= px < __FB_W and 0 <= py < __FB_H: _fb[py * __FB_W + px] = c
+                    px, py = bx + i * 8 + col * 2, by + row * 2
+                    for oy in range(2):
+                        for ox in range(2):
+                            if 0 <= px + ox < __FB_W and 0 <= py + oy < __FB_H: _fb[(py + oy) * __FB_W + px + ox] = c
+def _downsample():
+    # supersampling resolve: average 2x2 blocks + subtle vignette -> 256x144
+    out = [0] * (__OUT_W * __OUT_H)
+    for y in range(__OUT_H):
+        for x in range(__OUT_W):
+            ur = ug = ub = 0
+            for sy in range(__VAA):
+                for sx in range(__VAA):
+                    v = _fb[(y * __VAA + sy) * __FB_W + x * __VAA + sx]
+                    ur += (v >> 16) & 255; ug += (v >> 8) & 255; ub += v & 255
+            dx = (x - 127.5) / 127.5; dy = (y - 71.5) / 71.5
+            f = 1.0 - (dx * dx + dy * dy) * 0.30
+            if f < 0.0: f = 0.0
+            if f > 1.0: f = 1.0
+            r = int(((ur + 2) >> 2) * f); g = int(((ug + 2) >> 2) * f); b = int(((ub + 2) >> 2) * f)
+            out[y * __OUT_W + x] = (r << 16) | (g << 8) | b
+    return out
 def _present():
+    down = _downsample()
     out = ["\x1b[H"]
     for cy in range(18):
         row = []
@@ -238,16 +265,18 @@ def _present():
             ur = ug = ub = lr = lg = lb = 0
             for sy in range(4):
                 for sx in range(4):
-                    v = _fb[(cy * 8 + sy) * __FB_W + cx * 4 + sx]
+                    v = down[(cy * 8 + sy) * __OUT_W + cx * 4 + sx]
                     ur += (v >> 16) & 255; ug += (v >> 8) & 255; ub += v & 255
             for sy in range(4, 8):
                 for sx in range(4):
-                    v = _fb[(cy * 8 + sy) * __FB_W + cx * 4 + sx]
+                    v = down[(cy * 8 + sy) * __OUT_W + cx * 4 + sx]
                     lr += (v >> 16) & 255; lg += (v >> 8) & 255; lb += v & 255
             row.append("\x1b[38;2;%d;%d;%dm\x1b[48;2;%d;%d;%dm\u2580" % ((ur + 8) >> 4, (ug + 8) >> 4, (ub + 8) >> 4, (lr + 8) >> 4, (lg + 8) >> 4, (lb + 8) >> 4))
         out.append("".join(row) + "\x1b[0m\n")
     sys.stdout.write("".join(out))
 def _mouse_x(): return -1.0
+def _mouse_dx(): return 0.0
+def _mouse_dy(): return 0.0
 def _mouse_y(): return -1.0
 def _mouse_down(): return False
 def _key_down(c): return False
@@ -1313,6 +1342,8 @@ impl PyGen {
             }
             "present" => ("(_present(), None)".into(), Ty::Void),
             "mouse_x" => ("_mouse_x()".into(), Ty::F64),
+            "mouse_dx" => ("_mouse_dx()".into(), Ty::F64),
+            "mouse_dy" => ("_mouse_dy()".into(), Ty::F64),
             "mouse_y" => ("_mouse_y()".into(), Ty::F64),
             "mouse_down" => ("_mouse_down()".into(), Ty::Bool),
             "key_down" => {

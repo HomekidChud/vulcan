@@ -98,8 +98,8 @@ function __clear_screen() { __out("\x1b[2J\x1b[H"); }
 function __exit(c) { process.exit(c); }
 function __min(a, b) { return a < b ? a : b; }
 function __max(a, b) { return a > b ? a : b; }
-// ---- graphics: 256x144 framebuffer, presented to the IDE canvas or terminal ----
-const __FB_W = 256, __FB_H = 144;
+// ---- graphics: 512x288 supersampled framebuffer (2x2 SSAA), resolved to 256x144 on present ----
+const __FB_W = 512, __FB_H = 288, __VAA = 2, __OUT_W = 256, __OUT_H = 144;
 const __fb = new Int32Array(__FB_W * __FB_H);
 const __zbuf = new Float64Array(__FB_W * __FB_H);
 const __FONT_CHARS = " 0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ.:-!?/+%";
@@ -107,6 +107,7 @@ const __FONT_DATA = "00000755572622771747717175571174717747577112275757757177575
 function __clear(c) { __fb.fill(c | 0); __zbuf.fill(1e30); }
 // depth-buffered triangle: (x,y,z) vertices, z compared with < (near = smaller)
 function __draw_tri(x0, y0, z0, x1, y1, z1, x2, y2, z2, c) {
+    x0 *= 2; y0 *= 2; x1 *= 2; y1 *= 2; x2 *= 2; y2 *= 2; // supersampling
     let area = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0);
     if (area === 0) return;
     if (area < 0) { // normalize winding so barycentric insides are >= 0
@@ -134,6 +135,7 @@ function __draw_tri(x0, y0, z0, x1, y1, z1, x2, y2, z2, c) {
     }
 }
 function __draw_rect(x, y, w, h, c) {
+    x *= 2; y *= 2; w *= 2; h *= 2;
     const x0 = Math.ceil(x - 0.5), x1 = Math.floor(x + w - 0.5);
     const y0 = Math.ceil(y - 0.5), y1 = Math.floor(y + h - 0.5);
     const a = Math.max(0, x0), b = Math.min(__FB_W - 1, x1), d = Math.min(__FB_H - 1, y1);
@@ -141,6 +143,7 @@ function __draw_rect(x, y, w, h, c) {
         for (let px = a; px <= b; px++) __fb[py * __FB_W + px] = c | 0;
 }
 function __draw_circle(x, y, r, c) {
+    x *= 2; y *= 2; r *= 2;
     if (r < 0) return;
     const x0 = Math.max(0, Math.ceil(x - r - 0.5)), x1 = Math.min(__FB_W - 1, Math.floor(x + r + 0.5));
     const y0 = Math.max(0, Math.ceil(y - r - 0.5)), y1 = Math.min(__FB_H - 1, Math.floor(y + r + 0.5));
@@ -152,13 +155,15 @@ function __draw_circle(x, y, r, c) {
         }
 }
 function __draw_line(x0, y0, x1, y1, c) {
+    x0 *= 2; y0 *= 2; x1 *= 2; y1 *= 2;
     let px = Math.round(x0), py = Math.round(y0);
     const ex = Math.round(x1), ey = Math.round(y1);
     const dx = Math.abs(ex - px), dy = Math.abs(ey - py);
     const sx = px < ex ? 1 : -1, sy = py < ey ? 1 : -1;
     let err = dx - dy;
     for (;;) {
-        if (px >= 0 && px < __FB_W && py >= 0 && py < __FB_H) __fb[py * __FB_W + px] = c | 0;
+        for (let oy = 0; oy < 2; oy++) for (let ox = 0; ox < 2; ox++)
+            if (px + ox >= 0 && px + ox < __FB_W && py + oy >= 0 && py + oy < __FB_H) __fb[(py + oy) * __FB_W + px + ox] = c | 0;
         if (px === ex && py === ey) break;
         const e2 = 2 * err;
         if (e2 > -dy) { err -= dy; px += sx; }
@@ -168,7 +173,7 @@ function __draw_line(x0, y0, x1, y1, c) {
 function __draw_text(x, y, s, c) {
     if (typeof s !== "string") s = Number.isInteger(s) ? String(s) : __g6(s);
     s = s.toUpperCase();
-    const bx = Math.round(x), by = Math.round(y);
+    const bx = Math.round(x) * 2, by = Math.round(y) * 2;
     for (let i = 0; i < s.length; i++) {
         const gi = __FONT_CHARS.indexOf(s.charAt(i));
         if (gi < 0) continue;
@@ -176,32 +181,53 @@ function __draw_text(x, y, s, c) {
             const bits = __FONT_DATA.charCodeAt(gi * 5 + row) - 48;
             for (let col = 0; col < 3; col++) {
                 if (bits & (4 >> col)) {
-                    const px = bx + i * 4 + col, py = by + row;
-                    if (px >= 0 && px < __FB_W && py >= 0 && py < __FB_H) __fb[py * __FB_W + px] = c | 0;
+                    const px = bx + i * 8 + col * 2, py = by + row * 2;
+                    for (let oy = 0; oy < 2; oy++) for (let ox = 0; ox < 2; ox++)
+                        if (px + ox >= 0 && px + ox < __FB_W && py + oy >= 0 && py + oy < __FB_H) __fb[(py + oy) * __FB_W + px + ox] = c | 0;
                 }
             }
         }
     }
 }
+function __downsample() {
+    // supersampling resolve: average 2x2 blocks + subtle vignette -> 256x144
+    const out = new Int32Array(__OUT_W * __OUT_H);
+    for (let y = 0; y < __OUT_H; y++) {
+        for (let x = 0; x < __OUT_W; x++) {
+            let ur = 0, ug = 0, ub = 0;
+            for (let sy = 0; sy < __VAA; sy++) for (let sx = 0; sx < __VAA; sx++) {
+                const v = __fb[(y * __VAA + sy) * __FB_W + x * __VAA + sx];
+                ur += (v >> 16) & 255; ug += (v >> 8) & 255; ub += v & 255;
+            }
+            const dx = (x - 127.5) / 127.5, dy = (y - 71.5) / 71.5;
+            let f = 1.0 - (dx * dx + dy * dy) * 0.30;
+            if (f < 0.0) f = 0.0; if (f > 1.0) f = 1.0;
+            const r = Math.trunc(((ur + 2) >> 2) * f), g = Math.trunc(((ug + 2) >> 2) * f), b = Math.trunc(((ub + 2) >> 2) * f);
+            out[y * __OUT_W + x] = (r << 16) | (g << 8) | b;
+        }
+    }
+    return out;
+}
 function __present() {
     if (typeof importScripts === "function" && typeof postMessage === "function") {
-        // running in the Vulcan IDE worker — ship the frame to the canvas
-        const copy = __fb.slice();
-        postMessage({ __vulcan_frame: copy.buffer, w: __FB_W, h: __FB_H }, [copy.buffer]);
+        // running in the Vulcan IDE worker — ship the resolved frame to the canvas
+        const frame = __downsample();
+        postMessage({ __vulcan_frame: frame.buffer, w: __OUT_W, h: __OUT_H }, [frame.buffer]);
         return;
     }
     // terminal: downsample to 64x18 half-block cells (same output as the C backend)
+    const down = __downsample();
     let out = "\x1b[H";
     for (let cy = 0; cy < 18; cy++) {
         let row = "";
         for (let cx = 0; cx < 64; cx++) {
             let ur = 0, ug = 0, ub = 0, lr = 0, lg = 0, lb = 0;
             for (let sy = 0; sy < 4; sy++) for (let sx = 0; sx < 4; sx++) {
-                const v = __fb[(cy * 8 + sy) * __FB_W + cx * 4 + sx];
+                const v = down[(cy * 8 + sy) * __OUT_W + cx * 4 + sx];
                 ur += (v >> 16) & 255; ug += (v >> 8) & 255; ub += v & 255;
             }
             for (let sy = 4; sy < 8; sy++) for (let sx = 0; sx < 4; sx++) {
-                const v = __fb[(cy * 8 + sy) * __FB_W + cx * 4 + sx];
+                const v = down[(cy * 8 + sy) * __OUT_W + cx * 4 + sx];
                 lr += (v >> 16) & 255; lg += (v >> 8) & 255; lb += v & 255;
             }
             const urr = (ur + 8) >> 4, urg = (ug + 8) >> 4, urb = (ub + 8) >> 4;
@@ -217,6 +243,9 @@ function __input_state() {
     try { return (typeof globalThis !== "undefined" && globalThis.__VULCAN_INPUT) || null; } catch (e) { return null; }
 }
 function __mouse_x() { const s = __input_state(); return s ? s[0] / 100 : -1.0; }
+let __mdx = 0, __mdy = 0;
+function __mouse_dx() { const d = __mdx; __mdx = 0; return d; }
+function __mouse_dy() { const d = __mdy; __mdy = 0; return d; }
 function __mouse_y() { const s = __input_state(); return s ? s[1] / 100 : -1.0; }
 function __mouse_down() { const s = __input_state(); return s ? s[2] !== 0 : false; }
 function __key_down(c) { const s = __input_state(); return s ? s[3 + c] !== 0 : false; }
@@ -1278,6 +1307,8 @@ impl JsGen {
             }
             "present" => ("(__present(), undefined)".into(), Ty::Void),
             "mouse_x" => ("__mouse_x()".into(), Ty::F64),
+            "mouse_dx" => ("__mouse_dx()".into(), Ty::F64),
+            "mouse_dy" => ("__mouse_dy()".into(), Ty::F64),
             "mouse_y" => ("__mouse_y()".into(), Ty::F64),
             "mouse_down" => ("__mouse_down()".into(), Ty::Bool),
             "key_down" => {

@@ -135,14 +135,18 @@ static int vulcan_stdin_eof = 0;
 static int64_t key_ready(void){ if(vulcan_stdin_eof) return 0; fd_set s; FD_ZERO(&s); FD_SET(STDIN_FILENO,&s); struct timeval tv={0,0}; return select(STDIN_FILENO+1,&s,NULL,NULL,&tv)>0; }
 static int64_t read_key(void){ unsigned char c=0; ssize_t r=read(STDIN_FILENO,&c,1); if(r==0){ vulcan_stdin_eof=1; return 0; } return r==1 ? (int64_t)c : 0; }
 static void clear_screen(void){ fputs("\033[2J\033[H",stdout); }
-// ---- graphics: 256x144 framebuffer, presented to the terminal (or the IDE canvas via the JS backend) ----
-#define VFB_W 256
-#define VFB_H 144
+// ---- graphics: 512x288 supersampled framebuffer (2x2 SSAA), resolved to 256x144 on present ----
+#define VFB_W 512
+#define VFB_H 288
+#define VAA 2
+#define VOUT_W 256
+#define VOUT_H 144
 static int32_t vfb[VFB_W * VFB_H];
 static double vzbuf[VFB_W * VFB_H];
 static void vclear(int64_t color){ for(int i=0;i<VFB_W*VFB_H;i++){ vfb[i]=(int32_t)color; vzbuf[i]=1e30; } }
 // depth-buffered triangle: z compared with < (near = smaller); winding-insensitive
 static void vdraw_tri(double x0,double y0,double z0,double x1,double y1,double z1,double x2,double y2,double z2,int64_t color){
+    x0*=VAA;y0*=VAA;x1*=VAA;y1*=VAA;x2*=VAA;y2*=VAA;
     double area=(x1-x0)*(y2-y0)-(x2-x0)*(y1-y0);
     if(area==0.0) return;
     if(area<0.0){ double tx=x1,ty=y1,tz=z1; x1=x2;y1=y2;z1=z2; x2=tx;y2=ty;z2=tz; area=-area; }
@@ -171,11 +175,13 @@ static void vdraw_tri(double x0,double y0,double z0,double x1,double y1,double z
 static const char* vfont_chars = " 0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ.:-!?/+%";
 static const char* vfont_data = "000007555726227717477171755711747177475771122757577571775755656567444765556746477464474557557557222711157556554444757755655557555775744755717565574717722225555755552557755525555722712470000202020007002220271302112440272051245";
 static void vdraw_rect(double x, double y, double w, double h, int64_t color){
+    x*=VAA;y*=VAA;w*=VAA;h*=VAA;
     int x0=(int)ceil(x-0.5), x1=(int)floor(x+w-0.5), y0=(int)ceil(y-0.5), y1=(int)floor(y+h-0.5);
     if(x0<0)x0=0; if(y0<0)y0=0; if(x1>VFB_W-1)x1=VFB_W-1; if(y1>VFB_H-1)y1=VFB_H-1;
     for(int py=y0;py<=y1;py++) for(int px=x0;px<=x1;px++) vfb[py*VFB_W+px]=(int32_t)color;
 }
 static void vdraw_circle(double x, double y, double r, int64_t color){
+    x*=VAA;y*=VAA;r*=VAA;
     if(r<0) return;
     int x0=(int)ceil(x-r-0.5), x1=(int)floor(x+r+0.5), y0=(int)ceil(y-r-0.5), y1=(int)floor(y+r+0.5);
     if(x0<0)x0=0; if(y0<0)y0=0; if(x1>VFB_W-1)x1=VFB_W-1; if(y1>VFB_H-1)y1=VFB_H-1;
@@ -186,11 +192,13 @@ static void vdraw_circle(double x, double y, double r, int64_t color){
     }
 }
 static void vdraw_line(double x0, double y0, double x1, double y1, int64_t color){
+    x0*=VAA;y0*=VAA;x1*=VAA;y1*=VAA;
     int px=(int)llround(x0), py=(int)llround(y0), ex=(int)llround(x1), ey=(int)llround(y1);
     int dx=abs(ex-px), dy=abs(ey-py);
     int sx=px<ex?1:-1, sy=py<ey?1:-1, err=dx-dy;
     for(;;){
-        if(px>=0&&px<VFB_W&&py>=0&&py<VFB_H) vfb[py*VFB_W+px]=(int32_t)color;
+        for(int oy=0;oy<VAA;oy++) for(int ox=0;ox<VAA;ox++)
+            if(px+ox>=0&&px+ox<VFB_W&&py+oy>=0&&py+oy<VFB_H) vfb[(py+oy)*VFB_W+px+ox]=(int32_t)color;
         if(px==ex&&py==ey) break;
         int e2=2*err;
         if(e2>-dy){ err-=dy; px+=sx; }
@@ -198,7 +206,7 @@ static void vdraw_line(double x0, double y0, double x1, double y1, int64_t color
     }
 }
 static void vdraw_text(double x, double y, const char* s, int64_t color){
-    int bx=(int)llround(x), by=(int)llround(y);
+    int bx=(int)llround(x)*VAA, by=(int)llround(y)*VAA;
     for(size_t i=0;s[i];i++){
         const char* p=strchr(vfont_chars, toupper((unsigned char)s[i]));
         if(!p) continue;
@@ -207,24 +215,41 @@ static void vdraw_text(double x, double y, const char* s, int64_t color){
             int bits=vfont_data[gi*5+row]-'0';
             for(int col=0;col<3;col++){
                 if(bits&(4>>col)){
-                    int px=bx+(int)i*4+col, py=by+row;
-                    if(px>=0&&px<VFB_W&&py>=0&&py<VFB_H) vfb[py*VFB_W+px]=(int32_t)color;
+                    int px=bx+(int)i*4*VAA+col*VAA, py=by+row*VAA;
+                    for(int oy=0;oy<VAA;oy++) for(int ox=0;ox<VAA;ox++)
+                        if(px+ox>=0&&px+ox<VFB_W&&py+oy>=0&&py+oy<VFB_H) vfb[(py+oy)*VFB_W+px+ox]=(int32_t)color;
                 }
             }
         }
     }
 }
 static void vpresent(void){
+    // supersampling resolve: average VAAxVAA blocks + subtle vignette -> 256x144
+    static int32_t down[VOUT_W * VOUT_H];
+    for(int y=0;y<VOUT_H;y++){
+        for(int x=0;x<VOUT_W;x++){
+            int ur=0,ug=0,ub=0;
+            for(int sy=0;sy<VAA;sy++) for(int sx=0;sx<VAA;sx++){
+                int32_t v=vfb[(y*VAA+sy)*VFB_W+x*VAA+sx];
+                ur+=(v>>16)&255; ug+=(v>>8)&255; ub+=v&255;
+            }
+            double dx=(x-127.5)/127.5, dy=(y-71.5)/71.5;
+            double f=1.0-(dx*dx+dy*dy)*0.30;
+            if(f<0.0)f=0.0; if(f>1.0)f=1.0;
+            int r=(int)(((ur+2)>>2)*f), g=(int)(((ug+2)>>2)*f), b=(int)(((ub+2)>>2)*f);
+            down[y*VOUT_W+x]=(r<<16)|(g<<8)|b;
+        }
+    }
     fputs("\033[H", stdout);
     for(int cy=0;cy<18;cy++){
         for(int cx=0;cx<64;cx++){
             int ur=0,ug=0,ub=0,lr=0,lg=0,lb=0;
             for(int sy=0;sy<4;sy++) for(int sx=0;sx<4;sx++){
-                int32_t v=vfb[(cy*8+sy)*VFB_W+cx*4+sx];
+                int32_t v=down[(cy*8+sy)*VOUT_W+cx*4+sx];
                 ur+=(v>>16)&255; ug+=(v>>8)&255; ub+=v&255;
             }
             for(int sy=4;sy<8;sy++) for(int sx=0;sx<4;sx++){
-                int32_t v=vfb[(cy*8+sy)*VFB_W+cx*4+sx];
+                int32_t v=down[(cy*8+sy)*VOUT_W+cx*4+sx];
                 lr+=(v>>16)&255; lg+=(v>>8)&255; lb+=v&255;
             }
             printf("\033[38;2;%d;%d;%dm\033[48;2;%d;%d;%dm\342\226\200", (ur+8)>>4, (ug+8)>>4, (ub+8)>>4, (lr+8)>>4, (lg+8)>>4, (lb+8)>>4);
@@ -233,6 +258,8 @@ static void vpresent(void){
     }
 }
 static double vmouse_x(void){ return -1.0; }
+static double vmouse_dx(void){ return 0.0; }
+static double vmouse_dy(void){ return 0.0; }
 static double vmouse_y(void){ return -1.0; }
 static int8_t vmouse_down(void){ return 0; }
 static int8_t vkey_down(int64_t c){ (void)c; return 0; }
@@ -1753,6 +1780,8 @@ impl Codegen {
             }
             "present" => ("(vpresent(), (void)0)".into(), Ty::Void),
             "mouse_x" => ("vmouse_x()".into(), Ty::F64),
+            "mouse_dx" => ("vmouse_dx()".into(), Ty::F64),
+            "mouse_dy" => ("vmouse_dy()".into(), Ty::F64),
             "mouse_y" => ("vmouse_y()".into(), Ty::F64),
             "mouse_down" => ("vmouse_down()".into(), Ty::Bool),
             "key_down" => {

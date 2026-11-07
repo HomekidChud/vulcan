@@ -1,4 +1,4 @@
-// lib/engine.vulcan — the Vulcan Engine v0.1
+// lib/engine.vulcan — the Vulcan Engine v0.4
 //
 // A game-engine layer in pure Vulcan, built on the existing stack:
 //   import render3d  (Vec3 / Camera / projection / draw_tri pipeline)
@@ -140,6 +140,33 @@ pub fn scene_spawn(s: Scene, name: string, kind: i64, pos: Vec3) -> Scene {
 }
 
 // The id of the most recently spawned entity.
+// Spawn a pickup entity (kind ENTITY_KIND_PICKUP): an inert, damage-free
+// entity games can use for health packs, ammo, loot, etc.
+pub fn scene_spawn_pickup(s: Scene, name: string, pos: Vec3) -> Scene {
+    let id = s.next_id
+    s.next_id = id + 1
+    let p = Vec3 { x: pos.x, y: pos.y, z: pos.z }
+    s.entities.push(Entity {
+        id: id,
+        active: true,
+        name: name,
+        kind: ENTITY_KIND_PICKUP,
+        pos: p,
+        vel: Vec3 { x: 0.0, y: 0.0, z: 0.0 },
+        radius: 0.4,
+        hp: 1.0,
+        max_hp: 1.0,
+        speed: 0.0,
+        alive: true,
+        ai_state: AI_IDLE,
+        ai_timer: 0.0,
+        target_id: -1,
+        damage: 0.0,
+        lifetime: 0.0,
+    })
+    return s
+}
+
 pub fn scene_last_id(s: Scene) -> i64 {
     return s.next_id - 1
 }
@@ -317,6 +344,28 @@ pub fn hud_minimap(s: Scene, x: i64, y: i64, size: i64, range: f64) -> void {
         if e.kind == ENTITY_KIND_BOT { color = 0xff4040 }
         if e.kind == ENTITY_KIND_PICKUP { color = 0xffd700 }
         draw_rect(mx, my, 1, 1, color)
+    }
+}
+
+// Heading compass strip: N/E/S/W ticks slide with the camera yaw.
+pub fn hud_compass(yaw: f64, x: i64, y: i64, w: i64) -> void {
+    draw_rect(x, y, w, 7, 0x101820)
+    let dirs = ["N", "E", "S", "W"]
+    let i = 0
+    while i < 4 {
+        // angle of this direction relative to the camera heading
+        let a = (i as f64) * 1.5707963 - yaw
+        // wrap to -pi..pi
+        while a > 3.14159265 { a = a - 6.2831853 }
+        while a < -3.14159265 { a = a + 6.2831853 }
+        // 90-degree fov -> half the strip is visible
+        if abs(a) < 1.6 {
+            let px = x + (w as f64 / 2.0 + a / 1.6 * (w as f64 / 2.0 - 4.0)) as i64
+            if px >= x + 1 && px <= x + w - 3 {
+                draw_text(px, y + 1, dirs[i], 0xE8EDF2)
+            }
+        }
+        i = i + 1
     }
 }
 
@@ -686,6 +735,81 @@ pub fn cam_orbit(target: Vec3, angle: f64, dist: f64, height: f64) -> Camera {
 // Spectator: free-fly camera, same shape as first-person.
 pub fn cam_spectator(pos: Vec3, yaw: f64, pitch: f64) -> Camera {
     return Camera { x: pos.x, y: pos.y, z: pos.z, yaw: yaw, pitch: pitch }
+}
+
+// Third-person: camera behind and above the target, looking forward
+// along `yaw`. `pitch` tilts the boom up/down.
+pub fn cam_third_person(target: Vec3, yaw: f64, dist: f64, pitch: f64) -> Camera {
+    let cp = cos(pitch)
+    return cam_first_person(
+        Vec3 {
+            x: target.x - sin(yaw) * cp * dist,
+            y: target.y + sin(pitch) * dist,
+            z: target.z - cos(yaw) * cp * dist,
+        },
+        yaw, pitch)
+}
+
+// ---------------------------------------------------------------------------
+// Atmosphere & lighting (Engine v0.4)
+// ---------------------------------------------------------------------------
+
+// Day/night cycle over `time` (simulated seconds). A full cycle is 120s:
+// sin phase 1 = noon, 0 = sunrise/sunset, -1 = midnight. Returns the sky
+// gradient as [top_color, bottom_color] (0xRRGGBB), tinted orange at dawn
+// and dusk, deep blue at night.
+pub fn sky_colors(time: f64) -> [i64] {
+    let ang = sin(time * 6.28318 / 120.0)
+    let day = ang
+    if day < 0.0 { day = 0.0 }
+    // dusk tint peaks at sunrise/sunset (ang near 0)
+    let dusk = 1.0 - ang * 4.0
+    if ang < 0.0 { dusk = 1.0 + ang * 4.0 }
+    if dusk < 0.0 { dusk = 0.0 }
+    let top = color_lerp(0x070B16, 0x8ECAE6, day)
+    let bot = color_lerp(0x101828, 0xCDEFFD, day)
+    top = color_lerp(top, 0x4A3266, dusk * 0.7)
+    bot = color_lerp(bot, 0xE8925C, dusk * 0.7)
+    return [top, bot]
+}
+
+// Ambient sun light for a given time: 1.0 at noon, ~0.45 at dawn/dusk,
+// 0.22 at midnight (moonlight). Multiply surface colors by this for
+// global day/night lighting. Matches the sky_colors() cycle.
+pub fn sun_light(time: f64) -> f64 {
+    let day = sin(time * 6.28318 / 120.0) * 2.0 + 0.3
+    if day < 0.0 { day = 0.0 }
+    if day > 1.0 { day = 1.0 }
+    return 0.22 + 0.78 * day
+}
+
+// Distance fog: blend `col` toward `fog_col` between 40 and 130 world
+// units, capped at 85% (never fully hides close geometry).
+pub fn fog_mix(col: i64, dist: f64, fog_col: i64) -> i64 {
+    let t = (dist - 40.0) / 90.0
+    if t < 0.0 { t = 0.0 }
+    if t > 0.85 { t = 0.85 }
+    return color_lerp(col, fog_col, t)
+}
+
+// Animated sea color: two blues oscillating over `time`, blended a little
+// toward the sky for reflections.
+pub fn sea_color(time: f64, sky_bot: i64) -> i64 {
+    let p = 0.5 + 0.5 * sin(time * 1.7)
+    let c = color_lerp(0x1D5E8A, 0x2F89BB, p)
+    return color_lerp(c, sky_bot, 0.15)
+}
+
+// Vertical sky gradient (top color at the top of the screen, bottom color
+// at the horizon line `horizon_y`). Cheap fake skybox.
+pub fn draw_sky_gradient(top: i64, bot: i64, horizon_y: i64) -> void {
+    let y = 0
+    while y < 144 {
+        let t = y as f64 / horizon_y as f64
+        if t > 1.0 { t = 1.0 }
+        draw_rect(0.0, y as f64, 256.0, 1.0, color_lerp(top, bot, t))
+        y = y + 1
+    }
 }
 
 // ---------------------------------------------------------------------------
