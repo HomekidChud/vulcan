@@ -463,6 +463,16 @@ fn generate_inner(program: &[Item], tests: Option<&[String]>) -> String {
     }
     g.vec_emitted = vec_needed;
     let _ = write!(g.out, "\n// ---- functions ----\n");
+    // prototypes first so functions can call each other in any order
+    for item in program {
+        if let Item::Fn(f) = item {
+            if f.name == "main" { continue; }
+            let params = f.params.iter()
+                .map(|(n, t)| format!("{} {}", g.ctype(t), n))
+                .collect::<Vec<_>>().join(", ");
+            let _ = writeln!(g.out, "static {} {}({});", g.ctype(&f.ret), safe_c_name(&f.name), params);
+        }
+    }
     for item in program {
         if let Item::Fn(f) = item {
             if tests.is_some() && f.name == "main" { continue; }
@@ -1316,9 +1326,17 @@ impl Codegen {
                 // user-defined impl methods take priority over same-named builtins
                 if let Ty::Struct(sname) = &recv_ty {
                     if let Some(m) = self.impls.get(&(sname.clone(), name.clone())).cloned() {
-                        if !matches!(&**recv, Expr::Ident(_)) {
-                            panic!("vulcan: method calls need a simple variable receiver for now");
-                        }
+                        // Non-variable receivers (e.pos.add(v), make().translate(1.0))
+                        // are materialized into a temp first. Note: a *mutating*
+                        // method on a temporary mutates the temp, not the
+                        // underlying storage (value semantics).
+                        let recv_c = if matches!(&**recv, Expr::Ident(_)) {
+                            recv_c
+                        } else {
+                            let tmp = self.fresh("recv");
+                            self.line(&format!("{} {} = {};", self.ctype(&recv_ty), tmp, recv_c));
+                            tmp
+                        };
                         let has_self = m.params.first().map_or(false, |(n, _)| n == "self");
                         let expected = m.params.len() - if has_self { 1 } else { 0 };
                         if args.len() != expected {

@@ -13,6 +13,54 @@ fn main() {
 }
 ```
 
+## Vulcan 1.5 — what's new
+
+Method calls anywhere, any-order functions, and the **Vulcan Engine v0.2**.
+
+- **Method calls on any expression** — `a.add(b).add(b)`, `get_pos(e).add(v)`,
+  and `pts[0].add(b)` now work on all backends. The C backend materializes the
+  receiver into a temp; JS/Python clone the receiver so mutating methods match
+  C's value semantics (chained `add`s give identical results everywhere):
+  ```vulcan
+  let c = a.add(b).add(b)      // chained
+  let d = origin().add(a)      // on a call result
+  let e = pts[0].add(b)        // on an array element
+  ```
+- **Forward references between functions** — functions can call functions
+  defined later in the file on every backend (the C backend now emits
+  prototypes before definitions). `main` can sit at the top of the file.
+- **`lib/engine.vulcan` — Vulcan Engine v0.2** — combat and world systems in
+  pure vulcan:
+  - **Raycasts** — `ray_sphere` / `ray_aabb` (slab method) primitives,
+    `scene_raycast` for line-of-sight, `scene_shoot` for hitscan weapons.
+  - **Projectiles** — `scene_fire_projectile` with lifetime, straight-line
+    travel, and a swept-segment impact test so fast projectiles can't tunnel
+    through targets in one step. Projectiles are fully owned by the projectile
+    system (no more double integration).
+  - **Bot AI** — `bot_think`: idle / wander / chase / attack states per entity
+    with aggro + attack ranges, `atan2`-style steering, and return fire with
+    a cooldown.
+  - **Procedural terrain** — `terrain_sines`: sum-of-sines island heightmap
+    with edge falloff (flat at the borders, hills in the middle).
+  ```vulcan
+  import engine
+  fn main() -> void {
+      let s = scene_new()
+      s = terrain_sines(s, 16, 4.0)
+      s = scene_spawn(s, "bot", ENTITY_KIND_BOT, Vec3 { x: 0.0, y: 1.0, z: 8.0 })
+      s = bot_think(s, 1.0)          // bot decides to chase/attack
+      s = scene_shoot(s, player_id, muzzle, aim_dir, 50.0, 30.0)   // hitscan
+      s = scene_fire_projectile(s, player_id, muzzle, aim_dir, 10.0, 25.0, 2.0)
+  }
+  ```
+- **Engine hardening** — `scene_spawn` / `scene_fire_projectile` copy their
+  `Vec3` arguments so entities never alias the caller's position objects on
+  the reference-semantics JS/Python backends (a real cross-backend bug class,
+  now guarded and covered by the selftest).
+- Selftest grew to 24 cases (method receivers on expressions, forward
+  references, engine v0.2 ray/AI/projectile/terrain coverage — all
+  byte-identical across backends).
+
 ## Vulcan 1.4 — what's new
 
 Nested arrays, game math builtins, and the first release of the **Vulcan Engine**.

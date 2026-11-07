@@ -59,10 +59,45 @@ fn main() -> void {
     print("after reap, bots alive:", scene_count_alive(s, ENTITY_KIND_BOT))
     s = engine_tick(s, 0.5, 1.0 / 60.0)
     print("after tick, time:", s.time)
+    // ---- v0.2: raycasts, procedural terrain, AI, hitscan, projectiles ----
+    let o = Vec3 { x: 0.0, y: 0.0, z: 0.0 }
+    let d = Vec3 { x: 0.0, y: 0.0, z: 1.0 }
+    print("ray_sphere hit:", ray_sphere(o, d, Vec3 { x: 0.0, y: 0.0, z: 10.0 }, 1.0))
+    print("ray_sphere miss:", ray_sphere(o, d, Vec3 { x: 5.0, y: 0.0, z: 10.0 }, 1.0))
+    print("ray_aabb hit:", ray_aabb(o, d, Vec3 { x: -1.0, y: -1.0, z: 5.0 }, Vec3 { x: 1.0, y: 1.0, z: 7.0 }))
+    print("ray_aabb miss:", ray_aabb(o, d, Vec3 { x: -1.0, y: -1.0, z: 5.0 }, Vec3 { x: 1.0, y: 1.0, z: 6.0 }) == -1.0)
+    let t = scene_new()
+    t = terrain_sines(t, 16, 4.0)
+    print("terrain corners flat:", terrain_height(t, -30.0, -30.0), terrain_height(t, 30.0, 30.0))
+    print("terrain center:", terrain_height(t, 0.0, 0.0))
+    t = scene_spawn(t, "player", ENTITY_KIND_PLAYER, Vec3 { x: 0.0, y: 1.0, z: 0.0 })
+    let tp = scene_last_id(t)
+    t = scene_spawn(t, "bot", ENTITY_KIND_BOT, Vec3 { x: 0.0, y: 1.0, z: 8.0 })
+    let tb = scene_last_id(t)
+    t = bot_think(t, 1.0)
+    let tbi = scene_find(t, tb)
+    print("bot state:", t.entities[tbi].ai_state, "vel z:", t.entities[tbi].vel.z)
+    let tpi = scene_find(t, tp)
+    let aim = Vec3 { x: 0.0, y: 0.0, z: 1.0 }
+    t = scene_shoot(t, tp, t.entities[tpi].pos, aim, 50.0, 30.0)
+    print("bot hp after hit:", t.entities[tbi].hp)
+    // settle onto terrain, then fire a projectile from the player at the bot
+    t = scene_step(t, 0.1)
+    t = scene_step(t, 0.1)
+    let muzzle = t.entities[tpi].pos
+    let aimdir = t.entities[tbi].pos.sub(muzzle).normalized()
+    t = scene_fire_projectile(t, tp, muzzle, aimdir, 10.0, 25.0, 2.0)
+    print("entities now:", t.entities.len())
+    let steps = 0
+    while t.entities[tbi].hp > 45.0 && steps < 40 {
+        t = scene_step(t, 0.1)
+        steps += 1
+    }
+    print("bot hp after projectile:", t.entities[tbi].hp, "steps:", steps)
 }
 "#;
 
-const ENGINE_TEST_EXPECTED: &str = "spawned: 1 2 3 alive bots: 2\nplayer settled at y: 0.5 time: 2\nterrain at (0,0): 0 at (16,16): 0\nafter reap, bots alive: 1\nafter tick, time: 2.1\n";
+const ENGINE_TEST_EXPECTED: &str = "spawned: 1 2 3 alive bots: 2\nplayer settled at y: 0.5 time: 2\nterrain at (0,0): 0 at (16,16): 0\nafter reap, bots alive: 1\nafter tick, time: 2.1\nray_sphere hit: 9\nray_sphere miss: -1\nray_aabb hit: 5\nray_aabb miss: false\nterrain corners flat: 0 0\nterrain center: 3.76924\nbot state: 3 vel z: -8\nbot hp after hit: 70\nentities now: 4\nbot hp after projectile: 45 steps: 4\n";
 
 // 3D renderer selftest main — concatenated after lib/render3d.vulcan
 const RENDER3D_TEST_MAIN: &str = r#"
@@ -397,6 +432,47 @@ fn main() -> void {
 }
 "#,
         expected: "p = 4 6\nlen2 = 52\nscaled = 8 12\npts[1].y = 3\n",
+    },
+    Case {
+        name: "method calls on expressions (all backends)",
+        src: r#"
+struct Vec2 { x: f64, y: f64 }
+impl Vec2 {
+    fn add(self, o: Vec2) -> Vec2 {
+        self.x = self.x + o.x
+        self.y = self.y + o.y
+        return self
+    }
+}
+fn origin() -> Vec2 { return Vec2 { x: 0.0, y: 0.0 } }
+
+fn main() -> void {
+    let a = Vec2 { x: 1.0, y: 2.0 }
+    let b = Vec2 { x: 10.0, y: 20.0 }
+    let c = a.add(b).add(b)
+    print("chained:", c.x, c.y)
+    let d = origin().add(a)
+    print("on call:", d.x, d.y)
+    let pts: [Vec2] = [a, b]
+    let e = pts[0].add(b)
+    print("on elem:", e.x, e.y)
+}
+"#,
+        expected: "chained: 21 42\non call: 11 22\non elem: 21 42\n",
+    },
+    Case {
+        name: "forward references between functions (all backends)",
+        src: r#"
+fn early(x: i64) -> i64 { return later(x) + 1 }
+fn fwd2(x: i64) -> i64 { return early(x) - 1 }
+fn later(x: i64) -> i64 { return x * 2 }
+
+fn main() -> void {
+    print(early(5))
+    print(fwd2(10))
+}
+"#,
+        expected: "11\n20\n",
     },
     Case {
         name: "file I/O, args, string/array stdlib",
