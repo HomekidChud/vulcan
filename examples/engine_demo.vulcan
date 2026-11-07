@@ -1,0 +1,122 @@
+// examples/engine_demo.vulcan — Vulcan Engine v0.3 showcase.
+//
+// A procedurally generated island with wandering bots that chase and shoot
+// the player, mesh "towers", particles, and a HUD. Runs in the IDE
+// (`vulcan ide`) or as a web bundle (`vulcan package --platform web`).
+//
+// Controls: W/A/S/D move, SPACE jump (in the browser bundle, click the
+// page first so it has keyboard focus).
+
+import engine
+
+// Terrain color by height: water, sand, grass, rock, snow.
+fn terrain_color(h: f64) -> i64 {
+    if h < 0.0 { return 0x1B4F72 }
+    if h < 0.6 { return 0xC2A36B }
+    if h < 2.2 { return 0x3E7C3A }
+    if h < 3.4 { return 0x6B6F73 }
+    return 0xECEFF1
+}
+
+// Draw the heightmap as shaded quads (one per grid cell).
+fn draw_terrain(s: Scene) -> void {
+    let n = s.terrain.len()
+    if n < 2 { return }
+    let cell = s.terrain_scale
+    let half = s.terrain_size / 2.0
+    for r in 0 .. n - 1 {
+        for c in 0 .. n - 1 {
+            let x0 = (c as f64) * cell - half
+            let z0 = (r as f64) * cell - half
+            let h00 = s.terrain[r][c]
+            let h10 = s.terrain[r][c + 1]
+            let h11 = s.terrain[r + 1][c + 1]
+            let h01 = s.terrain[r + 1][c]
+            let avg = (h00 + h10 + h11 + h01) / 4.0
+            let shade = 0.75 + 0.25 * ((r + c) % 2)
+            draw_quad(s.camera,
+                Vec3 { x: x0, y: h00, z: z0 },
+                Vec3 { x: x0 + cell, y: h10, z: z0 },
+                Vec3 { x: x0 + cell, y: h11, z: z0 + cell },
+                Vec3 { x: x0, y: h01, z: z0 + cell },
+                color_shade(terrain_color(avg), shade))
+        }
+    }
+}
+
+// Draw an entity as a small colored cube mesh.
+fn draw_entity(s: Scene, i: i64, m: Mesh) -> void {
+    let e = s.entities[i]
+    if !e.active { return }
+    mesh_draw(m, s.camera, e.pos, 0.0)
+}
+
+fn main() -> void {
+    let s = scene_new()
+    s = terrain_sines(s, 20, 5.0)
+
+    s = scene_spawn(s, "player", ENTITY_KIND_PLAYER, Vec3 { x: 0.0, y: 8.0, z: 0.0 })
+    let player = scene_last_id(s)
+    s = scene_spawn(s, "bot1", ENTITY_KIND_BOT, Vec3 { x: 14.0, y: 8.0, z: 10.0 })
+    s = scene_spawn(s, "bot2", ENTITY_KIND_BOT, Vec3 { x: -16.0, y: 8.0, z: 8.0 })
+    s = scene_spawn(s, "bot3", ENTITY_KIND_BOT, Vec3 { x: 6.0, y: 8.0, z: -18.0 })
+
+    // shared meshes
+    let body = mesh_cube(0.6, 0x4FC3F7)     // player
+    let botm = mesh_cube(0.6, 0xEF5350)     // bots
+    let tower = mesh_cube(1.6, 0x8E6E95)    // landmark
+    let hutt = mesh_cube(1.0, 0xA1887F)     // small hut
+
+    let frame = 0
+    while true {
+        // simulate
+        s = player_control(s, player, 1.0 / 60.0)
+        s = bot_think(s, 1.0 / 60.0)
+        s = engine_tick(s, 1.0 / 60.0, 1.0 / 60.0)
+
+        // cinematic auto-orbit camera around the island center
+        s.camera = cam_orbit(Vec3 { x: 0.0, y: 2.0, z: 0.0 }, (frame as f64) * 0.008, 34.0, 16.0)
+
+        // particle fountain at the island peak every ~0.5s
+        if frame % 30 == 0 {
+            let px = 4.0
+            let pz = 2.0
+            let py = terrain_height(s, px, pz) + 0.5
+            s = scene_spawn_particle(s, Vec3 { x: px, y: py, z: pz },
+                Vec3 { x: 0.6, y: 2.4, z: 0.3 }, 1.2, 0xFFD54F)
+            s = scene_spawn_particle(s, Vec3 { x: px, y: py, z: pz },
+                Vec3 { x: -0.5, y: 2.0, z: -0.4 }, 1.0, 0xFF7043)
+        }
+
+        // render
+        clear(0x0D1B2A)
+        draw_terrain(s)
+        mesh_draw(tower, s.camera,
+            Vec3 { x: 8.0, y: terrain_height(s, 8.0, 8.0) + 1.6, z: 8.0 },
+            (frame as f64) * 0.01)
+        mesh_draw(hutt, s.camera,
+            Vec3 { x: -10.0, y: terrain_height(s, -10.0, 4.0) + 1.0, z: 4.0 }, 0.4)
+        draw_entity(s, scene_find(s, player), body)
+        let b1 = scene_find(s, 2)
+        if b1 >= 0 { draw_entity(s, b1, botm) }
+        let b2 = scene_find(s, 3)
+        if b2 >= 0 { draw_entity(s, b2, botm) }
+        let b3 = scene_find(s, 4)
+        if b3 >= 0 { draw_entity(s, b3, botm) }
+        draw_particles(s)
+
+        // HUD
+        let pi = scene_find(s, player)
+        if pi >= 0 {
+            hud_health_bar(4, 136, 60, s.entities[pi].hp, s.entities[pi].max_hp)
+        }
+        hud_minimap(s, 200, 4, 52, 44.0)
+        hud_crosshair(128, 72)
+        draw_text(4, 4, "VULCAN ENGINE v0.3", 0xFFFFFF)
+        draw_text(4, 12, "island demo", 0x9FB4C7)
+
+        present()
+        sleep_ms(16)
+        frame = frame + 1
+    }
+}

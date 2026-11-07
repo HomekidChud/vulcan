@@ -165,12 +165,15 @@ __file_exists = (p) => __vfs.has(p);
 __screen_w = () => 80;
 __screen_h = () => 24;
 function runMain() {
-    try {
-        main();
-        postMessage({ exit: 0 });
-    } catch (e) {
-        if (String(e).indexOf("__vulcan_exit") === -1) postMessage({ error: String(e) });
-    }
+    // main() is async (the JS backend awaits builtin calls), so wait for
+    // the promise to settle before reporting exit — otherwise the page
+    // terminates the worker before the first frame renders
+    Promise.resolve(main()).then(
+        () => postMessage({ exit: 0 }),
+        (e) => {
+            if (String(e).indexOf("__vulcan_exit") === -1) postMessage({ error: String(e) });
+        }
+    );
 }
 "#;
 
@@ -200,12 +203,16 @@ const HTML_TEMPLATE: &str = r##"<!DOCTYPE html>
         padding: 12px 14px; width: min(720px, 100%); overflow: hidden;
     }
     #screen { margin: 0; font-size: 14px; line-height: 1.25; white-space: pre; }
+    #vscreen {
+        display: none; background: #000; border: 1px solid #23252c; border-radius: 8px;
+        width: min(720px, 100%); image-rendering: pixelated; image-rendering: crisp-edges;
+    }
     #status { padding: 8px 16px; font-size: 12px; color: #6c707a; border-top: 1px solid #23252c; }
 </style>
 </head>
 <body>
 <header><span><b>__TITLE__</b> — built with <a href="https://github.com/HomekidChud/vulcan">Vulcan</a></span><span>keys: WASD / arrows · q quits</span></header>
-<main><div id="term"><pre id="screen"></pre></div></main>
+<main><canvas id="vscreen" width="256" height="144"></canvas><div id="term"><pre id="screen"></pre></div></main>
 <div id="status">running…</div>
 <script>
 "use strict";
@@ -313,6 +320,25 @@ const savedFs = {};
 worker.onmessage = (e) => {
     const d = e.data || {};
     if (d.out !== undefined) { term.feed(d.out); term.render(); }
+    if (d.__vulcan_frame) {
+        // full-resolution canvas frame from present() — draw it on #vscreen
+        const cv = document.getElementById("vscreen");
+        const termEl = document.getElementById("term");
+        cv.style.display = "block";
+        termEl.style.display = "none";
+        const ctx = cv.getContext("2d");
+        if (cv.width !== d.w || cv.height !== d.h) { cv.width = d.w; cv.height = d.h; }
+        const img = ctx.createImageData(d.w, d.h);
+        const px = new Uint32Array(d.__vulcan_frame);
+        for (let i = 0; i < px.length; i++) {
+            const v = px[i] | 0;
+            img.data[i * 4] = (v >> 16) & 255;
+            img.data[i * 4 + 1] = (v >> 8) & 255;
+            img.data[i * 4 + 2] = v & 255;
+            img.data[i * 4 + 3] = 255;
+        }
+        ctx.putImageData(img, 0, 0);
+    }
     if (d.fswrite) { savedFs[d.fswrite.path] = d.fswrite.contents; }
     if (d.exit !== undefined) { document.getElementById("status").textContent = "program exited with code " + d.exit; worker.terminate(); }
     if (d.error) { document.getElementById("status").textContent = "error: " + d.error; }
