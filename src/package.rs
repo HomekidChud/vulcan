@@ -212,7 +212,7 @@ const HTML_TEMPLATE: &str = r##"<!DOCTYPE html>
 </style>
 </head>
 <body>
-<header><span><b>__TITLE__</b> — built with <a href="https://github.com/HomekidChud/vulcan">Vulcan</a></span><span>keys: WASD / arrows · q quits</span></header>
+<header><span><b>__TITLE__</b> — built with <a href="https://github.com/HomekidChud/vulcan">Vulcan</a></span><span>keys: WASD · C camera · drag to look</span></header>
 <main><canvas id="vscreen" width="256" height="144"></canvas><div id="term"><pre id="screen"></pre></div></main>
 <div id="status">running…</div>
 <script>
@@ -351,11 +351,13 @@ document.addEventListener("keydown", (e) => {
     else if (KEYMAP[e.key] !== undefined) code = KEYMAP[e.key];
     if (code !== null) { e.preventDefault(); worker.postMessage({ keys: [code] }); }
 });
-// mouse look: click the canvas to lock the pointer, move to look, Esc to release
+// mouse look: drag on the canvas to look around (like an orbit control)
 const vscreen = document.getElementById("vscreen");
-vscreen.addEventListener("click", () => { if (vscreen.requestPointerLock) vscreen.requestPointerLock(); });
+let __mdown = false;
+vscreen.addEventListener("mousedown", () => { __mdown = true; });
+window.addEventListener("mouseup", () => { __mdown = false; });
 document.addEventListener("mousemove", (e) => {
-    if (document.pointerLockElement === vscreen) worker.postMessage({ mouse: [e.movementX || 0, e.movementY || 0] });
+    if (__mdown) worker.postMessage({ mouse: [e.movementX || 0, e.movementY || 0] });
 });
 worker.postMessage({ init: true, fs: savedFs });
 </script>
