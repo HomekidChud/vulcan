@@ -504,6 +504,26 @@ fn main() -> void {
         expected: "p = 4 6\nlen2 = 52\nscaled = 8 12\npts[1].y = 3\n",
     },
     Case {
+        name: "const folding (all backends)",
+        src: r#"
+const N: i64 = 16 * 4
+const HALF: f64 = 1.0 / 2.0
+const NEG: i64 = -(3 + 4)
+const GREET: string = "hi" + " " + "there"
+const FLAG: bool = 1 < 2 && 3 > 2
+
+fn main() -> void {
+    print(N, HALF, NEG, GREET, FLAG)
+    let xs: [i64] = []
+    for i in 0 .. N / 16 {
+        xs.push(i)
+    }
+    print("len:", xs.len())
+}
+"#,
+        expected: "64 0.5 -7 hi there true\nlen: 4\n",
+    },
+    Case {
         name: "match guards (all backends)",
         src: r#"
 fn classify(x: i64) -> string {

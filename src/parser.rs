@@ -66,7 +66,7 @@ pub struct ConstDecl {
     pub value: ConstVal,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ConstVal { Int(i64), Float(f64), Str(String), Bool(bool) }
 
 #[derive(Debug, Clone)]
@@ -192,14 +192,9 @@ impl Parser {
                 None
             };
             self.expect(Tok::Eq, "= in const");
-            let value = match self.next() {
-                Tok::Int(v) => ConstVal::Int(v),
-                Tok::Float(v) => ConstVal::Float(v),
-                Tok::Str(s) => ConstVal::Str(s),
-                Tok::KwTrue => ConstVal::Bool(true),
-                Tok::KwFalse => ConstVal::Bool(false),
-                other => self.err(format!("const value must be a literal, got {other:?}")),
-            };
+            let value_expr = self.parse_expr();
+            let value = fold_const(&value_expr)
+                .unwrap_or_else(|| self.err(format!("const value must be a compile-time constant expression")));
             return Item::Const(ConstDecl { line, name, ty, value });
         }
         if self.peek() == &Tok::KwEnum {
@@ -774,6 +769,80 @@ impl Parser {
     }
 }
 
+// Compile-time evaluation of const expressions: literals, unary minus, and
+// the arithmetic/comparison/bitwise operators over i64/f64/bool/string.
+// Anything else (calls, idents, indexing) is not a compile-time constant.
+pub fn fold_const(e: &Expr) -> Option<ConstVal> {
+    match e {
+        Expr::Int(v) => Some(ConstVal::Int(*v)),
+        Expr::Float(v) => Some(ConstVal::Float(*v)),
+        Expr::Str(v) => Some(ConstVal::Str(v.clone())),
+        Expr::Bool(v) => Some(ConstVal::Bool(*v)),
+        Expr::Char(v) => Some(ConstVal::Int(*v)),
+        Expr::BinOp(l, op, r) => {
+            let lv = fold_const(l)?;
+            let rv = fold_const(r)?;
+            match (lv, rv) {
+                (ConstVal::Int(a), ConstVal::Int(b)) if op == "-u" => b.checked_neg().map(ConstVal::Int),
+                (ConstVal::Float(a), ConstVal::Float(b)) if op == "-u" => Some(ConstVal::Float(-b)),
+                (ConstVal::Bool(a), ConstVal::Bool(b)) if op == "!" => Some(ConstVal::Bool(!b)),
+                (ConstVal::Int(a), ConstVal::Int(b)) if op == "~" => Some(ConstVal::Int(!b)),
+                (ConstVal::Int(a), ConstVal::Int(b)) => match op.as_str() {
+                    "+" => a.checked_add(b).map(ConstVal::Int),
+                    "-" => a.checked_sub(b).map(ConstVal::Int),
+                    "*" => a.checked_mul(b).map(ConstVal::Int),
+                    "/" => if b != 0 { Some(ConstVal::Int(a.wrapping_div(b))) } else { None },
+                    "%" => if b != 0 { Some(ConstVal::Int(a.wrapping_rem(b))) } else { None },
+                    "<<" => a.checked_shl(b as u32).map(ConstVal::Int),
+                    ">>" => a.checked_shr(b as u32).map(ConstVal::Int),
+                    "&" => Some(ConstVal::Int(a & b)),
+                    "|" => Some(ConstVal::Int(a | b)),
+                    "^" => Some(ConstVal::Int(a ^ b)),
+                    "==" => Some(ConstVal::Bool(a == b)),
+                    "!=" => Some(ConstVal::Bool(a != b)),
+                    "<" => Some(ConstVal::Bool(a < b)),
+                    "<=" => Some(ConstVal::Bool(a <= b)),
+                    ">" => Some(ConstVal::Bool(a > b)),
+                    ">=" => Some(ConstVal::Bool(a >= b)),
+                    _ => None,
+                },
+                (ConstVal::Float(a), ConstVal::Float(b)) => match op.as_str() {
+                    "+" => Some(ConstVal::Float(a + b)),
+                    "-" => Some(ConstVal::Float(a - b)),
+                    "*" => Some(ConstVal::Float(a * b)),
+                    "/" => if b != 0.0 { Some(ConstVal::Float(a / b)) } else { None },
+                    "==" => Some(ConstVal::Bool(a == b)),
+                    "!=" => Some(ConstVal::Bool(a != b)),
+                    "<" => Some(ConstVal::Bool(a < b)),
+                    "<=" => Some(ConstVal::Bool(a <= b)),
+                    ">" => Some(ConstVal::Bool(a > b)),
+                    ">=" => Some(ConstVal::Bool(a >= b)),
+                    _ => None,
+                },
+                (ConstVal::Str(a), ConstVal::Str(b)) => match op.as_str() {
+                    "+" => Some(ConstVal::Str(format!("{a}{b}"))),
+                    "==" => Some(ConstVal::Bool(a == b)),
+                    "!=" => Some(ConstVal::Bool(a != b)),
+                    _ => None,
+                },
+                (ConstVal::Bool(a), ConstVal::Bool(b)) => match op.as_str() {
+                    "==" => Some(ConstVal::Bool(a == b)),
+                    "!=" => Some(ConstVal::Bool(a != b)),
+                    "&&" => Some(ConstVal::Bool(a && b)),
+                    "||" => Some(ConstVal::Bool(a || b)),
+                    _ => None,
+                },
+                (ConstVal::Int(a), ConstVal::Float(b)) => fold_const(&Expr::BinOp(
+                    Box::new(Expr::Float(a as f64)), op.clone(), Box::new(Expr::Float(b)))),
+                (ConstVal::Float(a), ConstVal::Int(b)) => fold_const(&Expr::BinOp(
+                    Box::new(Expr::Float(a)), op.clone(), Box::new(Expr::Float(b as f64)))),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -841,6 +910,27 @@ mod tests {
 
     // Every example and stdlib file must parse without panicking — this is the
     // parser's regression net until real diagnostics land (Phase 1).
+    fn fold(src: &str) -> Option<ConstVal> {
+        let toks = crate::lexer::lex(src);
+        let mut p = Parser { toks, pos: 0, fn_line: 0 };
+        fold_const(&p.parse_expr())
+    }
+
+    #[test]
+    fn const_folding_arithmetic() {
+        assert_eq!(fold("16 * 4"), Some(ConstVal::Int(64)));
+        assert_eq!(fold("1 + 2 * 3"), Some(ConstVal::Int(7)));
+        assert_eq!(fold("-(3 + 4)"), Some(ConstVal::Int(-7)));
+        assert_eq!(fold("1.0 / 2.0"), Some(ConstVal::Float(0.5)));
+        assert_eq!(fold("1 < 2 && 3 > 2"), Some(ConstVal::Bool(true)));
+        assert_eq!(fold("\"hi\" + \" \" + \"there\""), Some(ConstVal::Str("hi there".into())));
+        assert_eq!(fold("1 << 10"), Some(ConstVal::Int(1024)));
+        // not compile-time constants
+        assert_eq!(fold("1 / 0"), None);
+        assert_eq!(fold("fib(3)"), None);
+        assert_eq!(fold("n + 1"), None);
+    }
+
     #[test]
     fn parses_all_examples_and_libs() {
         let mut checked = 0;
