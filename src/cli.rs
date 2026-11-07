@@ -504,6 +504,46 @@ fn main() -> void {
         expected: "p = 4 6\nlen2 = 52\nscaled = 8 12\npts[1].y = 3\n",
     },
     Case {
+        name: "struct value semantics (all backends)",
+        src: r#"
+struct Inner { v: i64 }
+struct Box { inner: Inner, xs: [i64] }
+
+fn mutate(p: Inner) -> void {
+    p.v = 99
+}
+
+fn main() -> void {
+    let a = Inner { v: 1 }
+    let b = a
+    b.v = 42
+    print("copy:", a.v, b.v)
+    mutate(a)
+    print("arg:", a.v)
+    let box1 = Box { inner: Inner { v: 7 }, xs: [1, 2, 3] }
+    let box2 = box1
+    box2.inner.v = 10
+    box2.xs[0] = 100
+    print("deep:", box1.inner.v, box1.xs[0], box2.inner.v, box2.xs[0])
+    let arr: [Inner] = [Inner { v: 1 }]
+    let el = arr[0]
+    el.v = 55
+    print("elem:", arr[0].v, el.v)
+    for it in arr {
+        it.v = 77
+    }
+    print("forin:", arr[0].v)
+    let lit = [a, a]
+    a.v = 5
+    print("arrlit:", lit[0].v, lit[1].v)
+    let b2 = Box { inner: a, xs: [7, 8] }
+    a.v = 9
+    print("structlit:", b2.inner.v)
+}
+"#,
+        expected: "copy: 1 42\narg: 1\ndeep: 7 100 10 100\nelem: 1 55\nforin: 1\narrlit: 1 1\nstructlit: 5\n",
+    },
+    Case {
         name: "method calls on expressions (all backends)",
         src: r#"
 struct Vec2 { x: f64, y: f64 }

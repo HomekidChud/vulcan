@@ -11,6 +11,12 @@ const __fs = require("fs");
 function __vclone(x) { // shallow copy of a struct (C temp semantics for method calls on expressions)
     return Object.assign(Object.create(Object.getPrototypeOf(x)), x);
 }
+function __sclone(x) { // struct copy (C struct assignment): nested structs copied, arrays shared
+    if (x !== null && typeof x === "object" && !Array.isArray(x)) {
+        const r = {}; for (const k in x) r[k] = __sclone(x[k]); return r;
+    }
+    return x; // scalars pass through; arrays stay shared (C Vec-header copy)
+}
 function __g6(x) { // mimic C %.6g
     if (!isFinite(x)) return String(x);
     if (x === 0) return "0";
@@ -432,6 +438,24 @@ impl JsGen {
         self.sema.check_assignable(from, to, what);
     }
 
+    // C copies structs and arrays by value; JS shares references. To keep the
+    // backends byte-identical, a struct/array value is deep-cloned every time
+    // C would copy it: let/assign to a variable, call argument, return value,
+    // array element store, struct field store, for-in element binding.
+    // Fresh literals need no clone.
+    fn needs_clone(&self, t: &Ty) -> bool {
+        // Structs are copied (C struct assignment). Arrays are NOT: the C
+        // backend copies the Vec header and SHARES the heap data, so array
+        // assignment/argument-passing is reference-like on every backend.
+        matches!(self.norm(t), Ty::Struct(_)) // enums norm to I64
+    }
+    fn fresh_expr(e: &Expr) -> bool {
+        matches!(e, Expr::StructLit { .. } | Expr::ArrayLit(_))
+    }
+    fn val_sem(&self, c: &str, e: &Expr, t: &Ty) -> String {
+        if self.needs_clone(t) && !Self::fresh_expr(e) { format!("__sclone({c})") } else { c.to_string() }
+    }
+
     fn cast(&self, c: &str, from: &Ty, to: &Ty) -> String {
         let from = self.norm(from);
         let to = self.norm(to);
@@ -526,6 +550,7 @@ impl JsGen {
                 let final_ty = ty.clone().unwrap_or_else(|| init_ty.clone());
                 self.check_assignable(&init_ty, &final_ty, "let initializer");
                 let cvar = self.fresh(name);
+                let init_c = self.val_sem(&init_c, init, &final_ty);
                 self.line(&format!("let {cvar} = {init_c};"));
                 self.locals.last_mut().unwrap().insert(name.clone(), (final_ty, cvar));
             }
@@ -535,6 +560,7 @@ impl JsGen {
                     Expr::Ident(name) => {
                         let (var_ty, cvar) = self.lookup(name).unwrap_or_else(|| panic!("vulcan: assign to undeclared `{name}`"));
                         let cast = self.cast(&val_c, &val_ty, &var_ty);
+                        let cast = self.val_sem(&cast, value, &var_ty);
                         self.line(&format!("{cvar} = {cast};"));
                     }
                     Expr::Index(recv, idx) => {
@@ -543,11 +569,14 @@ impl JsGen {
                         let elem = self.array_elem(&recv_ty);
                         let idx_c = self.cast(&idx_c, &idx_ty, &Ty::I64);
                         let cast = self.cast(&val_c, &val_ty, &elem);
+                        let cast = self.val_sem(&cast, value, &elem);
                         self.line(&format!("__set({recv_c}, {idx_c}, {cast});"));
                     }
                     Expr::Field(recv, fname) => {
                         // struct references mean no copy dance is needed, even through array elements
-                        let (recv_c, _) = self.gen_expr(recv);
+                        let (recv_c, recv_ty) = self.gen_expr(recv);
+                        let fty = self.field_ty(&recv_ty, fname);
+                        let val_c = self.val_sem(&val_c, value, &fty);
                         self.line(&format!("{recv_c}.{} = {val_c};", js_field(fname)));
                     }
                     _ => panic!("vulcan: invalid assignment target"),
@@ -665,7 +694,8 @@ impl JsGen {
                 self.line(&format!("for (let {ivar} = 0; {ivar} < {it}.length; {ivar}++) {{"));
                 let cvar = self.fresh(var);
                 self.indent += 1;
-                self.line(&format!("let {cvar} = {it}[{ivar}];"));
+                let it_elem = self.val_sem(&format!("{it}[{ivar}]"), arr, &elem);
+                self.line(&format!("let {cvar} = {it_elem};"));
                 self.locals.push(HashMap::new());
                 self.locals.last_mut().unwrap().insert(var.clone(), (elem, cvar));
                 self.defers.push(Vec::new());
@@ -741,6 +771,7 @@ impl JsGen {
                         let (ec, et) = self.gen_expr(e);
                         if self.cur_ret == Ty::Void { panic!("vulcan: cannot return a value from a void function"); }
                         let cast = self.cast(&ec, &et, &self.cur_ret);
+                        let cast = self.val_sem(&cast, e, &self.cur_ret);
                         self.emit_pending_defers();
                         self.line(&format!("return {cast};"));
                     }
@@ -868,18 +899,21 @@ impl JsGen {
                             }
                             let mut call_args: Vec<String> = Vec::new();
                             if has_self {
-                                // non-variable receivers are copies (C temp semantics)
+                                // C passes &variable for `self` (mutating methods stick),
+                                // and materializes non-variable receivers into a temp
+                                // copy first. Match that: variable -> as-is, temp -> clone.
                                 if matches!(&**recv, Expr::Ident(_)) {
                                     call_args.push(recv_c.clone());
                                 } else {
-                                    call_args.push(format!("__vclone({recv_c})"));
+                                    call_args.push(format!("__sclone({recv_c})"));
                                 }
                             }
                             for (i, (_, pty)) in m.params.iter().enumerate() {
                                 if has_self && i == 0 { continue; }
                                 let arg = &args[if has_self { i - 1 } else { i }];
                                 let (ac, at) = self.gen_expr(arg);
-                                call_args.push(self.cast(&ac, &at, pty));
+                                let cast = self.cast(&ac, &at, pty);
+                                call_args.push(self.val_sem(&cast, arg, pty));
                             }
                             return (format!("await {}({})", method_js_name(sname, name), call_args.join(", ")), m.ret.clone());
                         }
@@ -1048,8 +1082,10 @@ impl JsGen {
                     if let Some(first) = &elem {
                         if &t != first { panic!("vulcan: mixed array literal types"); }
                     } else {
-                        elem = Some(t);
+                        elem = Some(t.clone());
                     }
+                    // C memcpy's each element into the Vec: struct elements are copies
+                    let c = if self.needs_clone(&t) { format!("__sclone({c})") } else { c };
                     cs.push(c);
                 }
                 (format!("[{}]", cs.join(", ")), Ty::Array(Box::new(elem.unwrap())))
@@ -1063,6 +1099,8 @@ impl JsGen {
                         .unwrap_or_else(|| panic!("vulcan: struct {name} has no field {fname}"));
                     let target_ty = &sdef[pos].1;
                     let fc = self.cast(&fc, &ft, target_ty);
+                    // C copies the field value into the struct: clone struct fields
+                    let fc = if self.needs_clone(target_ty) { format!("__sclone({fc})") } else { fc };
                     inits[pos] = fc;
                 }
                 for (i, v) in inits.iter_mut().enumerate() {
@@ -1379,7 +1417,8 @@ impl JsGen {
                 let mut call_args = Vec::new();
                 for (a, pty) in args.iter().zip(ptys.iter()) {
                     let (ac, at) = self.gen_expr(a);
-                    call_args.push(self.cast(&ac, &at, pty));
+                    let cast = self.cast(&ac, &at, pty);
+                    call_args.push(self.val_sem(&cast, a, pty));
                 }
                 if self.externs.iter().any(|n| n == callee) {
                     // FFI: the host provides this function via the __ffi table

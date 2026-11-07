@@ -52,6 +52,15 @@ _sys = sys
 
 def _g6(x): return '%.6g' % x
 def _vclone(x): return _vcopy.copy(x)  # C temp semantics for method calls on expressions
+def _sclone(x):
+    # struct copy (C struct assignment): nested structs copied, arrays shared
+    if isinstance(x, list): return x  # arrays stay shared (C Vec-header copy)
+    if isinstance(x, (int, float, str, bool)) or x is None: return x
+    if hasattr(x, "__dict__"):
+        n = object.__new__(x.__class__)
+        for _k, _v in x.__dict__.items(): setattr(n, _k, _sclone(_v))
+        return n
+    return x
 def _b(x): return 'true' if x else 'false'
 def _idiv(a, b):
     q = _abs(a) // _abs(b)
@@ -472,6 +481,23 @@ impl PyGen {
         self.sema.check_assignable(from, to, what);
     }
 
+    // C copies structs and arrays by value; Python shares references. A
+    // struct/array value is deep-cloned wherever C would copy it (let/assign,
+    // call argument, return, element store, field store, for-in binding).
+    // Fresh literals need no clone.
+    fn needs_clone(&self, t: &Ty) -> bool {
+        // Structs are copied (C struct assignment). Arrays are NOT: the C
+        // backend copies the Vec header and SHARES the heap data, so array
+        // assignment/argument-passing is reference-like on every backend.
+        matches!(self.norm(t), Ty::Struct(_)) // enums norm to I64
+    }
+    fn fresh_expr(e: &Expr) -> bool {
+        matches!(e, Expr::StructLit { .. } | Expr::ArrayLit(_))
+    }
+    fn val_sem(&self, c: &str, e: &Expr, t: &Ty) -> String {
+        if self.needs_clone(t) && !Self::fresh_expr(e) { format!("_sclone({c})") } else { c.to_string() }
+    }
+
     fn cast(&self, c: &str, from: &Ty, to: &Ty) -> String {
         let from = self.norm(from);
         let to = self.norm(to);
@@ -591,6 +617,7 @@ impl PyGen {
                 let final_ty = ty.clone().unwrap_or_else(|| init_ty.clone());
                 self.check_assignable(&init_ty, &final_ty, "let initializer");
                 let cvar = self.fresh(name);
+                let init_c = self.val_sem(&init_c, init, &final_ty);
                 self.line(&format!("{cvar} = {init_c}"));
                 self.locals.last_mut().unwrap().insert(name.clone(), (final_ty, cvar));
             }
@@ -600,6 +627,7 @@ impl PyGen {
                     Expr::Ident(name) => {
                         let (var_ty, cvar) = self.lookup(name).unwrap_or_else(|| panic!("vulcan: assign to undeclared `{name}`"));
                         let cast = self.cast(&val_c, &val_ty, &var_ty);
+                        let cast = self.val_sem(&cast, value, &var_ty);
                         self.line(&format!("{cvar} = {cast}"));
                     }
                     Expr::Index(recv, idx) => {
@@ -608,10 +636,13 @@ impl PyGen {
                         let elem = self.array_elem(&recv_ty);
                         let idx_c = self.cast(&idx_c, &idx_ty, &Ty::I64);
                         let cast = self.cast(&val_c, &val_ty, &elem);
+                        let cast = self.val_sem(&cast, value, &elem);
                         self.line(&format!("_set({recv_c}, {idx_c}, {cast})"));
                     }
                     Expr::Field(recv, fname) => {
-                        let (recv_c, _) = self.gen_expr(recv);
+                        let (recv_c, recv_ty) = self.gen_expr(recv);
+                        let fty = self.field_ty(&recv_ty, fname);
+                        let val_c = self.val_sem(&val_c, value, &fty);
                         self.line(&format!("{recv_c}.{} = {val_c}", py_name(fname)));
                     }
                     _ => panic!("vulcan: invalid assignment target"),
@@ -712,7 +743,12 @@ impl PyGen {
                 let snapshot = self.fresh("it");
                 self.line(&format!("{snapshot} = _list({ac})"));
                 let cvar = self.fresh(var);
-                self.line(&format!("for {cvar} in {snapshot}:"));
+                if self.needs_clone(&elem) {
+                    // C binds each element BY VALUE (a copy per iteration)
+                    self.line(&format!("for {cvar} in map(_sclone, {snapshot}):"));
+                } else {
+                    self.line(&format!("for {cvar} in {snapshot}:"));
+                }
                 self.locals.push(HashMap::new());
                 self.locals.last_mut().unwrap().insert(var.clone(), (elem, cvar));
                 self.emit_block(body);
@@ -782,6 +818,7 @@ impl PyGen {
                         let (ec, et) = self.gen_expr(e);
                         if self.cur_ret == Ty::Void { panic!("vulcan: cannot return a value from a void function"); }
                         let cast = self.cast(&ec, &et, &self.cur_ret);
+                        let cast = self.val_sem(&cast, e, &self.cur_ret);
                         self.emit_pending_defers();
                         self.line(&format!("return {cast}"));
                     }
@@ -925,14 +962,17 @@ impl PyGen {
                                 if has_self && i == 0 { continue; }
                                 let arg = &args[if has_self { i - 1 } else { i }];
                                 let (ac, at) = self.gen_expr(arg);
-                                call_args.push(self.cast(&ac, &at, pty));
+                                let cast = self.cast(&ac, &at, pty);
+                                call_args.push(self.val_sem(&cast, arg, pty));
                             }
                             if has_self {
-                                // non-variable receivers are copies (C temp semantics)
+                                // C passes &variable for `self` (mutating methods
+                                // stick); non-variable receivers become a temp
+                                // copy first (deep: value semantics).
                                 if matches!(&**recv, Expr::Ident(_)) {
                                     return (format!("{recv_c}.{}({})", py_name(name), call_args.join(", ")), m.ret.clone());
                                 } else {
-                                    return (format!("_vclone({recv_c}).{}({})", py_name(name), call_args.join(", ")), m.ret.clone());
+                                    return (format!("_sclone({recv_c}).{}({})", py_name(name), call_args.join(", ")), m.ret.clone());
                                 }
                             } else {
                                 return (format!("{}({})", method_py_name(sname, name), call_args.join(", ")), m.ret.clone());
@@ -1103,8 +1143,10 @@ impl PyGen {
                     if let Some(first) = &elem {
                         if &t != first { panic!("vulcan: mixed array literal types"); }
                     } else {
-                        elem = Some(t);
+                        elem = Some(t.clone());
                     }
+                    // C memcpy's each element into the Vec: struct elements are copies
+                    let c = if self.needs_clone(&t) { format!("_sclone({c})") } else { c };
                     cs.push(c);
                 }
                 (format!("[{}]", cs.join(", ")), Ty::Array(Box::new(elem.unwrap())))
@@ -1118,6 +1160,8 @@ impl PyGen {
                         .unwrap_or_else(|| panic!("vulcan: struct {name} has no field {fname}"));
                     let target_ty = &sdef[pos].1;
                     let fc = self.cast(&fc, &ft, target_ty);
+                    // C copies the field value into the struct: clone struct fields
+                    let fc = if self.needs_clone(target_ty) { format!("_sclone({fc})") } else { fc };
                     kws.push(format!("{}={fc}", py_name(fname)));
                 }
                 (format!("{name}({})", kws.join(", ")), Ty::Struct(name.clone()))
@@ -1414,7 +1458,8 @@ impl PyGen {
                 let mut call_args = Vec::new();
                 for (a, pty) in args.iter().zip(ptys.iter()) {
                     let (ac, at) = self.gen_expr(a);
-                    call_args.push(self.cast(&ac, &at, pty));
+                    let cast = self.cast(&ac, &at, pty);
+                    call_args.push(self.val_sem(&cast, a, pty));
                 }
                 if self.externs.iter().any(|n| n == callee) {
                     // FFI: the host provides this function via the _ffi table
