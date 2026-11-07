@@ -22,6 +22,10 @@ jobs:
         env:
           VULCAN_CC: gcc
         run: ./target/release/vulcan selftest
+      - name: Self-hosting (bootstrap fixpoint + parity tests, gcc)
+        env:
+          VULCAN_CC: gcc
+        run: ./scripts/self-test.sh
 
   selftest-clang:
     runs-on: ubuntu-latest
@@ -37,3 +41,5 @@ jobs:
         run: cargo build --release
       - name: Selftest (clang)
         run: ./target/release/vulcan selftest
+      - name: Self-hosting (bootstrap fixpoint + parity tests, clang)
+        run: ./scripts/self-test.sh

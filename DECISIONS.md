@@ -95,3 +95,26 @@ down here, and keep going.
 - References to non-struct types (e.g. `&[i64]`, `&i64`) are gated with
   a clear error; struct-typed (incl. enum) refs only for now.
 - Reassigning a reference parameter is an error on every backend.
+
+## 2026-11 — self-hosting (v1.11)
+
+- **Stage-0 stays Rust.** The Rust compiler is retained as the bootstrap
+  seed and the daily-driver fast path; it is not deleted. This mirrors Go
+  (the Go 1.4 C toolchain seeded the 1.5 self-host) and rustc (the stage0
+  rustc builds stage1).
+- **Fixpoint = byte-identical stage2.c and stage3.c.** Anything looser
+  (AST equality, "compiles and runs") lets drift hide. Byte equality is
+  cheap to check and impossible to argue with.
+- **Arena AST with a dummy element at index 0** so 0 is a valid "none"
+  sentinel and real data starts at 1. Indices are i64; no pointers.
+- **Contiguous ranges via collect-then-append** for `blk` (statement
+  children), `iargs` (call arguments) and `finits` (struct-literal field
+  initializers): nested constructs allocate during parse, so a range
+  captured before a nested parse would interleave. Children are buffered
+  in a local array and appended to the arena after the construct closes.
+- **Copy-in / copy-out `Ctx`.** All compiler state lives in one struct
+  passed by value; every mutating function returns it and callers
+  reassign. Cheap (Vec headers), and makes every state change explicit.
+- **Vulcan Core is a defined subset**, not "whatever vulc happens to
+  accept" — documented in docs/selfhost.md and enforced by parity tests
+  against the Rust compiler.

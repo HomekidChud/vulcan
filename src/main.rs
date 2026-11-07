@@ -13,6 +13,7 @@ mod modules;
 mod pkg;
 mod package;
 mod ide;
+mod selfhost;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -54,6 +55,13 @@ USAGE (IDE):
   vulcan ide [port]           launch the browser IDE (editor + live canvas,
                                physics engine ready via `import physics`)
 
+SELF-HOSTING (the compiler is written in Vulcan — self/vulc.vulcan):
+  vulcan self <file.vulcan>   compile + run a program with the self-hosted
+                               compiler (vulc compiles it, no cargo involved)
+  vulcan bootstrap            verify the language builds itself: stage1
+                               (Rust-built) -> stage2 -> stage3, with a
+                               byte-identical fixpoint check
+
 OTHER:
   vulcan selftest             run the compiler test suite
 ");
@@ -90,6 +98,20 @@ fn main() {
     let cmd = args[1].clone();
     if cmd == "selftest" {
         cli::selftest();
+        return;
+    }
+    if cmd == "self" {
+        if args.len() < 3 {
+            eprintln!("usage: vulcan self <file.vulcan> [args...] — compile + run with the self-hosted compiler");
+            std::process::exit(1);
+        }
+        let file = args[2].clone();
+        let prog_args: Vec<String> = args[3..].to_vec();
+        selfhost::self_cmd(&file, &prog_args);
+        return;
+    }
+    if cmd == "bootstrap" {
+        selfhost::bootstrap_cmd();
         return;
     }
     if cmd == "doc" {

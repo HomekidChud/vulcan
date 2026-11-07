@@ -3,6 +3,31 @@
 Per-version history, newest first. The version number lives in Cargo.toml
 (single source of truth, exposed by `vulcan --version`).
 
+## 1.11.0 — self-hosting: the compiler is written in Vulcan
+
+**`self/vulc.vulcan` (~3,100 lines) is a complete lexer, parser, type
+checker and C code generator for Vulcan Core — and it compiles itself.**
+`vulcan bootstrap` runs the classic stage1 → stage2 → stage3 chain and
+verifies the fixpoint (stage2.c and stage3.c byte-identical), the same
+scheme rustc uses. The Rust compiler stays in the tree as the bootstrap
+seed ("stage 0") and the fast path for everyday development; building the
+compiler from its own source no longer requires cargo.
+
+- **`vulcan self <file>`** — compile and run any program with the
+  self-hosted compiler.
+- **`vulcan bootstrap`** — full chain + fixpoint check + smoke test
+  (`self/test/smoke.vulcan` must produce identical output on both
+  compilers).
+- **`./scripts/self-test.sh`** — every case in `self/test/` is compiled by
+  both compilers; outputs must match. Runs in CI on gcc and clang.
+- **Arena-AST compiler architecture** with contiguous `blk`/`iargs`/`finits`
+  ranges (collect-then-append), copy-in/copy-out `Ctx` convention, and an
+  embedded prelude (`scripts/gen-self-prelude.py` regenerates it).
+- **`to_string(bool)`** now works on the C backend of the Rust compiler
+  too (parity with the self-hosted one).
+- **`char_at(s, i)`** builtin added to the C backend.
+- Docs: [docs/selfhost.md](docs/selfhost.md).
+
 ## Unreleased — language upgrade (Phase 1)
 
 **The compiler core grows a semantic layer, real diagnostics, value

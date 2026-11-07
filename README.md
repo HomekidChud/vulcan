@@ -15,10 +15,30 @@ fn main() {
 
 ## What's new
 
-The current release is **1.10** (see `vulcan --version`): the Vulcan Obby — a
-complete Roblox-style obstacle course built with the engine — plus a fixed
-third-person camera and mobile touch controls. The full per-version history
-lives in [CHANGELOG.md](CHANGELOG.md).
+The current release is **1.11** (see `vulcan --version`): **Vulcan compiles
+itself**. The compiler now lives in `self/vulc.vulcan` (~3,100 lines of
+Vulcan), and `vulcan bootstrap` proves the language builds itself with a
+byte-identical fixpoint check — the same stage1 → stage2 → stage3 scheme
+rustc uses. The full per-version history lives in
+[CHANGELOG.md](CHANGELOG.md).
+
+## Self-hosting
+
+The compiler is written in the language it compiles. `self/vulc.vulcan` is a
+complete lexer, parser, type checker and C code generator for Vulcan Core
+(structs, impl methods, arrays, strings, control flow, the builtin library),
+emitting the same C dialect the Rust compiler emits.
+
+```bash
+vulcan bootstrap          # stage1 (Rust-built) -> stage2 -> stage3, byte-identical fixpoint
+vulcan self foo.vulcan    # compile + run a program with the self-hosted compiler
+./scripts/self-test.sh    # every self/test/*.vulcan must behave identically on both compilers
+```
+
+The Rust compiler remains in the tree as the bootstrap "stage 0" (and as the
+fast path for everyday development): it compiles `vulc.vulcan` once, and
+after that the language is self-sufficient — no cargo needed to build the
+compiler from its own source. Details in [docs/selfhost.md](docs/selfhost.md).
 
 ## Packaging
 

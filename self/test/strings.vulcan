@@ -1,0 +1,18 @@
+fn main() {
+    let s = "The quick brown fox"
+    print(s.len(), s.upper(), s.lower())
+    print(s.substring(4, 9))
+    print(s.contains("brown"), s.find("fox"))
+    print(s.split(" ").len())
+    let words = s.split(" ")
+    print(words[0], words[3])
+    print("a,b,c".replace(",", "-"))
+    print("  pad  ".trim() + "!")
+    print("ab" == "ab", "ab" != "ba")
+    print(to_string(7) + to_string(2.5) + to_string(true))
+    print("x".repeat(5))
+    let t = ""
+    let i = 0
+    while i < 5 { t = t + to_string(i); i += 1 }
+    print(t)
+}

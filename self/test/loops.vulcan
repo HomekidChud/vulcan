@@ -1,0 +1,22 @@
+fn main() {
+    let sum = 0
+    for i in 1 ..= 100 { sum += i }
+    print(sum)
+    let i = 0
+    while i < 10 {
+        if i % 2 == 0 { print(i) } else { print(-i) }
+        i += 1
+    }
+    let a = [1, 2, 3, 4, 5]
+    let total = 0
+    for x in a { total += x * x }
+    print(total)
+    let s = 0
+    let n = 5
+    while n > 0 {
+        s += n
+        n -= 1
+        if s > 12 { break }
+    }
+    print(s)
+}

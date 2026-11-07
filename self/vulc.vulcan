@@ -1,0 +1,3171 @@
+// self/vulc.vulcan — VULCAN CORE: the self-hosted Vulcan compiler.
+//
+// A compiler for the "Vulcan Core" subset of the language, written in that
+// same subset, emitting C99 against the exact same runtime prelude as the
+// Rust compiler (src/codegen.rs). Bootstrapped by `vulcan bootstrap`:
+//
+//   stage1 = rust-compiled vulc   (vulcan compiles self/vulc.vulcan)
+//   stage2 = stage1-compiled vulc
+//   stage3 = stage2-compiled vulc (must equal stage2's output — fixpoint)
+//
+// Vulcan Core subset (both what this file accepts and what it is written in):
+//   items    fn / struct / impl / const
+//   types    i64 f64 bool string void, user structs, 1-D arrays [T]
+//   stmts    let, = += -= *= /= %=, if/elif/else, while, for i in a..b|a..=b,
+//            for x in arr, return, break, continue, expr stmt
+//   exprs    literals, idents, unary - ! ~, binary ops, calls, method calls,
+//            field access, indexing, struct literals, casts (as i64/f64)
+//   builtins print to_string to_int to_float char_at len arg_count arg
+//            file_read file_write file_exists exit sleep_ms clock ms_now
+//            input rand_int, array methods (push pop shift last contains
+//            insert remove len), string methods (upper lower contains
+//            starts_with ends_with substring find trim replace split join
+//            len repeat), math methods on f64 (sqrt floor ceil abs sin cos)
+//
+// Usage: vulc <input.vulcan> <output.c>
+
+// ---------------------------------------------------------------------------
+// Token kinds
+// ---------------------------------------------------------------------------
+const T_EOF = 0
+const T_IDENT = 1
+const T_INT = 2
+const T_FLOAT = 3
+const T_STR = 4
+const T_FN = 10
+const T_LET = 11
+const T_RET = 12
+const T_IF = 13
+const T_ELSE = 14
+const T_ELIF = 15
+const T_WHILE = 16
+const T_FOR = 17
+const T_IN = 18
+const T_STRUCT = 19
+const T_IMPL = 20
+const T_CONST = 21
+const T_AS = 22
+const T_TRUE = 23
+const T_FALSE = 24
+const T_BREAK = 25
+const T_CONT = 26
+const T_PLUS = 40
+const T_MINUS = 41
+const T_STAR = 42
+const T_SLASH = 43
+const T_PCT = 44
+const T_EQ = 45
+const T_EQEQ = 46
+const T_NE = 47
+const T_LT = 48
+const T_GT = 49
+const T_LE = 50
+const T_GE = 51
+const T_ANDAND = 52
+const T_OROR = 53
+const T_LP = 54
+const T_RP = 55
+const T_LBR = 56
+const T_RBR = 57
+const T_LB = 58
+const T_RB = 59
+const T_COMMA = 60
+const T_COLON = 61
+const T_SEMI = 62
+const T_DOT = 63
+const T_DOTDOT = 64
+const T_DOTDOTEQ = 65
+const T_AMP = 66
+const T_PIPE = 67
+const T_CARET = 68
+const T_SHL = 69
+const T_SHR = 70
+const T_BANG = 71
+const T_TILDE = 72
+const T_PLUSEQ = 73
+const T_MINUSEQ = 74
+const T_STAREQ = 75
+const T_SLASHEQ = 76
+const T_PCTEQ = 77
+
+// Expression kinds
+const E_INT = 1
+const E_FLOAT = 2
+const E_STR = 3
+const E_BOOL = 4
+const E_IDENT = 5
+const E_CALL = 6
+const E_METHOD = 7
+const E_FIELD = 8
+const E_INDEX = 9
+const E_BIN = 10
+const E_UN = 11
+const E_STRUCTLIT = 12
+const E_CAST = 13
+const E_ARRLIT = 14
+
+// Statement kinds
+const S_LET = 1
+const S_ASSIGN = 2
+const S_AUG = 3
+const S_IF = 4
+const S_WHILE = 5
+const S_FORR = 6
+const S_FORIN = 7
+const S_RET = 8
+const S_BREAK = 9
+const S_CONT = 10
+const S_EXPR = 11
+
+// Type kinds
+const TY_I64 = 1
+const TY_F64 = 2
+const TY_BOOL = 3
+const TY_STR = 4
+const TY_UNIT = 5
+const TY_STRUCT = 6
+const TY_ARR = 7
+
+// ---------------------------------------------------------------------------
+// AST / compiler state
+// ---------------------------------------------------------------------------
+struct Tok { kind: i64, text: string, line: i64 }
+
+// One AST node. Children are indices into the shared expr arena; `op` holds a
+// token kind for E_BIN/E_UN; `ty` is filled in by the checking pass.
+struct Expr {
+    kind: i64, ival: f64, isint: i64, sval: string,
+    l: i64, r: i64, op: i64,
+    astart: i64, acount: i64, init_start: i64, init_count: i64,
+    ty: i64, line: i64
+}
+
+struct FieldInit { name: string, e: i64 }
+
+struct Stmt {
+    kind: i64, name: string, ty: i64, e: i64, e2: i64, op: i64, inc: i64,
+    body_start: i64, body_count: i64, els_start: i64, els_count: i64, line: i64
+}
+
+struct Ty { kind: i64, name: string, elem: i64 }
+
+struct Param { name: string, ty: i64 }
+
+// owner == "" for free functions; the struct name for impl methods.
+struct FnDecl {
+    name: string, owner: string, ret: i64,
+    pstart: i64, pcount: i64, body_start: i64, body_count: i64,
+    has_self: i64, line: i64
+}
+
+struct StructDef { name: string, fstart: i64, fcount: i64 }
+struct FieldDef { name: string, ty: i64 }
+struct ConstDef { name: string, ty: i64, ctext: string }
+
+// The whole compiler state. Every field is an array (or an immutable string)
+// so that mutations propagate through the copy-in/copy-out struct convention:
+// array element writes and reads hit shared storage; only `push`/field
+// reassignment are local, which is why every mutating function returns `c`
+// and callers reassign.
+struct Ctx {
+    src: string, path: string,
+    toks: [Tok], pos: [i64],
+    exprs: [Expr], stmts: [Stmt], finits: [FieldInit], iargs: [i64],
+    types: [Ty], fns: [FnDecl], params: [Param],
+    sdefs: [StructDef], fdefs: [FieldDef], consts: [ConstDef],
+    out: [string], ind: [i64], tmpn: [i64],
+    lnames: [string], lcns: [string], ltys: [i64], lmarks: [i64], blk: [i64],
+    cur_ret: [i64], retv: [i64], rets: [string]
+}
+
+// ---------------------------------------------------------------------------
+// Small helpers
+// ---------------------------------------------------------------------------
+
+fn die(msg: string) -> void {
+    print("vulc: " + msg)
+    exit(1)
+}
+
+fn err(c: Ctx, line: i64, msg: string) -> void {
+    die(c.path + ":" + to_string(line) + ": " + msg)
+}
+
+// n spaces of indentation
+fn pad(n: i64) -> string {
+    let s = ""
+    let i = 0
+    while i < n {
+        s = s + " "
+        i = i + 1
+    }
+    return s
+}
+
+// join an array of strings with a separator
+fn join(parts: [string], sep: string) -> string {
+    if parts.len() == 0 { return "" }
+    let s = parts[0]
+    let i = 1
+    while i < parts.len() {
+        s = s + sep + parts[i]
+        i = i + 1
+    }
+    return s
+}
+
+fn is_digit(ch: i64) -> bool {
+    return ch >= 48 && ch <= 57
+}
+
+fn is_alpha(ch: i64) -> bool {
+    return (ch >= 97 && ch <= 122) || (ch >= 65 && ch <= 90) || ch == 95
+}
+
+fn is_alnum(ch: i64) -> bool {
+    return is_digit(ch) || is_alpha(ch)
+}
+
+// does `s` start with `p`? (byte-wise)
+fn starts_with(s: string, p: string) -> bool {
+    if s.len() < p.len() { return false }
+    return s.substring(0, p.len()) == p
+}
+
+// ---------------------------------------------------------------------------
+// Type helpers (types live in the c.types arena; -1 means "none")
+// ---------------------------------------------------------------------------
+
+// base types are pre-seeded into c.types at construction (indices below)
+fn ty_i64(c: Ctx) -> i64 { return 1 }
+fn ty_f64(c: Ctx) -> i64 { return 2 }
+fn ty_bool(c: Ctx) -> i64 { return 3 }
+fn ty_str(c: Ctx) -> i64 { return 4 }
+fn ty_unit(c: Ctx) -> i64 { return 5 }
+
+// construct a struct/array type; retv[0] = the new type index
+fn ty_struct(c: Ctx, name: string) -> Ctx {
+    c.types.push(Ty { kind: TY_STRUCT, name: name, elem: -1 })
+    c.retv[0] = c.types.len() - 1
+    return c
+}
+
+fn ty_arr(c: Ctx, elem: i64) -> Ctx {
+    c.types.push(Ty { kind: TY_ARR, name: "", elem: elem })
+    c.retv[0] = c.types.len() - 1
+    return c
+}
+
+fn ty_kind(c: Ctx, t: i64) -> i64 {
+    if t < 0 { return -1 }
+    return c.types[t].kind
+}
+
+fn is_num(c: Ctx, t: i64) -> bool {
+    let k = ty_kind(c, t)
+    return k == TY_I64 || k == TY_F64
+}
+
+fn is_int_ty(c: Ctx, t: i64) -> bool {
+    return ty_kind(c, t) == TY_I64
+}
+
+fn ty_eq(c: Ctx, a: i64, b: i64) -> bool {
+    if a < 0 || b < 0 { return a == b }
+    let ta = c.types[a]
+    let tb = c.types[b]
+    if ta.kind != tb.kind { return false }
+    if ta.kind == TY_STRUCT { return ta.name == tb.name }
+    if ta.kind == TY_ARR { return ty_eq(c, ta.elem, tb.elem) }
+    return true
+}
+
+// can a value of type `from` be used where `to` is expected?
+fn compat(c: Ctx, from: i64, to: i64) -> bool {
+    if ty_eq(c, from, to) { return true }
+    // implicit widening: int -> float
+    if is_int_ty(c, from) && ty_kind(c, to) == TY_F64 { return true }
+    return false
+}
+
+// ---------------------------------------------------------------------------
+// Symbol lookups
+// ---------------------------------------------------------------------------
+
+fn find_struct(c: Ctx, name: string) -> i64 {
+    let i = 0
+    while i < c.sdefs.len() {
+        if c.sdefs[i].name == name { return i }
+        i = i + 1
+    }
+    return -1
+}
+
+// field index within struct def, -1 if absent
+fn find_field(c: Ctx, sd: i64, name: string) -> i64 {
+    let i = 0
+    while i < c.sdefs[sd].fcount {
+        if c.fdefs[c.sdefs[sd].fstart + i].name == name { return i }
+        i = i + 1
+    }
+    return -1
+}
+
+fn find_const(c: Ctx, name: string) -> i64 {
+    let i = 0
+    while i < c.consts.len() {
+        if c.consts[i].name == name { return i }
+        i = i + 1
+    }
+    return -1
+}
+
+// find free fn (owner "") or method (owner = struct name); -1 if absent
+fn find_fn(c: Ctx, owner: string, name: string) -> i64 {
+    let i = 0
+    while i < c.fns.len() {
+        if c.fns[i].name == name && c.fns[i].owner == owner { return i }
+        i = i + 1
+    }
+    return -1
+}
+
+// ---------------------------------------------------------------------------
+// Lexer
+// ---------------------------------------------------------------------------
+
+fn kw_kind(w: string) -> i64 {
+    if w == "fn" { return T_FN }
+    if w == "let" { return T_LET }
+    if w == "return" { return T_RET }
+    if w == "if" { return T_IF }
+    if w == "else" { return T_ELSE }
+    if w == "elif" { return T_ELIF }
+    if w == "while" { return T_WHILE }
+    if w == "for" { return T_FOR }
+    if w == "in" { return T_IN }
+    if w == "struct" { return T_STRUCT }
+    if w == "impl" { return T_IMPL }
+    if w == "const" { return T_CONST }
+    if w == "as" { return T_AS }
+    if w == "true" { return T_TRUE }
+    if w == "false" { return T_FALSE }
+    if w == "break" { return T_BREAK }
+    if w == "continue" { return T_CONT }
+    return -1
+}
+
+// Lex c.src into c.toks. c.toks[0] is a dummy so real indices start at 1.
+fn lex(c: Ctx) -> Ctx {
+    let n = c.src.len()
+    let i = 0
+    let line = 1
+    while i < n {
+        let ch = char_at(c.src, i)
+        // whitespace
+        if ch == 10 { line = line + 1; i = i + 1; continue }
+        if ch == 32 || ch == 9 || ch == 13 { i = i + 1; continue }
+        // // comment
+        if ch == 47 && i + 1 < n && char_at(c.src, i + 1) == 47 {
+            while i < n && char_at(c.src, i) != 10 { i = i + 1 }
+            continue
+        }
+        // /* */ comment
+        if ch == 47 && i + 1 < n && char_at(c.src, i + 1) == 42 {
+            i = i + 2
+            while i + 1 < n {
+                if char_at(c.src, i) == 42 && char_at(c.src, i + 1) == 47 { break }
+                if char_at(c.src, i) == 10 { line = line + 1 }
+                i = i + 1
+            }
+            i = i + 2
+            continue
+        }
+        // string literal — keep the raw text (quotes + escapes) verbatim;
+        // Vulcan and C share the same escape set, so it re-emits unchanged.
+        if ch == 34 {
+            let start = i
+            i = i + 1
+            while i < n {
+                let q = char_at(c.src, i)
+                if q == 92 { i = i + 2; continue }
+                if q == 34 { break }
+                if q == 10 { line = line + 1 }
+                i = i + 1
+            }
+            if i >= n { die("unterminated string literal") }
+            i = i + 1
+            c.toks.push(Tok { kind: T_STR, text: c.src.substring(start, i), line: line })
+            continue
+        }
+        // number
+        if is_digit(ch) {
+            let start = i
+            let isf = 0
+            while i < n {
+                let d = char_at(c.src, i)
+                if is_digit(d) { i = i + 1; continue }
+                if d == 46 && isf == 0 && i + 1 < n && is_digit(char_at(c.src, i + 1)) {
+                    isf = 1
+                    i = i + 1
+                    continue
+                }
+                break
+            }
+            let text = c.src.substring(start, i)
+            let k = T_INT
+            if isf == 1 { k = T_FLOAT }
+            c.toks.push(Tok { kind: k, text: text, line: line })
+            continue
+        }
+        // identifier / keyword
+        if is_alpha(ch) {
+            let start = i
+            while i < n && is_alnum(char_at(c.src, i)) { i = i + 1 }
+            let w = c.src.substring(start, i)
+            let k = kw_kind(w)
+            if k < 0 { k = T_IDENT }
+            c.toks.push(Tok { kind: k, text: w, line: line })
+            continue
+        }
+        // punctuation / operators
+        let k = -1
+        let len = 1
+        if ch == 43 { k = T_PLUS }
+        if ch == 45 { k = T_MINUS }
+        if ch == 42 { k = T_STAR }
+        if ch == 37 { k = T_PCT }
+        if ch == 40 { k = T_LP }
+        if ch == 41 { k = T_RP }
+        if ch == 123 { k = T_LBR }
+        if ch == 125 { k = T_RBR }
+        if ch == 91 { k = T_LB }
+        if ch == 93 { k = T_RB }
+        if ch == 44 { k = T_COMMA }
+        if ch == 58 { k = T_COLON }
+        if ch == 59 { k = T_SEMI }
+        if ch == 46 {
+            k = T_DOT
+            if i + 1 < n && char_at(c.src, i + 1) == 46 {
+                len = 2
+                k = T_DOTDOT
+                if i + 2 < n && char_at(c.src, i + 2) == 61 { len = 3; k = T_DOTDOTEQ }
+            }
+        }
+        if ch == 61 {
+            k = T_EQ
+            if i + 1 < n {
+                let nx = char_at(c.src, i + 1)
+                if nx == 61 { len = 2; k = T_EQEQ }
+            }
+        }
+        if ch == 33 {
+            k = T_BANG
+            if i + 1 < n && char_at(c.src, i + 1) == 61 { len = 2; k = T_NE }
+        }
+        if ch == 60 {
+            k = T_LT
+            if i + 1 < n {
+                let nx = char_at(c.src, i + 1)
+                if nx == 61 { len = 2; k = T_LE }
+                if nx == 60 { len = 2; k = T_SHL }
+            }
+        }
+        if ch == 62 {
+            k = T_GT
+            if i + 1 < n {
+                let nx = char_at(c.src, i + 1)
+                if nx == 61 { len = 2; k = T_GE }
+                if nx == 62 { len = 2; k = T_SHR }
+            }
+        }
+        if ch == 38 {
+            k = T_AMP
+            if i + 1 < n && char_at(c.src, i + 1) == 38 { len = 2; k = T_ANDAND }
+        }
+        if ch == 124 {
+            k = T_PIPE
+            if i + 1 < n && char_at(c.src, i + 1) == 124 { len = 2; k = T_OROR }
+        }
+        if ch == 94 { k = T_CARET }
+        if ch == 126 { k = T_TILDE }
+        // compound assignments (checked after the plain ops above)
+        if k == T_PLUS || k == T_MINUS || k == T_STAR || k == T_SLASH || k == T_PCT {
+            if i + 1 < n && char_at(c.src, i + 1) == 61 {
+                if k == T_PLUS { k = T_PLUSEQ }
+                if k == T_MINUS { k = T_MINUSEQ }
+                if k == T_STAR { k = T_STAREQ }
+                if k == T_PCT { k = T_PCTEQ }
+                len = 2
+            }
+        }
+        if ch == 47 {
+            k = T_SLASH
+            if i + 1 < n && char_at(c.src, i + 1) == 61 { len = 2; k = T_SLASHEQ }
+        }
+        if k < 0 {
+            die("unexpected character '" + c.src.substring(i, i + 1) + "' on line " + to_string(line))
+        }
+        c.toks.push(Tok { kind: k, text: c.src.substring(i, i + len), line: line })
+        i = i + len
+    }
+    c.toks.push(Tok { kind: T_EOF, text: "", line: line })
+    return c
+}
+
+// ---------------------------------------------------------------------------
+// Parser (recursive descent; values return via c.retv / c.rets)
+// ---------------------------------------------------------------------------
+
+fn peek(c: Ctx) -> i64 {
+    if c.pos[0] >= c.toks.len() { return T_EOF }
+    return c.toks[c.pos[0]].kind
+}
+
+fn peek2(c: Ctx) -> i64 {
+    if c.pos[0] + 1 >= c.toks.len() { return T_EOF }
+    return c.toks[c.pos[0] + 1].kind
+}
+
+fn cur_line(c: Ctx) -> i64 {
+    if c.pos[0] >= c.toks.len() { return 0 }
+    return c.toks[c.pos[0]].line
+}
+
+fn cur_text(c: Ctx) -> string {
+    return c.toks[c.pos[0]].text
+}
+
+fn advance(c: Ctx) -> Ctx {
+    c.pos[0] = c.pos[0] + 1
+    return c
+}
+
+// eat a token kind; retv[0] = 1 if eaten
+fn eat(c: Ctx, k: i64) -> Ctx {
+    if peek(c) == k {
+        c = advance(c)
+        c.retv[0] = 1
+    } else {
+        c.retv[0] = 0
+    }
+    return c
+}
+
+fn expect(c: Ctx, k: i64, what: string) -> Ctx {
+    if peek(c) != k {
+        err(c, cur_line(c), "expected " + what)
+    }
+    c = advance(c)
+    return c
+}
+
+// push a fresh expr node; retv[0] = its index
+fn new_expr(c: Ctx, kind: i64, line: i64) -> Ctx {
+    c.exprs.push(Expr {
+        kind: kind, ival: 0.0, isint: 0, sval: "",
+        l: -1, r: -1, op: 0,
+        astart: 0, acount: 0, init_start: 0, init_count: 0,
+        ty: -1, line: line
+    })
+    c.retv[0] = c.exprs.len() - 1
+    return c
+}
+
+// push a fresh stmt node; retv[0] = its index
+fn new_stmt(c: Ctx, kind: i64, line: i64) -> Ctx {
+    c.stmts.push(Stmt {
+        kind: kind, name: "", ty: -1, e: -1, e2: -1, op: 0, inc: 0,
+        body_start: 0, body_count: 0, els_start: 0, els_count: 0, line: line
+    })
+    c.retv[0] = c.stmts.len() - 1
+    return c
+}
+
+// append arg expr indices to an expr's arg range (astart..astart+acount)
+fn push_arg(c: Ctx, e: i64, a: i64) -> Ctx {
+    let x = c.exprs[e]
+    if x.acount == 0 {
+        x.astart = c.iargs.len()
+    }
+    c.iargs.push(a)
+    x.acount = x.acount + 1
+    c.exprs[e] = x
+    return c
+}
+
+// ------------------------------------------------------------------ types
+
+// parse a type: i64 f64 bool string void, Name, [T]
+fn parse_type(c: Ctx) -> Ctx {
+    let line = cur_line(c)
+    if peek(c) == T_IDENT {
+        let w = cur_text(c)
+        if w == "i64" { c = advance(c); c.retv[0] = ty_i64(c); return c }
+        if w == "f64" { c = advance(c); c.retv[0] = ty_f64(c); return c }
+        if w == "bool" { c = advance(c); c.retv[0] = ty_bool(c); return c }
+        if w == "string" { c = advance(c); c.retv[0] = ty_str(c); return c }
+        if w == "void" { c = advance(c); c.retv[0] = ty_unit(c); return c }
+        // user struct
+        c = advance(c)
+        c = ty_struct(c, w)
+        return c
+    }
+    if peek(c) == T_LB {
+        c = advance(c)
+        c = parse_type(c)
+        let elem = c.retv[0]
+        c = expect(c, T_RB, "] to close array type")
+        c = ty_arr(c, elem)
+        return c
+    }
+    err(c, line, "expected a type")
+    return c
+}
+
+// ------------------------------------------------------------------ items
+
+fn parse(c: Ctx) -> Ctx {
+    while peek(c) != T_EOF {
+        let k = peek(c)
+        if k == T_FN { c = parse_fn(c, "") }
+        else if k == T_STRUCT { c = parse_struct(c) }
+        else if k == T_IMPL { c = parse_impl(c) }
+        else if k == T_CONST { c = parse_const(c) }
+        else { err(c, cur_line(c), "expected fn, struct, impl or const at top level") }
+    }
+    return c
+}
+
+// parse a function (owner = "" for a free fn, the struct name for a method)
+fn parse_fn(c: Ctx, owner: string) -> Ctx {
+    let line = cur_line(c)
+    c = expect(c, T_FN, "fn")
+    if peek(c) != T_IDENT { err(c, cur_line(c), "expected function name") }
+    let name = cur_text(c)
+    c = advance(c)
+    // params
+    let pstart = c.params.len()
+    let has_self = 0
+    c = expect(c, T_LP, "( after function name")
+    while peek(c) != T_RP {
+        if peek(c) != T_IDENT { err(c, cur_line(c), "expected parameter name") }
+        let pn = cur_text(c)
+        c = advance(c)
+        // `self` takes no type annotation
+        if pn == "self" && peek(c) != T_COLON {
+            has_self = 1
+            c = eat(c, T_COMMA)
+        } else {
+            c = expect(c, T_COLON, ": after parameter name")
+            c = parse_type(c)
+            let pt = c.retv[0]
+            c.params.push(Param { name: pn, ty: pt })
+            c = eat(c, T_COMMA)
+        }
+    }
+    c = expect(c, T_RP, ") after parameters")
+    let pcount = c.params.len() - pstart
+    // return type: `-> Ty` (defaults to void)
+    let ret = -1
+    if peek(c) == T_MINUS && peek2(c) == T_GT {
+        c = advance(c)
+        c = advance(c)
+        c = parse_type(c)
+        ret = c.retv[0]
+    }
+    if ret < 0 { ret = ty_unit(c) }
+    // body
+    c = expect(c, T_LBR, "{ to open function body")
+    c = parse_block(c)
+    let bstart = c.retv[0]
+    let bcount = c.retv[1]
+    c.fns.push(FnDecl {
+        name: name, owner: owner, ret: ret,
+        pstart: pstart, pcount: pcount,
+        body_start: bstart, body_count: bcount,
+        has_self: has_self, line: line
+    })
+    return c
+}
+
+// parse a `{ ... }` block; retv[0] = start index, retv[1] = count
+fn parse_block(c: Ctx) -> Ctx {
+    // the caller has already consumed the opening `{`
+    // top-level child indices are collected locally, then appended to the
+    // `blk` arena contiguously so nested bodies cannot interleave.
+    let kids: [i64] = [0]
+    while peek(c) != T_RBR && peek(c) != T_EOF {
+        c = parse_stmt(c)
+        kids.push(c.retv[0])
+    }
+    c = expect(c, T_RBR, "} to close block")
+    let start = c.blk.len()
+    let n = kids.len() - 1
+    let i = 1
+    while i < kids.len() {
+        c.blk.push(kids[i])
+        i = i + 1
+    }
+    c.retv[0] = start
+    c.retv[1] = n
+    return c
+}
+
+fn parse_struct(c: Ctx) -> Ctx {
+    let line = cur_line(c)
+    c = expect(c, T_STRUCT, "struct")
+    if peek(c) != T_IDENT { err(c, line, "expected struct name") }
+    let name = cur_text(c)
+    c = advance(c)
+    let fstart = c.fdefs.len()
+    c = expect(c, T_LBR, "{ after struct name")
+    while peek(c) != T_RBR {
+        if peek(c) != T_IDENT { err(c, cur_line(c), "expected field name in struct") }
+        let fn_ = cur_text(c)
+        c = advance(c)
+        c = expect(c, T_COLON, ": after field name")
+        c = parse_type(c)
+        let ft = c.retv[0]
+        c.fdefs.push(FieldDef { name: fn_, ty: ft })
+        c = eat(c, T_COMMA)
+    }
+    c = expect(c, T_RBR, "} to close struct")
+    let fcount = c.fdefs.len() - fstart
+    c.sdefs.push(StructDef { name: name, fstart: fstart, fcount: fcount })
+    return c
+}
+
+fn parse_impl(c: Ctx) -> Ctx {
+    let line = cur_line(c)
+    c = expect(c, T_IMPL, "impl")
+    if peek(c) != T_IDENT { err(c, line, "expected struct name after impl") }
+    let sname = cur_text(c)
+    c = advance(c)
+    c = expect(c, T_LBR, "{ after impl struct name")
+    while peek(c) == T_FN {
+        c = parse_fn(c, sname)
+    }
+    c = expect(c, T_RBR, "} to close impl")
+    return c
+}
+
+// const NAME [: ty] = literal
+fn parse_const(c: Ctx) -> Ctx {
+    let line = cur_line(c)
+    c = expect(c, T_CONST, "const")
+    if peek(c) != T_IDENT { err(c, line, "expected constant name") }
+    let name = cur_text(c)
+    c = advance(c)
+    let ty = -1
+    if peek(c) == T_COLON {
+        c = advance(c)
+        c = parse_type(c)
+        ty = c.retv[0]
+    }
+    c = expect(c, T_EQ, "= in const")
+    if peek(c) != T_INT && peek(c) != T_FLOAT && peek(c) != T_STR && peek(c) != T_TRUE && peek(c) != T_FALSE {
+        err(c, line, "const values must be int, float, string or bool literals")
+    }
+    let text = cur_text(c)
+    let k = peek(c)
+    c = advance(c)
+    let cty = ty
+    if cty < 0 {
+        if k == T_INT { cty = ty_i64(c) }
+        else if k == T_FLOAT { cty = ty_f64(c) }
+        else if k == T_STR { cty = ty_str(c) }
+        else { cty = ty_bool(c) }
+    }
+    c.consts.push(ConstDef { name: name, ty: cty, ctext: text })
+    return c
+}
+
+// ------------------------------------------------------------------ statements
+
+// parse one statement; retv[0] = stmt index
+fn parse_stmt(c: Ctx) -> Ctx {
+    let line = cur_line(c)
+    let k = peek(c)
+    if k == T_LET { return parse_let(c) }
+    if k == T_IF { return parse_if(c) }
+    if k == T_WHILE {
+        c = advance(c)
+        c = new_stmt(c, S_WHILE, line)
+        let st = c.retv[0]
+        c = parse_expr(c)
+        let cond = c.retv[0]
+        c = expect(c, T_LBR, "{ after while condition")
+        c = parse_block(c)
+        let bs = c.retv[0]
+        let bc = c.retv[1]
+        let x = c.stmts[st]
+        x.e = cond
+        x.body_start = bs
+        x.body_count = bc
+        c.stmts[st] = x
+        c.retv[0] = st
+        return c
+    }
+    if k == T_FOR {
+        c = advance(c)
+        if peek(c) != T_IDENT { err(c, line, "expected loop variable after for") }
+        let var = cur_text(c)
+        c = advance(c)
+        c = expect(c, T_IN, "in after loop variable")
+        c = new_stmt(c, S_FORR, line)
+        let st = c.retv[0]
+        c = parse_expr(c)
+        let subject = c.retv[0]
+        if peek(c) == T_DOTDOT || peek(c) == T_DOTDOTEQ {
+            let inc = 0
+            if peek(c) == T_DOTDOTEQ { inc = 1 }
+            c = advance(c)
+            c = parse_expr(c)
+            let to = c.retv[0]
+            c = expect(c, T_LBR, "{ after for range")
+            c = parse_block(c)
+            let bs = c.retv[0]
+            let bc = c.retv[1]
+            let x = c.stmts[st]
+            x.name = var
+            x.e = subject
+            x.e2 = to
+            x.inc = inc
+            x.body_start = bs
+            x.body_count = bc
+            c.stmts[st] = x
+            c.retv[0] = st
+            return c
+        }
+        // for x in <array>
+        c = new_stmt(c, S_FORIN, line)
+        let st2 = c.retv[0]
+        c = expect(c, T_LBR, "{ after for-in")
+        c = parse_block(c)
+        let bs2 = c.retv[0]
+        let bc2 = c.retv[1]
+        let x2 = c.stmts[st2]
+        x2.name = var
+        x2.e = subject
+        x2.body_start = bs2
+        x2.body_count = bc2
+        c.stmts[st2] = x2
+        c.retv[0] = st2
+        return c
+    }
+    if k == T_RET {
+        c = advance(c)
+        c = eat(c, T_SEMI)
+        if peek(c) == T_RBR || peek(c) == T_EOF {
+            c = new_stmt(c, S_RET, line)
+            let st = c.retv[0]
+            let x = c.stmts[st]
+            x.e = -1
+            c.stmts[st] = x
+            c.retv[0] = st
+            return c
+        }
+        c = parse_expr(c)
+        let e = c.retv[0]
+        c = eat(c, T_SEMI)
+        c = new_stmt(c, S_RET, line)
+        let st = c.retv[0]
+        let x = c.stmts[st]
+        x.e = e
+        c.stmts[st] = x
+        c.retv[0] = st
+        return c
+    }
+    if k == T_BREAK {
+        c = advance(c)
+        c = eat(c, T_SEMI)
+        c = new_stmt(c, S_BREAK, line)
+        return c
+    }
+    if k == T_CONT {
+        c = advance(c)
+        c = eat(c, T_SEMI)
+        c = new_stmt(c, S_CONT, line)
+        return c
+    }
+    // expression statement, plain assignment or compound assignment
+    c = parse_expr(c)
+    let e = c.retv[0]
+    if peek(c) == T_EQ {
+        c = advance(c)
+        c = parse_expr(c)
+        let v = c.retv[0]
+        c = eat(c, T_SEMI)
+        c = new_stmt(c, S_ASSIGN, line)
+        let st = c.retv[0]
+        let x = c.stmts[st]
+        x.e = e
+        x.e2 = v
+        c.stmts[st] = x
+        c.retv[0] = st
+        return c
+    }
+    let aug = -1
+    if peek(c) == T_PLUSEQ { aug = T_PLUS }
+    if peek(c) == T_MINUSEQ { aug = T_MINUS }
+    if peek(c) == T_STAREQ { aug = T_STAR }
+    if peek(c) == T_SLASHEQ { aug = T_SLASH }
+    if peek(c) == T_PCTEQ { aug = T_PCT }
+    if aug >= 0 {
+        c = advance(c)
+        c = parse_expr(c)
+        let v = c.retv[0]
+        c = eat(c, T_SEMI)
+        c = new_stmt(c, S_AUG, line)
+        let st = c.retv[0]
+        let x = c.stmts[st]
+        x.e = e
+        x.e2 = v
+        x.op = aug
+        c.stmts[st] = x
+        c.retv[0] = st
+        return c
+    }
+    c = eat(c, T_SEMI)
+    c = new_stmt(c, S_EXPR, line)
+    let st = c.retv[0]
+    let x = c.stmts[st]
+    x.e = e
+    c.stmts[st] = x
+    c.retv[0] = st
+    return c
+}
+
+fn parse_let(c: Ctx) -> Ctx {
+    let line = cur_line(c)
+    c = expect(c, T_LET, "let")
+    if peek(c) != T_IDENT { err(c, line, "expected variable name after let") }
+    let name = cur_text(c)
+    c = advance(c)
+    let ty = -1
+    if peek(c) == T_COLON {
+        c = advance(c)
+        c = parse_type(c)
+        ty = c.retv[0]
+    }
+    c = expect(c, T_EQ, "= in let")
+    c = parse_expr(c)
+    let e = c.retv[0]
+    c = eat(c, T_SEMI)
+    c = new_stmt(c, S_LET, line)
+    let st = c.retv[0]
+    let x = c.stmts[st]
+    x.name = name
+    x.ty = ty
+    x.e = e
+    c.stmts[st] = x
+    c.retv[0] = st
+    return c
+}
+
+// if / elif / else chain
+fn parse_if(c: Ctx) -> Ctx {
+    let line = cur_line(c)
+    c = expect(c, T_IF, "if")
+    c = new_stmt(c, S_IF, line)
+    let st = c.retv[0]
+    c = parse_expr(c)
+    let cond = c.retv[0]
+    c = expect(c, T_LBR, "{ after if condition")
+    c = parse_block(c)
+    let bs = c.retv[0]
+    let bc = c.retv[1]
+    let es = 0
+    let ec = 0
+    if peek(c) == T_ELSE {
+        c = advance(c)
+        if peek(c) == T_IF {
+            c = parse_if(c)
+            es = c.blk.len()
+            c.blk.push(c.retv[0])
+            ec = 1
+        } else {
+            c = expect(c, T_LBR, "{ after else")
+            c = parse_block(c)
+            es = c.retv[0]
+            ec = c.retv[1]
+        }
+    } else if peek(c) == T_ELIF {
+        c = parse_elif(c)
+        let st = c.retv[0]
+        es = st
+        ec = 1
+    }
+    let x = c.stmts[st]
+    x.e = cond
+    x.body_start = bs
+    x.body_count = bc
+    x.els_start = es
+    x.els_count = ec
+    c.stmts[st] = x
+    c.retv[0] = st
+    return c
+}
+
+fn parse_elif(c: Ctx) -> Ctx {
+    let line = cur_line(c)
+    c = expect(c, T_ELIF, "elif")
+    c = new_stmt(c, S_IF, line)
+    let st = c.retv[0]
+    c = parse_expr(c)
+    let cond = c.retv[0]
+    c = expect(c, T_LBR, "{ after elif condition")
+    c = parse_block(c)
+    let bs = c.retv[0]
+    let bc = c.retv[1]
+    let es = 0
+    let ec = 0
+    if peek(c) == T_ELSE {
+        c = advance(c)
+        if peek(c) == T_IF {
+            c = parse_if(c)
+            es = c.blk.len()
+            c.blk.push(c.retv[0])
+            ec = 1
+        } else {
+            c = expect(c, T_LBR, "{ after else")
+            c = parse_block(c)
+            es = c.retv[0]
+            ec = c.retv[1]
+        }
+    } else if peek(c) == T_ELIF {
+        c = parse_elif(c)
+        let st2 = c.retv[0]
+        es = st2
+        ec = 1
+    }
+    let x = c.stmts[st]
+    x.e = cond
+    x.body_start = bs
+    x.body_count = bc
+    x.els_start = es
+    x.els_count = ec
+    c.stmts[st] = x
+    c.retv[0] = st
+    return c
+}
+
+// ------------------------------------------------------------------ expressions
+
+// token kinds at pos+1 and pos+2 (for struct-literal disambiguation)
+fn p1(c: Ctx) -> i64 {
+    if c.pos[0] + 1 >= c.toks.len() { return T_EOF }
+    return c.toks[c.pos[0] + 1].kind
+}
+
+fn p2(c: Ctx) -> i64 {
+    if c.pos[0] + 2 >= c.toks.len() { return T_EOF }
+    return c.toks[c.pos[0] + 2].kind
+}
+
+// binary op token -> is it an arithmetic/comparison op we fold into E_BIN
+fn bin_prec(op: i64) -> i64 {
+    if op == T_OROR { return 1 }
+    if op == T_ANDAND { return 2 }
+    if op == T_EQEQ || op == T_NE || op == T_LT || op == T_GT || op == T_LE || op == T_GE { return 3 }
+    if op == T_PIPE { return 4 }
+    if op == T_CARET { return 5 }
+    if op == T_AMP { return 6 }
+    if op == T_SHL || op == T_SHR { return 7 }
+    if op == T_PLUS || op == T_MINUS { return 8 }
+    if op == T_STAR || op == T_SLASH || op == T_PCT { return 9 }
+    return 0
+}
+
+// precedence-climbing expression parser; retv[0] = expr index
+fn parse_expr(c: Ctx) -> Ctx {
+    return parse_bin(c, 1)
+}
+
+fn parse_bin(c: Ctx, min_prec: i64) -> Ctx {
+    c = parse_unary(c)
+    let mut_lhs = c.retv[0]
+    let go = true
+    while go {
+        let op = peek(c)
+        let prec = bin_prec(op)
+        if prec < min_prec {
+            go = false
+            continue
+        }
+        let line = cur_line(c)
+        c = advance(c)
+        c = parse_bin(c, prec + 1)
+        let rhs = c.retv[0]
+        c = new_expr(c, E_BIN, line)
+        let e = c.retv[0]
+        let x = c.exprs[e]
+        x.l = mut_lhs
+        x.r = rhs
+        x.op = op
+        c.exprs[e] = x
+        mut_lhs = e
+    }
+    c.retv[0] = mut_lhs
+    return c
+}
+
+fn parse_unary(c: Ctx) -> Ctx {
+    let line = cur_line(c)
+    let k = peek(c)
+    if k == T_MINUS || k == T_BANG || k == T_TILDE {
+        c = advance(c)
+        c = parse_unary(c)
+        let inner = c.retv[0]
+        c = new_expr(c, E_UN, line)
+        let e = c.retv[0]
+        let x = c.exprs[e]
+        x.l = inner
+        x.op = k
+        c.exprs[e] = x
+        c.retv[0] = e
+        return c
+    }
+    c = parse_postfix(c)
+    let e0 = c.retv[0]
+    // casts: `e as i64` / `e as f64` (bind tighter than binary ops)
+    if peek(c) == T_AS {
+        let e = e0
+        while peek(c) == T_AS {
+            c = advance(c)
+            c = parse_type(c)
+            let t = c.retv[0]
+            c = new_expr(c, E_CAST, line)
+            let ec = c.retv[0]
+            let x = c.exprs[ec]
+            x.l = e
+            x.r = t
+            c.exprs[ec] = x
+            e = ec
+        }
+        c.retv[0] = e
+        return c
+    }
+    c.retv[0] = e0
+    return c
+}
+
+// primary + trailing .field / .method(...) / [index]
+fn parse_postfix(c: Ctx) -> Ctx {
+    c = parse_primary(c)
+    let lhs = c.retv[0]
+    let go = true
+    while go {
+        let line = cur_line(c)
+        if peek(c) == T_DOT {
+            c = advance(c)
+            if peek(c) != T_IDENT { err(c, line, "expected field or method name after .") }
+            let name = cur_text(c)
+            let nline = cur_line(c)
+            c = advance(c)
+            if peek(c) == T_LP {
+                // method call
+                c = advance(c)
+                c = new_expr(c, E_METHOD, nline)
+                let e = c.retv[0]
+                let x = c.exprs[e]
+                x.l = lhs
+                x.sval = name
+                c.exprs[e] = x
+                let kids: [i64] = [0]
+                while peek(c) != T_RP && peek(c) != T_EOF {
+                    c = parse_expr(c)
+                    kids.push(c.retv[0])
+                    c = eat(c, T_COMMA)
+                }
+                c = expect(c, T_RP, ") after method arguments")
+                let ai = 1
+                while ai < kids.len() {
+                    c = push_arg(c, e, kids[ai])
+                    ai = ai + 1
+                }
+                c.retv[0] = e
+                lhs = e
+            } else {
+                c = new_expr(c, E_FIELD, line)
+                let e = c.retv[0]
+                let x = c.exprs[e]
+                x.l = lhs
+                x.sval = name
+                c.exprs[e] = x
+                c.retv[0] = e
+                lhs = e
+            }
+            continue
+        }
+        if peek(c) == T_LB {
+            c = advance(c)
+            c = parse_expr(c)
+            let idx = c.retv[0]
+            c = expect(c, T_RB, "] after index")
+            c = new_expr(c, E_INDEX, line)
+            let e = c.retv[0]
+            let x = c.exprs[e]
+            x.l = lhs
+            x.r = idx
+            c.exprs[e] = x
+            c.retv[0] = e
+            lhs = e
+            continue
+        }
+        go = false
+    }
+    c.retv[0] = lhs
+    return c
+}
+
+fn parse_primary(c: Ctx) -> Ctx {
+    let line = cur_line(c)
+    let k = peek(c)
+    if k == T_INT {
+        let t = cur_text(c)
+        c = advance(c)
+        c = new_expr(c, E_INT, line)
+        let e = c.retv[0]
+        let x = c.exprs[e]
+        x.sval = t
+        x.isint = 1
+        c.exprs[e] = x
+        c.retv[0] = e
+        return c
+    }
+    if k == T_FLOAT {
+        let t = cur_text(c)
+        c = advance(c)
+        c = new_expr(c, E_FLOAT, line)
+        let e = c.retv[0]
+        let x = c.exprs[e]
+        x.sval = t
+        c.exprs[e] = x
+        c.retv[0] = e
+        return c
+    }
+    if k == T_STR {
+        let t = cur_text(c)
+        c = advance(c)
+        c = new_expr(c, E_STR, line)
+        let e = c.retv[0]
+        let x = c.exprs[e]
+        x.sval = t
+        c.exprs[e] = x
+        c.retv[0] = e
+        return c
+    }
+    if k == T_TRUE || k == T_FALSE {
+        c = advance(c)
+        c = new_expr(c, E_BOOL, line)
+        let e = c.retv[0]
+        let x = c.exprs[e]
+        if k == T_TRUE { x.isint = 1 }
+        c.exprs[e] = x
+        c.retv[0] = e
+        return c
+    }
+    if k == T_LP {
+        c = advance(c)
+        c = parse_expr(c)
+        let e = c.retv[0]
+        c = expect(c, T_RP, ") after expression")
+        c.retv[0] = e
+        return c
+    }
+    if k == T_LB {
+        // array literal
+        c = advance(c)
+        c = new_expr(c, E_ARRLIT, line)
+        let e = c.retv[0]
+        if peek(c) != T_RB {
+            let kids: [i64] = [0]
+            while peek(c) != T_EOF {
+                c = parse_expr(c)
+                kids.push(c.retv[0])
+                if peek(c) != T_COMMA { break }
+                c = advance(c)
+                if peek(c) == T_RB { break }
+            }
+            let ai = 1
+            while ai < kids.len() {
+                c = push_arg(c, e, kids[ai])
+                ai = ai + 1
+            }
+        }
+        c = expect(c, T_RB, "] after array literal")
+        c.retv[0] = e
+        return c
+    }
+    if k == T_IDENT {
+        let name = cur_text(c)
+        // friendly rejection of f-strings
+        if name == "f" && p1(c) == T_STR {
+            err(c, line, "f-strings are not part of Vulcan Core (use to_string + concat)")
+        }
+        c = advance(c)
+        // call?
+        if peek(c) == T_LP {
+            c = advance(c)
+            c = new_expr(c, E_CALL, line)
+            let e = c.retv[0]
+            let x = c.exprs[e]
+            x.sval = name
+            c.exprs[e] = x
+            let kids: [i64] = [0]
+            while peek(c) != T_RP && peek(c) != T_EOF {
+                c = parse_expr(c)
+                kids.push(c.retv[0])
+                c = eat(c, T_COMMA)
+            }
+            c = expect(c, T_RP, ") after arguments")
+            let ai = 1
+            while ai < kids.len() {
+                c = push_arg(c, e, kids[ai])
+                ai = ai + 1
+            }
+            c.retv[0] = e
+            return c
+        }
+        // struct literal? Name { field: ..., ... } — only capitalized names
+        // whose brace is followed by `field:` or `}`.
+        if peek(c) == T_LBR {
+            let first = name.substring(0, 1)
+            let up = first == first.upper()
+            if up && (p1(c) == T_RBR || (p1(c) == T_IDENT && p2(c) == T_COLON)) {
+                c = advance(c)
+                c = new_expr(c, E_STRUCTLIT, line)
+                let e = c.retv[0]
+                let x = c.exprs[e]
+                x.sval = name
+                c.exprs[e] = x
+                let fnames: [string] = [""]
+                let fexprs: [i64] = [0]
+                while peek(c) != T_RBR {
+                    if peek(c) != T_IDENT { err(c, cur_line(c), "expected field name in struct literal") }
+                    let fname = cur_text(c)
+                    c = advance(c)
+                    c = expect(c, T_COLON, ": after struct literal field name")
+                    c = parse_expr(c)
+                    fnames.push(fname)
+                    fexprs.push(c.retv[0])
+                    c = eat(c, T_COMMA)
+                }
+                c = expect(c, T_RBR, "} to close struct literal")
+                let fi = 1
+                let x2 = c.exprs[e]
+                x2.init_start = c.finits.len()
+                c.exprs[e] = x2
+                while fi < fnames.len() {
+                    c.finits.push(FieldInit { name: fnames[fi], e: fexprs[fi] })
+                    let x3 = c.exprs[e]
+                    x3.init_count = x3.init_count + 1
+                    c.exprs[e] = x3
+                    fi = fi + 1
+                }
+                c.retv[0] = e
+                return c
+            }
+        }
+        // plain identifier
+        c = new_expr(c, E_IDENT, line)
+        let e = c.retv[0]
+        let x = c.exprs[e]
+        x.sval = name
+        c.exprs[e] = x
+        c.retv[0] = e
+        return c
+    }
+    err(c, line, "unexpected token in expression: " + cur_text(c))
+    return c
+}
+
+// ---------------------------------------------------------------------------
+// Checking pass — annotates every expr with its type (exprs[e].ty)
+// ---------------------------------------------------------------------------
+
+// record the computed type on an expr node (element write -> shared storage)
+fn set_ty(c: Ctx, e: i64, t: i64) -> void {
+    let x = c.exprs[e]
+    x.ty = t
+    c.exprs[e] = x
+}
+
+// scope stack helpers (locals: name -> type)
+fn push_local(c: Ctx, name: string, t: i64) -> Ctx {
+    // keep lnames / lcns / ltys aligned (lcns is only used by codegen)
+    c.lnames.push(name)
+    c.lcns.push("")
+    c.ltys.push(t)
+    return c
+}
+
+fn lookup_local(c: Ctx, name: string) -> i64 {
+    let i = c.lnames.len() - 1
+    while i >= 0 {
+        if c.lnames[i] == name { return c.ltys[i] }
+        i = i - 1
+    }
+    return -1
+}
+
+fn push_scope(c: Ctx) -> Ctx {
+    c.lmarks.push(c.lnames.len())
+    return c
+}
+
+fn pop_scope(c: Ctx) -> Ctx {
+    let m = c.lmarks[c.lmarks.len() - 1]
+    while c.lnames.len() > m {
+        c.lnames.pop()
+        c.lcns.pop()
+        c.ltys.pop()
+    }
+    c.lmarks.pop()
+    return c
+}
+
+fn check(c: Ctx) -> Ctx {
+    // every struct must be used consistently; every fn body gets checked
+    let i = 0
+    while i < c.fns.len() {
+        c = check_fn(c, i)
+        i = i + 1
+    }
+    // main must exist and take no parameters
+    let mi = find_fn(c, "", "main")
+    if mi < 0 { die("no `fn main()` found") }
+    if c.fns[mi].pcount != 0 { die("main takes no parameters") }
+    return c
+}
+
+fn check_fn(c: Ctx, fi: i64) -> Ctx {
+    let f = c.fns[fi]
+    c.cur_ret[0] = f.ret
+    c = push_scope(c)
+    if f.has_self == 1 {
+        c = ty_struct(c, f.owner)
+        c = push_local(c, "self", c.retv[0])
+    }
+    let pi = 0
+    while pi < f.pcount {
+        let p = c.params[f.pstart + pi]
+        c = push_local(c, p.name, p.ty)
+        pi = pi + 1
+    }
+    c = check_stmts(c, f.body_start, f.body_count)
+    c = pop_scope(c)
+    return c
+}
+
+fn check_stmts(c: Ctx, start: i64, count: i64) -> Ctx {
+    let i = 0
+    while i < count {
+        c = check_stmt(c, c.blk[start + i])
+        i = i + 1
+    }
+    return c
+}
+
+fn check_stmt(c: Ctx, si: i64) -> Ctx {
+    let s = c.stmts[si]
+    if s.kind == S_LET {
+        c = check_expr(c, s.e)
+        let t = c.retv[0]
+        if t < 0 {
+            // empty array literal: the element type must come from the annotation
+            if s.ty >= 0 { t = s.ty; set_ty(c, s.e, s.ty) }
+            else { err(c, s.line, "cannot infer type of empty array literal (add a `: [T]` annotation)") }
+        } else if s.ty >= 0 {
+            if compat(c, t, s.ty) == false {
+                err(c, s.line, "let `" + s.name + "`: value does not match the annotated type")
+            }
+        }
+        if ty_kind(c, t) == TY_UNIT {
+            err(c, s.line, "let `" + s.name + "`: value has no type")
+        }
+        c = push_local(c, s.name, t)
+        return c
+    }
+    if s.kind == S_ASSIGN || s.kind == S_AUG {
+        c = check_expr(c, s.e)
+        let tt = c.retv[0]
+        c = check_expr(c, s.e2)
+        let vt = c.retv[0]
+        // target must be assignable: ident, field or index
+        let tk = c.exprs[s.e].kind
+        if tk != E_IDENT && tk != E_FIELD && tk != E_INDEX {
+            err(c, s.line, "invalid assignment target")
+        }
+        if s.kind == S_AUG {
+            // compound: both sides numeric (or string for +=)
+            if ty_kind(c, tt) == TY_STR {
+                if s.op != T_PLUS { err(c, s.line, "only += works on strings") }
+            } else if is_num(c, tt) == false || is_num(c, vt) == false {
+                err(c, s.line, "compound assignment needs numeric operands")
+            }
+        } else if compat(c, vt, tt) == false {
+            err(c, s.line, "assignment type mismatch")
+        }
+        return c
+    }
+    if s.kind == S_IF {
+        c = check_expr(c, s.e)
+        if ty_kind(c, c.retv[0]) != TY_BOOL { err(c, s.line, "if condition must be bool") }
+        c = check_stmts(c, s.body_start, s.body_count)
+        if s.els_count > 0 { c = check_stmts(c, s.els_start, s.els_count) }
+        return c
+    }
+    if s.kind == S_WHILE {
+        c = check_expr(c, s.e)
+        if ty_kind(c, c.retv[0]) != TY_BOOL { err(c, s.line, "while condition must be bool") }
+        c = check_stmts(c, s.body_start, s.body_count)
+        return c
+    }
+    if s.kind == S_FORR {
+        c = check_expr(c, s.e)
+        if is_int_ty(c, c.retv[0]) == false { err(c, s.line, "for range start must be i64") }
+        c = check_expr(c, s.e2)
+        if is_int_ty(c, c.retv[0]) == false { err(c, s.line, "for range end must be i64") }
+        c = push_scope(c)
+        c = push_local(c, s.name, ty_i64(c))
+        c = check_stmts(c, s.body_start, s.body_count)
+        c = pop_scope(c)
+        return c
+    }
+    if s.kind == S_FORIN {
+        c = check_expr(c, s.e)
+        if ty_kind(c, c.retv[0]) != TY_ARR { err(c, s.line, "for-in needs an array") }
+        let elem = c.types[c.retv[0]].elem
+        c = push_scope(c)
+        c = push_local(c, s.name, elem)
+        c = check_stmts(c, s.body_start, s.body_count)
+        c = pop_scope(c)
+        return c
+    }
+    if s.kind == S_RET {
+        if s.e < 0 {
+            if ty_kind(c, c.cur_ret[0]) != TY_UNIT { err(c, s.line, "return needs a value") }
+        } else {
+            c = check_expr(c, s.e)
+            if compat(c, c.retv[0], c.cur_ret[0]) == false {
+                err(c, s.line, "return type mismatch")
+            }
+        }
+        return c
+    }
+    if s.kind == S_EXPR {
+        c = check_expr(c, s.e)
+        return c
+    }
+    return c
+}
+
+// check one expression; retv[0] = its type (-1 only for an empty array
+// literal, which is legal only as the initializer of an annotated let)
+fn check_expr(c: Ctx, e: i64) -> Ctx {
+    let x = c.exprs[e]
+    let k = x.kind
+    if k == E_INT { let t = ty_i64(c); set_ty(c, e, t); c.retv[0] = t; return c }
+    if k == E_FLOAT { let t = ty_f64(c); set_ty(c, e, t); c.retv[0] = t; return c }
+    if k == E_STR { let t = ty_str(c); set_ty(c, e, t); c.retv[0] = t; return c }
+    if k == E_BOOL { let t = ty_bool(c); set_ty(c, e, t); c.retv[0] = t; return c }
+    if k == E_IDENT {
+        let t = lookup_local(c, x.sval)
+        if t < 0 {
+            let ci = find_const(c, x.sval)
+            if ci < 0 { err(c, x.line, "unknown name `" + x.sval + "`") }
+            t = c.consts[ci].ty
+        }
+        set_ty(c, e, t)
+        c.retv[0] = t
+        return c
+    }
+    if k == E_UN {
+        c = check_expr(c, x.l)
+        let t = c.retv[0]
+        if x.op == T_MINUS {
+            if is_num(c, t) == false { err(c, x.line, "unary - needs a number") }
+        } else if x.op == T_BANG {
+            if ty_kind(c, t) != TY_BOOL { err(c, x.line, "unary ! needs a bool") }
+        } else {
+            if is_int_ty(c, t) == false { err(c, x.line, "unary ~ needs an i64") }
+        }
+        set_ty(c, e, t)
+        c.retv[0] = t
+        return c
+    }
+    if k == E_CAST {
+        c = check_expr(c, x.l)
+        let t = c.retv[0]
+        let tk = ty_kind(c, t)
+        let rk = ty_kind(c, x.r)
+        if (tk != TY_I64 && tk != TY_F64) || (rk != TY_I64 && rk != TY_F64) {
+            err(c, x.line, "casts are only supported between i64 and f64")
+        }
+        set_ty(c, e, x.r)
+        c.retv[0] = x.r
+        return c
+    }
+    if k == E_BIN { return check_bin(c, e) }
+    if k == E_FIELD {
+        c = check_expr(c, x.l)
+        let rt = c.retv[0]
+        if ty_kind(c, rt) != TY_STRUCT { err(c, x.line, "field access on a non-struct value") }
+        let sd = find_struct(c, c.types[rt].name)
+        if sd < 0 { err(c, x.line, "unknown struct " + c.types[rt].name) }
+        let fi = find_field(c, sd, x.sval)
+        if fi < 0 { err(c, x.line, "struct " + c.types[rt].name + " has no field " + x.sval) }
+        let ft = c.fdefs[c.sdefs[sd].fstart + fi].ty
+        set_ty(c, e, ft)
+        c.retv[0] = ft
+        return c
+    }
+    if k == E_INDEX {
+        c = check_expr(c, x.l)
+        let rt = c.retv[0]
+        if ty_kind(c, rt) != TY_ARR { err(c, x.line, "indexing a non-array value") }
+        c = check_expr(c, x.r)
+        if is_int_ty(c, c.retv[0]) == false { err(c, x.line, "array index must be i64") }
+        let et = c.types[rt].elem
+        set_ty(c, e, et)
+        c.retv[0] = et
+        return c
+    }
+    if k == E_ARRLIT {
+        if x.acount == 0 {
+            set_ty(c, e, -1)
+            c.retv[0] = -1
+            return c
+        }
+        let elem = -1
+        let i = 0
+        while i < x.acount {
+            c = check_expr(c, c.iargs[x.astart + i])
+            let t = c.retv[0]
+            if elem < 0 {
+                elem = t
+            } else if ty_eq(c, t, elem) == false {
+                err(c, x.line, "mixed types in array literal")
+            }
+            i = i + 1
+        }
+        c = ty_arr(c, elem)
+        set_ty(c, e, c.retv[0])
+        return c
+    }
+    if k == E_STRUCTLIT {
+        let sd = find_struct(c, x.sval)
+        if sd < 0 { err(c, x.line, "unknown struct " + x.sval + " in literal") }
+        let i = 0
+        while i < x.init_count {
+            let init = c.finits[x.init_start + i]
+            let fi = find_field(c, sd, init.name)
+            if fi < 0 { err(c, x.line, "struct " + x.sval + " has no field " + init.name) }
+            c = check_expr(c, init.e)
+            let ft = c.fdefs[c.sdefs[sd].fstart + fi].ty
+            if compat(c, c.retv[0], ft) == false {
+                err(c, x.line, "field " + init.name + " type mismatch in " + x.sval + " literal")
+            }
+            i = i + 1
+        }
+        c = ty_struct(c, x.sval)
+        set_ty(c, e, c.retv[0])
+        return c
+    }
+    if k == E_CALL { return check_call(c, e) }
+    if k == E_METHOD { return check_method(c, e) }
+    err(c, x.line, "internal: unknown expr kind " + to_string(k))
+    return c
+}
+
+fn check_bin(c: Ctx, e: i64) -> Ctx {
+    let x = c.exprs[e]
+    c = check_expr(c, x.l)
+    let lt = c.retv[0]
+    c = check_expr(c, x.r)
+    let rt = c.retv[0]
+    let op = x.op
+    let lk = ty_kind(c, lt)
+    let rk = ty_kind(c, rt)
+    let t = -1
+    if op == T_PLUS {
+        if lk == TY_STR && rk == TY_STR { t = ty_str(c) }
+        else if is_num(c, lt) && is_num(c, rt) {
+            if lk == TY_F64 || rk == TY_F64 { t = ty_f64(c) } else { t = ty_i64(c) }
+        }
+    } else if op == T_MINUS || op == T_STAR {
+        if is_num(c, lt) && is_num(c, rt) {
+            if lk == TY_F64 || rk == TY_F64 { t = ty_f64(c) } else { t = ty_i64(c) }
+        }
+    } else if op == T_SLASH {
+        if is_num(c, lt) && is_num(c, rt) {
+            if lk == TY_F64 || rk == TY_F64 { t = ty_f64(c) } else { t = ty_i64(c) }
+        }
+    } else if op == T_PCT {
+        if is_int_ty(c, lt) && is_int_ty(c, rt) { t = ty_i64(c) }
+    } else if op == T_LT || op == T_GT || op == T_LE || op == T_GE {
+        if is_num(c, lt) && is_num(c, rt) { t = ty_bool(c) }
+    } else if op == T_EQEQ || op == T_NE {
+        if is_num(c, lt) && is_num(c, rt) { t = ty_bool(c) }
+        else if lk == TY_BOOL && rk == TY_BOOL { t = ty_bool(c) }
+        else if lk == TY_STR && rk == TY_STR { t = ty_bool(c) }
+    } else if op == T_ANDAND || op == T_OROR {
+        if lk == TY_BOOL && rk == TY_BOOL { t = ty_bool(c) }
+    } else {
+        // bitwise
+        if is_int_ty(c, lt) && is_int_ty(c, rt) { t = ty_i64(c) }
+    }
+    if t < 0 { err(c, x.line, "type error: bad operand types for `" + op_text(op) + "`") }
+    set_ty(c, e, t)
+    c.retv[0] = t
+    return c
+}
+
+// token kind -> source text (for error messages)
+fn op_text(op: i64) -> string {
+    if op == T_PLUS { return "+" }
+    if op == T_MINUS { return "-" }
+    if op == T_STAR { return "*" }
+    if op == T_SLASH { return "/" }
+    if op == T_PCT { return "%" }
+    if op == T_EQEQ { return "==" }
+    if op == T_NE { return "!=" }
+    if op == T_LT { return "<" }
+    if op == T_GT { return ">" }
+    if op == T_LE { return "<=" }
+    if op == T_GE { return ">=" }
+    if op == T_ANDAND { return "&&" }
+    if op == T_OROR { return "||" }
+    if op == T_AMP { return "&" }
+    if op == T_PIPE { return "|" }
+    if op == T_CARET { return "^" }
+    if op == T_SHL { return "<<" }
+    if op == T_SHR { return ">>" }
+    return "op" + to_string(op)
+}
+
+// check a free-function call (builtin or user fn)
+fn check_call(c: Ctx, e: i64) -> Ctx {
+    let x = c.exprs[e]
+    let name = x.sval
+    let nargs = x.acount
+    // builtins first
+    if name == "print" {
+        let ai = 0
+        while ai < nargs {
+            c = check_expr(c, c.iargs[x.astart + ai])
+            let ak = ty_kind(c, c.retv[0])
+            if ak != TY_I64 && ak != TY_F64 && ak != TY_BOOL && ak != TY_STR && ak != TY_ARR {
+                err(c, x.line, "print cannot show this value")
+            }
+            if ak == TY_ARR {
+                let ek = ty_kind(c, c.types[c.retv[0]].elem)
+                if ek == TY_STRUCT || ek == TY_ARR { err(c, x.line, "print cannot show this array") }
+            }
+            ai = ai + 1
+        }
+        t_unit_ret(c, e)
+        return c
+    }
+    if name == "to_string" {
+        if nargs != 1 { err(c, x.line, "to_string(x) takes 1 arg") }
+        c = check_expr(c, c.iargs[x.astart])
+        let t = c.retv[0]
+        let tk = ty_kind(c, t)
+        if tk != TY_I64 && tk != TY_F64 && tk != TY_BOOL && tk != TY_STR {
+            err(c, x.line, "to_string needs a number, bool or string")
+        }
+        let st = ty_str(c)
+        set_ty(c, e, st)
+        c.retv[0] = st
+        return c
+    }
+    if name == "to_int" || name == "to_float" || name == "char_at" {
+        if nargs != 2 && name != "char_at" { err(c, x.line, name + "(s) takes 1 arg") }
+        if name == "char_at" && nargs != 2 { err(c, x.line, "char_at(s, i) takes 2 args") }
+        c = check_expr(c, c.iargs[x.astart])
+        if ty_kind(c, c.retv[0]) != TY_STR { err(c, x.line, name + " needs a string") }
+        let t = ty_i64(c)
+        if name == "to_float" { t = ty_f64(c) }
+        if name == "char_at" {
+            c = check_expr(c, c.iargs[x.astart + 1])
+            if is_int_ty(c, c.retv[0]) == false { err(c, x.line, "char_at index must be i64") }
+        }
+        set_ty(c, e, t)
+        c.retv[0] = t
+        return c
+    }
+    if name == "len" {
+        if nargs != 1 { err(c, x.line, "len(x) takes 1 arg") }
+        c = check_expr(c, c.iargs[x.astart])
+        let tk = ty_kind(c, c.retv[0])
+        if tk != TY_STR && tk != TY_ARR { err(c, x.line, "len needs a string or array") }
+        let t = ty_i64(c)
+        set_ty(c, e, t)
+        c.retv[0] = t
+        return c
+    }
+    if name == "arg" {
+        if nargs != 1 { err(c, x.line, "arg(i) takes 1 arg") }
+        c = check_expr(c, c.iargs[x.astart])
+        if is_int_ty(c, c.retv[0]) == false { err(c, x.line, "arg index must be i64") }
+        let st = ty_str(c)
+        set_ty(c, e, st)
+        c.retv[0] = st
+        return c
+    }
+    if name == "arg_count" || name == "ms_now" {
+        if nargs != 0 { err(c, x.line, name + "() takes no args") }
+        let t = ty_i64(c)
+        set_ty(c, e, t)
+        c.retv[0] = t
+        return c
+    }
+    if name == "clock" {
+        if nargs != 0 { err(c, x.line, "clock() takes no args") }
+        let t = ty_f64(c)
+        set_ty(c, e, t)
+        c.retv[0] = t
+        return c
+    }
+    if name == "input" {
+        if nargs != 0 { err(c, x.line, "input() takes no args") }
+        let st = ty_str(c)
+        set_ty(c, e, st)
+        c.retv[0] = st
+        return c
+    }
+    if name == "file_read" || name == "file_exists" {
+        if nargs != 1 { err(c, x.line, name + "(path) takes 1 arg") }
+        c = check_expr(c, c.iargs[x.astart])
+        if ty_kind(c, c.retv[0]) != TY_STR { err(c, x.line, name + " needs a string path") }
+        let t = ty_str(c)
+        if name == "file_exists" { t = ty_bool(c) }
+        set_ty(c, e, t)
+        c.retv[0] = t
+        return c
+    }
+    if name == "file_write" {
+        if nargs != 2 { err(c, x.line, "file_write(path, contents) takes 2 args") }
+        c = check_expr(c, c.iargs[x.astart])
+        if ty_kind(c, c.retv[0]) != TY_STR { err(c, x.line, "file_write path must be a string") }
+        c = check_expr(c, c.iargs[x.astart + 1])
+        if ty_kind(c, c.retv[0]) != TY_STR { err(c, x.line, "file_write contents must be a string") }
+        t_unit_ret(c, e)
+        return c
+    }
+    if name == "exit" || name == "sleep_ms" {
+        if nargs != 1 { err(c, x.line, name + "(n) takes 1 arg") }
+        c = check_expr(c, c.iargs[x.astart])
+        if is_num(c, c.retv[0]) == false { err(c, x.line, name + " needs a number") }
+        t_unit_ret(c, e)
+        return c
+    }
+    if name == "rand_int" {
+        if nargs != 2 { err(c, x.line, "rand_int(lo, hi) takes 2 args") }
+        c = check_expr(c, c.iargs[x.astart])
+        if is_int_ty(c, c.retv[0]) == false { err(c, x.line, "rand_int bounds must be i64") }
+        c = check_expr(c, c.iargs[x.astart + 1])
+        if is_int_ty(c, c.retv[0]) == false { err(c, x.line, "rand_int bounds must be i64") }
+        let t = ty_i64(c)
+        set_ty(c, e, t)
+        c.retv[0] = t
+        return c
+    }
+    if name == "sqrt" || name == "floor" || name == "ceil" || name == "abs" || name == "sin" || name == "cos" {
+        if nargs != 1 { err(c, x.line, name + "(x) takes 1 arg") }
+        c = check_expr(c, c.iargs[x.astart])
+        if is_num(c, c.retv[0]) == false { err(c, x.line, name + " needs a number") }
+        let t = ty_f64(c)
+        set_ty(c, e, t)
+        c.retv[0] = t
+        return c
+    }
+    // user function
+    let fi = find_fn(c, "", name)
+    if fi < 0 { err(c, x.line, "unknown function `" + name + "`") }
+    let f = c.fns[fi]
+    if nargs != f.pcount {
+        err(c, x.line, "`" + name + "` takes " + to_string(f.pcount) + " arg(s), got " + to_string(nargs))
+    }
+    let i = 0
+    while i < nargs {
+        c = check_expr(c, c.iargs[x.astart + i])
+        let pt = c.params[f.pstart + i].ty
+        if compat(c, c.retv[0], pt) == false {
+            err(c, x.line, "argument " + to_string(i + 1) + " of `" + name + "` has the wrong type")
+        }
+        i = i + 1
+    }
+    set_ty(c, e, f.ret)
+    c.retv[0] = f.ret
+    return c
+}
+
+// mark an expression as void
+fn t_unit_ret(c: Ctx, e: i64) -> void {
+    let t = ty_unit(c)
+    set_ty(c, e, t)
+}
+
+// check a method call (user impl method, or builtin on array/string/f64)
+fn check_method(c: Ctx, e: i64) -> Ctx {
+    let x = c.exprs[e]
+    c = check_expr(c, x.l)
+    let rt = c.retv[0]
+    let rk = ty_kind(c, rt)
+    let name = x.sval
+    let nargs = x.acount
+    // user impl methods take priority
+    if rk == TY_STRUCT {
+        let fi = find_fn(c, c.types[rt].name, name)
+        if fi >= 0 {
+            let f = c.fns[fi]
+            let expected = f.pcount
+            if nargs != expected {
+                err(c, x.line, "method " + c.types[rt].name + "." + name + " takes " + to_string(expected) + " arg(s)")
+            }
+            let i = 0
+            while i < nargs {
+                c = check_expr(c, c.iargs[x.astart + i])
+                let pt = c.params[f.pstart + i].ty
+                if compat(c, c.retv[0], pt) == false {
+                    err(c, x.line, "argument " + to_string(i + 1) + " of " + name + " has the wrong type")
+                }
+                i = i + 1
+            }
+            set_ty(c, e, f.ret)
+            c.retv[0] = f.ret
+            return c
+        }
+    }
+    // builtin methods
+    if name == "len" {
+        if nargs != 0 { err(c, x.line, "len() takes no args") }
+        if rk != TY_ARR && rk != TY_STR { err(c, x.line, ".len() needs an array or string") }
+        let t = ty_i64(c)
+        set_ty(c, e, t)
+        c.retv[0] = t
+        return c
+    }
+    if name == "push" {
+        if rk != TY_ARR { err(c, x.line, "push is an array method") }
+        if nargs != 1 { err(c, x.line, "push takes 1 arg") }
+        c = check_expr(c, c.iargs[x.astart])
+        if compat(c, c.retv[0], c.types[rt].elem) == false { err(c, x.line, "push argument type mismatch") }
+        t_unit_ret(c, e)
+        return c
+    }
+    if name == "pop" || name == "shift" || name == "last" {
+        if rk != TY_ARR { err(c, x.line, name + " is an array method") }
+        if nargs != 0 { err(c, x.line, name + " takes no args") }
+        set_ty(c, e, c.types[rt].elem)
+        c.retv[0] = c.types[rt].elem
+        return c
+    }
+    if name == "contains" {
+        if rk == TY_ARR {
+            if nargs != 1 { err(c, x.line, "contains takes 1 arg") }
+            // the prelude has no contains helper for struct-element arrays
+            let ek = ty_kind(c, c.types[rt].elem)
+            if ek == TY_STRUCT || ek == TY_ARR { err(c, x.line, "contains needs a scalar or string array") }
+            c = check_expr(c, c.iargs[x.astart])
+            if compat(c, c.retv[0], c.types[rt].elem) == false { err(c, x.line, "contains argument type mismatch") }
+        } else if rk == TY_STR {
+            if nargs != 1 { err(c, x.line, "contains takes 1 arg") }
+            c = check_expr(c, c.iargs[x.astart])
+            if ty_kind(c, c.retv[0]) != TY_STR { err(c, x.line, "string contains needs a string") }
+        } else {
+            err(c, x.line, "contains needs an array or string")
+        }
+        let t = ty_bool(c)
+        set_ty(c, e, t)
+        c.retv[0] = t
+        return c
+    }
+    if name == "insert" || name == "remove" {
+        if rk != TY_ARR { err(c, x.line, name + " is an array method") }
+        if name == "insert" && nargs != 2 { err(c, x.line, "insert(index, item) takes 2 args") }
+        if name == "remove" && nargs != 1 { err(c, x.line, "remove(index) takes 1 arg") }
+        c = check_expr(c, c.iargs[x.astart])
+        if is_int_ty(c, c.retv[0]) == false { err(c, x.line, name + " index must be i64") }
+        if name == "insert" {
+            c = check_expr(c, c.iargs[x.astart + 1])
+            if compat(c, c.retv[0], c.types[rt].elem) == false { err(c, x.line, "insert item type mismatch") }
+        }
+        t_unit_ret(c, e)
+        return c
+    }
+    if name == "upper" || name == "lower" || name == "trim" {
+        if rk != TY_STR { err(c, x.line, name + " is a string method") }
+        if nargs != 0 { err(c, x.line, name + " takes no args") }
+        let st = ty_str(c)
+        set_ty(c, e, st)
+        c.retv[0] = st
+        return c
+    }
+    if name == "repeat" {
+        if rk != TY_STR { err(c, x.line, "repeat is a string method") }
+        if nargs != 1 { err(c, x.line, "repeat takes 1 arg") }
+        c = check_expr(c, c.iargs[x.astart])
+        if is_int_ty(c, c.retv[0]) == false { err(c, x.line, "repeat count must be i64") }
+        let st = ty_str(c)
+        set_ty(c, e, st)
+        c.retv[0] = st
+        return c
+    }
+    if name == "replace" {
+        if rk != TY_STR { err(c, x.line, "replace is a string method") }
+        if nargs != 2 { err(c, x.line, "replace(old, new) takes 2 args") }
+        c = check_expr(c, c.iargs[x.astart])
+        if ty_kind(c, c.retv[0]) != TY_STR { err(c, x.line, "replace needs string args") }
+        c = check_expr(c, c.iargs[x.astart + 1])
+        if ty_kind(c, c.retv[0]) != TY_STR { err(c, x.line, "replace needs string args") }
+        let st = ty_str(c)
+        set_ty(c, e, st)
+        c.retv[0] = st
+        return c
+    }
+    if name == "substring" {
+        if rk != TY_STR { err(c, x.line, "substring is a string method") }
+        if nargs != 2 { err(c, x.line, "substring(start, end) takes 2 args") }
+        c = check_expr(c, c.iargs[x.astart])
+        if is_int_ty(c, c.retv[0]) == false { err(c, x.line, "substring needs i64 indices") }
+        c = check_expr(c, c.iargs[x.astart + 1])
+        if is_int_ty(c, c.retv[0]) == false { err(c, x.line, "substring needs i64 indices") }
+        let st = ty_str(c)
+        set_ty(c, e, st)
+        c.retv[0] = st
+        return c
+    }
+    if name == "find" || name == "starts_with" || name == "ends_with" {
+        if rk != TY_STR { err(c, x.line, name + " is a string method") }
+        if nargs != 1 { err(c, x.line, name + " takes 1 arg") }
+        c = check_expr(c, c.iargs[x.astart])
+        if ty_kind(c, c.retv[0]) != TY_STR { err(c, x.line, name + " needs a string arg") }
+        let t = ty_i64(c)
+        if name != "find" { t = ty_bool(c) }
+        set_ty(c, e, t)
+        c.retv[0] = t
+        return c
+    }
+    if name == "split" {
+        if rk != TY_STR { err(c, x.line, "split is a string method") }
+        if nargs != 1 { err(c, x.line, "split takes 1 arg") }
+        c = check_expr(c, c.iargs[x.astart])
+        if ty_kind(c, c.retv[0]) != TY_STR { err(c, x.line, "split needs a string separator") }
+        c = ty_arr(c, ty_str(c))
+        set_ty(c, e, c.retv[0])
+        return c
+    }
+    if name == "join" {
+        if rk != TY_ARR { err(c, x.line, "join is a [string] method") }
+        if ty_kind(c, c.types[rt].elem) != TY_STR { err(c, x.line, "join is a [string] method") }
+        if nargs != 1 { err(c, x.line, "join takes 1 arg") }
+        c = check_expr(c, c.iargs[x.astart])
+        if ty_kind(c, c.retv[0]) != TY_STR { err(c, x.line, "join needs a string separator") }
+        let st = ty_str(c)
+        set_ty(c, e, st)
+        c.retv[0] = st
+        return c
+    }
+    if name == "sqrt" || name == "floor" || name == "ceil" || name == "abs" || name == "sin" || name == "cos" {
+        if rk != TY_F64 { err(c, x.line, name + " is an f64 method") }
+        if nargs != 0 { err(c, x.line, name + " takes no args") }
+        let t = ty_f64(c)
+        set_ty(c, e, t)
+        c.retv[0] = t
+        return c
+    }
+    err(c, x.line, "unknown method `." + name + "()` on this type")
+    return c
+}
+
+// ---------------------------------------------------------------------------
+// Code generation — emits C99 against the shared runtime prelude
+// ---------------------------------------------------------------------------
+
+const C_KEYWORDS = " auto break case char const continue default do double else enum extern float for goto if inline int long register restrict return short signed sizeof static struct switch typedef union unsigned void volatile while bool "
+
+fn is_c_keyword(w: string) -> bool {
+    return C_KEYWORDS.contains(" " + w + " ")
+}
+
+const C_PREFIXES = "vi64_ vf64_ vbool_ vstr_ vs_ vk_ vto_ vulcan_ vmin_ vmax_ vclock vrand vsleep input_line term_raw term_normal key_ready read_key clear_screen vms_now vrand_int vprint_at vset_color vscreen_w vscreen_h vcursor_visible vchat "
+
+fn has_c_prefix(w: string) -> bool {
+    let parts = C_PREFIXES.split(" ")
+    let i = 0
+    while i < parts.len() {
+        if parts[i] != "" && starts_with(w, parts[i]) { return true }
+        i = i + 1
+    }
+    return false
+}
+
+// rename identifiers that would collide with C or the prelude
+fn safe_name(name: string) -> string {
+    if is_c_keyword(name) || has_c_prefix(name) { return "vu_" + name }
+    return name
+}
+
+fn method_c_name(owner: string, mname: string) -> string {
+    return "vm_" + owner + "_" + safe_name(mname)
+}
+
+// C type for a compiler type index
+fn ctype(c: Ctx, t: i64) -> string {
+    let k = ty_kind(c, t)
+    if k == TY_I64 { return "int64_t" }
+    if k == TY_F64 { return "double" }
+    if k == TY_BOOL { return "int8_t" }
+    if k == TY_STR { return "char*" }
+    if k == TY_UNIT { return "void" }
+    if k == TY_STRUCT { return c.types[t].name }
+    if k == TY_ARR { return vec_cname(c, c.types[t].elem) }
+    return "int64_t"
+}
+
+// C vec typedef for an element type
+fn vec_cname(c: Ctx, elem: i64) -> string {
+    let k = ty_kind(c, elem)
+    if k == TY_I64 { return "VecI64" }
+    if k == TY_F64 { return "VecF64" }
+    if k == TY_BOOL { return "VecBool" }
+    if k == TY_STR { return "VecStr" }
+    return "Vec_" + c.types[elem].name
+}
+
+// prelude helper name for an array operation
+fn vec_helper(c: Ctx, elem: i64, op: string) -> string {
+    let k = ty_kind(c, elem)
+    if k == TY_I64 { return "vi64_" + op }
+    if k == TY_F64 { return "vf64_" + op }
+    if k == TY_BOOL { return "vbool_" + op }
+    if k == TY_STR { return "vstr_" + op }
+    return "vs_" + c.types[elem].name + "_" + op
+}
+
+fn emit(c: Ctx, line: string) -> Ctx {
+    c.out.push(pad(c.ind[0]) + line)
+    return c
+}
+
+fn emit_raw(c: Ctx, line: string) -> Ctx {
+    c.out.push(line)
+    return c
+}
+
+// fresh temporary/variable name (per function counter)
+fn fresh(c: Ctx, tag: string) -> string {
+    c.tmpn[0] = c.tmpn[0] + 1
+    return "v" + to_string(c.tmpn[0]) + "_" + tag
+}
+
+// codegen-local scopes (name -> C name, type)
+fn cg_push_local(c: Ctx, name: string, cn: string, t: i64) -> Ctx {
+    c.lnames.push(name)
+    c.lcns.push(cn)
+    c.ltys.push(t)
+    return c
+}
+
+fn cg_lookup(c: Ctx, name: string) -> i64 {
+    let i = c.lnames.len() - 1
+    while i >= 0 {
+        if c.lnames[i] == name { return i }
+        i = i - 1
+    }
+    return -1
+}
+
+fn cg_push_scope(c: Ctx) -> Ctx {
+    c.lmarks.push(c.lnames.len())
+    return c
+}
+
+fn cg_pop_scope(c: Ctx) -> Ctx {
+    let m = c.lmarks[c.lmarks.len() - 1]
+    while c.lnames.len() > m {
+        c.lnames.pop()
+        c.lcns.pop()
+        c.ltys.pop()
+    }
+    c.lmarks.pop()
+    return c
+}
+
+fn clear_scopes(c: Ctx) -> Ctx {
+    while c.lnames.len() > 0 {
+        c.lnames.pop()
+        c.lcns.pop()
+        c.ltys.pop()
+    }
+    while c.lmarks.len() > 0 { c.lmarks.pop() }
+    return c
+}
+
+// ---------------------------------------------------------------------------
+// Program
+// ---------------------------------------------------------------------------
+
+fn gen(c: Ctx) -> Ctx {
+    c = emit_raw(c, VPRELUDE)
+    c = emit_raw(c, "// ---- structs ----")
+    // each struct: forward typedef, body, then its Vec typedef + helpers
+    let i = 1
+    while i < c.sdefs.len() {
+        let s = c.sdefs[i]
+        c = emit_raw(c, "typedef struct " + s.name + " " + s.name + ";")
+        let def = "struct " + s.name + " {"
+        c = emit_raw(c, def)
+        let f = 0
+        while f < s.fcount {
+            let fd = c.fdefs[s.fstart + f]
+            c = emit_raw(c, "    " + ctype(c, fd.ty) + " " + safe_name(fd.name) + ";")
+            f = f + 1
+        }
+        c = emit_raw(c, "};")
+        let s = c.sdefs[i]
+        c = emit_raw(c, "typedef struct { " + s.name + "* data; int64_t len; int64_t cap; } Vec_" + s.name + ";")
+        c = emit_raw(c, "static Vec_" + s.name + " vs_" + s.name + "_new(int64_t n){ Vec_" + s.name + " v; v.cap=(n>0?n:8); v.data=malloc(v.cap*sizeof(" + s.name + ")); v.len=0; return v; }")
+        c = emit_raw(c, "static void vs_" + s.name + "_push(Vec_" + s.name + "* v, " + s.name + " x){ if(v->len==v->cap){ v->cap*=2; v->data=realloc(v->data,v->cap*sizeof(" + s.name + ")); } v->data[v->len++]=x; }")
+        c = emit_raw(c, "static " + s.name + " vs_" + s.name + "_get(Vec_" + s.name + "* v, int64_t i){ if(i<0||i>=v->len){ fprintf(stderr,\"vulcan: index out of bounds\\n\"); exit(1);} return v->data[i]; }")
+        c = emit_raw(c, "static void vs_" + s.name + "_set(Vec_" + s.name + "* v, int64_t i, " + s.name + " x){ if(i<0||i>=v->len){ fprintf(stderr,\"vulcan: index out of bounds\\n\"); exit(1);} v->data[i]=x; }")
+        c = emit_raw(c, "static " + s.name + " vs_" + s.name + "_pop(Vec_" + s.name + "* v){ " + s.name + " z = {0}; return v->len>0 ? v->data[--v->len] : z; }")
+        c = emit_raw(c, "static " + s.name + " vs_" + s.name + "_shift(Vec_" + s.name + "* v){ " + s.name + " z = {0}; if(v->len==0) return z; " + s.name + " x=v->data[0]; memmove(v->data, v->data+1, (size_t)(v->len-1)*sizeof(" + s.name + ")); v->len--; return x; }")
+        c = emit_raw(c, "static " + s.name + " vs_" + s.name + "_last(Vec_" + s.name + "* v){ " + s.name + " z = {0}; return v->len>0 ? v->data[v->len-1] : z; }")
+        c = emit_raw(c, "static void vs_" + s.name + "_remove(Vec_" + s.name + "* v, int64_t i){ if(i<0||i>=v->len){ fprintf(stderr,\"vulcan: index out of bounds\\n\"); exit(1);} memmove(v->data+i, v->data+i+1, (size_t)(v->len-i-1)*sizeof(" + s.name + ")); v->len--; }")
+        c = emit_raw(c, "static void vs_" + s.name + "_insert(Vec_" + s.name + "* v, int64_t i, " + s.name + " x){ if(i<0||i>v->len){ fprintf(stderr,\"vulcan: index out of bounds\\n\"); exit(1);} if(v->len==v->cap){ v->cap*=2; v->data=realloc(v->data,v->cap*sizeof(" + s.name + ")); } memmove(v->data+i+1, v->data+i, (size_t)(v->len-i)*sizeof(" + s.name + ")); v->data[i]=x; v->len++; }")
+        i = i + 1
+    }
+    // constants
+    if c.consts.len() > 1 {
+        c = emit_raw(c, "// ---- constants ----")
+        i = 1
+        while i < c.consts.len() {
+            let cd = c.consts[i]
+            let k = ty_kind(c, cd.ty)
+            let val = cd.ctext
+            if k == TY_BOOL {
+                if val == "true" { val = "1" } else { val = "0" }
+            }
+            let ct = "int64_t"
+            if k == TY_F64 { ct = "double" }
+            if k == TY_BOOL { ct = "int8_t" }
+            if k == TY_STR { ct = "char*" }
+            c = emit_raw(c, "static " + ct + " " + safe_name(cd.name) + " = " + val + ";")
+            i = i + 1
+        }
+    }
+    // prototypes
+    c = emit_raw(c, "// ---- prototypes ----")
+    i = 1
+    while i < c.fns.len() {
+        c = gen_prototype(c, i)
+        i = i + 1
+    }
+    // bodies
+    c = emit_raw(c, "// ---- program ----")
+    i = 1
+    while i < c.fns.len() {
+        c = gen_fn(c, i)
+        i = i + 1
+    }
+    return c
+}
+
+fn gen_prototype(c: Ctx, fi: i64) -> Ctx {
+    let f = c.fns[fi]
+    let params = fn_params_c(c, f, true)
+    let cname = safe_name(f.name)
+    if f.owner != "" { cname = method_c_name(f.owner, f.name) }
+    let ret = ctype(c, f.ret)
+    let is_main = f.owner == "" && f.name == "main"
+    if is_main {
+        c = emit_raw(c, "static " + ret + " vulcan_main(void);")
+    } else {
+        c = emit_raw(c, "static " + ret + " " + cname + "(" + params + ");")
+    }
+    return c
+}
+
+// comma-separated C parameter list (with types); `proto` unused but kept
+// symmetric with the Rust compiler's shape
+fn fn_params_c(c: Ctx, f: FnDecl, proto: bool) -> string {
+    let parts: [string] = [""]
+    let n = 0
+    if f.has_self == 1 {
+        parts[0] = f.owner + "* __self"
+        n = 1
+    }
+    let i = 0
+    while i < f.pcount {
+        let p = c.params[f.pstart + i]
+        let one = ctype(c, p.ty) + " " + safe_name(p.name)
+        if n == 0 { parts[0] = one } else { parts.push(one) }
+        n = n + 1
+        i = i + 1
+    }
+    return join(parts, ", ")
+}
+
+// ---------------------------------------------------------------------------
+// Function bodies
+// ---------------------------------------------------------------------------
+
+fn gen_fn(c: Ctx, fi: i64) -> Ctx {
+    let f = c.fns[fi]
+    c.tmpn[0] = 0
+    c = clear_scopes(c)
+    c = cg_push_scope(c)
+    if f.has_self == 1 {
+        c = ty_struct(c, f.owner)
+        c = cg_push_local(c, "self", "(*__self)", c.retv[0])
+    }
+    let i = 0
+    while i < f.pcount {
+        let p = c.params[f.pstart + i]
+        c = cg_push_local(c, p.name, safe_name(p.name), p.ty)
+        i = i + 1
+    }
+    let params = fn_params_c(c, f, false)
+    let is_main = f.owner == "" && f.name == "main"
+    let cname = safe_name(f.name)
+    if f.owner != "" { cname = method_c_name(f.owner, f.name) }
+    if is_main {
+        c = emit_raw(c, "")
+        c = emit_raw(c, "static " + ctype(c, f.ret) + " vulcan_main(void) {")
+        c.ind[0] = 4
+        c = gen_stmts(c, f.body_start, f.body_count)
+        if ty_kind(c, f.ret) == TY_UNIT {
+            c = emit(c, "return;")
+        }
+        c.ind[0] = 0
+        c = emit_raw(c, "}")
+        if ty_kind(c, f.ret) == TY_I64 {
+            c = emit_raw(c, "int main(int __vargc, char** __vargv) { __vulcan_argc = __vargc; __vulcan_argv = __vargv; int64_t r = vulcan_main(); return (int)r; }")
+        } else {
+            c = emit_raw(c, "int main(int __vargc, char** __vargv) { __vulcan_argc = __vargc; __vulcan_argv = __vargv; vulcan_main(); return 0; }")
+        }
+    } else {
+        c = emit_raw(c, "")
+        c = emit_raw(c, "static " + ctype(c, f.ret) + " " + cname + "(" + params + ") {")
+        c.ind[0] = 4
+        c = gen_stmts(c, f.body_start, f.body_count)
+        c.ind[0] = 0
+        c = emit_raw(c, "}")
+    }
+    c = cg_pop_scope(c)
+    return c
+}
+
+fn gen_stmts(c: Ctx, start: i64, count: i64) -> Ctx {
+    let i = 0
+    while i < count {
+        c = gen_stmt(c, c.blk[start + i])
+        i = i + 1
+    }
+    return c
+}
+
+fn gen_stmt(c: Ctx, si: i64) -> Ctx {
+    let s = c.stmts[si]
+    if s.kind == S_LET {
+        c = gen_expr(c, s.e)
+        let v = c.rets[0]
+        let t = c.exprs[s.e].ty
+        if s.ty >= 0 { t = s.ty }
+        let cn = fresh(c, s.name)
+        c = emit(c, ctype(c, t) + " " + cn + " = " + v + ";")
+        c = cg_push_local(c, s.name, cn, t)
+        return c
+    }
+    if s.kind == S_ASSIGN {
+        return gen_assign(c, s)
+    }
+    if s.kind == S_AUG {
+        return gen_aug(c, s)
+    }
+    if s.kind == S_IF {
+        return gen_if(c, si)
+    }
+    if s.kind == S_WHILE {
+        c = gen_expr(c, s.e)
+        let cond = c.rets[0]
+        c = emit(c, "while (" + cond + ") {")
+        c.ind[0] = c.ind[0] + 4
+        c = gen_stmts(c, s.body_start, s.body_count)
+        c.ind[0] = c.ind[0] - 4
+        c = emit(c, "}")
+        return c
+    }
+    if s.kind == S_FORR {
+        c = gen_expr(c, s.e)
+        let from = c.rets[0]
+        c = gen_expr(c, s.e2)
+        let to = c.rets[0]
+        let cn = fresh(c, s.name)
+        let cmp_ = " < "
+        if s.inc == 1 { cmp_ = " <= " }
+        c = emit(c, "for (int64_t " + cn + " = " + from + "; " + cn + cmp_ + to + "; " + cn + "++) {")
+        c.ind[0] = c.ind[0] + 4
+        c = cg_push_scope(c)
+        c = cg_push_local(c, s.name, cn, ty_i64(c))
+        c = gen_stmts(c, s.body_start, s.body_count)
+        c = cg_pop_scope(c)
+        c.ind[0] = c.ind[0] - 4
+        c = emit(c, "}")
+        return c
+    }
+    if s.kind == S_FORIN {
+        c = gen_expr(c, s.e)
+        let arr = c.rets[0]
+        let at = c.exprs[s.e].ty
+        // materialize non-lvalue receivers so &X is legal
+        if c.exprs[s.e].kind != E_IDENT && c.exprs[s.e].kind != E_FIELD {
+            let tmp = fresh(c, "arr")
+            c = emit(c, ctype(c, at) + " " + tmp + " = " + arr + ";")
+            arr = tmp
+        }
+        let it = fresh(c, "i")
+        let cn = fresh(c, s.name)
+        let get = vec_helper(c, c.types[at].elem, "get")
+        c = emit(c, "for (int64_t " + it + " = 0; " + it + " < (" + arr + ").len; " + it + "++) {")
+        c.ind[0] = c.ind[0] + 4
+        c = cg_push_scope(c)
+        c = cg_push_local(c, s.name, cn, c.types[at].elem)
+        c = emit(c, ctype(c, c.types[at].elem) + " " + cn + " = " + get + "(&" + arr + ", " + it + ");")
+        c = gen_stmts(c, s.body_start, s.body_count)
+        c = cg_pop_scope(c)
+        c.ind[0] = c.ind[0] - 4
+        c = emit(c, "}")
+        return c
+    }
+    if s.kind == S_RET {
+        if s.e < 0 {
+            c = emit(c, "return;")
+        } else {
+            c = gen_expr(c, s.e)
+            c = emit(c, "return " + c.rets[0] + ";")
+        }
+        return c
+    }
+    if s.kind == S_BREAK {
+        c = emit(c, "break;")
+        return c
+    }
+    if s.kind == S_CONT {
+        c = emit(c, "continue;")
+        return c
+    }
+    if s.kind == S_EXPR {
+        c = gen_expr(c, s.e)
+        c = emit(c, c.rets[0] + ";")
+        return c
+    }
+    return c
+}
+
+// `target = value`
+fn gen_assign(c: Ctx, s: Stmt) -> Ctx {
+    let target = c.exprs[s.e]
+    c = gen_expr(c, s.e2)
+    let val = c.rets[0]
+    if target.kind == E_IDENT {
+        let li = cg_lookup(c, target.sval)
+        c = emit(c, c.lcns[li] + " = " + val + ";")
+        return c
+    }
+    if target.kind == E_FIELD {
+        // arr[i].field = v : read-modify-write through the vec helpers
+        if c.exprs[target.l].kind == E_INDEX {
+            return gen_field_of_elem_store(c, target, val, "", "")
+        }
+        c = gen_expr(c, target.l)
+        c = emit(c, c.rets[0] + "." + target.sval + " = " + val + ";")
+        return c
+    }
+    if target.kind == E_INDEX {
+        c = gen_expr(c, target.l)
+        let arr = c.rets[0]
+        let at = c.exprs[target.l].ty
+        c = gen_expr(c, target.r)
+        let idx = c.rets[0]
+        let set = vec_helper(c, c.types[at].elem, "set")
+        c = emit(c, set + "(&" + arr + ", " + idx + ", " + val + ");")
+        return c
+    }
+    return c
+}
+
+// `arr[i].field <op>= value` — read element, mutate, write back.
+// op == "" means plain assignment.
+fn gen_field_of_elem_store(c: Ctx, target: Expr, val: string, op: string, opname: string) -> Ctx {
+    let iexpr = c.exprs[target.l]
+    c = gen_expr(c, iexpr.l)
+    let arr = c.rets[0]
+    let at = c.exprs[iexpr.l].ty
+    c = gen_expr(c, iexpr.r)
+    let idx = c.rets[0]
+    let get = vec_helper(c, c.types[at].elem, "get")
+    let set = vec_helper(c, c.types[at].elem, "set")
+    let tmp = fresh(c, "tmp")
+    c = emit(c, "{ " + ctype(c, c.types[at].elem) + " " + tmp + " = " + get + "(&" + arr + ", " + idx + ");")
+    if op == "" {
+        c = emit(c, "    " + tmp + "." + target.sval + " = " + val + ";")
+    } else if op == "/" {
+        c = emit(c, "    " + tmp + "." + target.sval + " = " + opname + "(" + tmp + "." + target.sval + ", " + val + ");")
+    } else {
+        c = emit(c, "    " + tmp + "." + target.sval + " " + op + " " + val + ";")
+    }
+    c = emit(c, "    " + set + "(&" + arr + ", " + idx + ", " + tmp + "); }")
+    return c
+}
+
+// `target op= value`
+fn gen_aug(c: Ctx, s: Stmt) -> Ctx {
+    let target = c.exprs[s.e]
+    c = gen_expr(c, s.e2)
+    let val = c.rets[0]
+    let opch = op_text(s.op)
+    let divf = "vdiv_i64"
+    let tt = target.ty
+    if ty_kind(c, tt) == TY_F64 { divf = "vdiv_f64" }
+    if target.kind == E_IDENT {
+        let li = cg_lookup(c, target.sval)
+        let cn = c.lcns[li]
+        if ty_kind(c, c.ltys[li]) == TY_STR {
+            c = emit(c, cn + " = vstr_concat(" + cn + ", " + val + ");")
+        } else if s.op == T_SLASH {
+            c = emit(c, cn + " = " + divf + "(" + cn + ", " + val + ");")
+        } else if s.op == T_PCT {
+            c = emit(c, cn + " = vmod_i64(" + cn + ", " + val + ");")
+        } else {
+            c = emit(c, cn + " " + opch + "= " + val + ";")
+        }
+        return c
+    }
+    if target.kind == E_FIELD {
+        if c.exprs[target.l].kind == E_INDEX {
+            return gen_field_of_elem_store(c, target, val, opch, divf)
+        }
+        c = gen_expr(c, target.l)
+        let recv = c.rets[0]
+        let base = recv + "." + target.sval
+        if s.op == T_SLASH {
+            c = emit(c, base + " = " + divf + "(" + base + ", " + val + ");")
+        } else if s.op == T_PCT {
+            c = emit(c, base + " = vmod_i64(" + base + ", " + val + ");")
+        } else {
+            c = emit(c, base + " " + opch + "= " + val + ";")
+        }
+        return c
+    }
+    if target.kind == E_INDEX {
+        c = gen_expr(c, target.l)
+        let arr = c.rets[0]
+        let at = c.exprs[target.l].ty
+        c = gen_expr(c, target.r)
+        let idx = c.rets[0]
+        let get = vec_helper(c, c.types[at].elem, "get")
+        let set = vec_helper(c, c.types[at].elem, "set")
+        let cur = get + "(&" + arr + ", " + idx + ")"
+        if s.op == T_SLASH {
+            c = emit(c, set + "(&" + arr + ", " + idx + ", " + divf + "(" + cur + ", " + val + "));")
+        } else if s.op == T_PCT {
+            c = emit(c, set + "(&" + arr + ", " + idx + ", vmod_i64(" + cur + ", " + val + "));")
+        } else {
+            c = emit(c, set + "(&" + arr + ", " + idx + ", " + cur + " " + opch + " " + val + ");")
+        }
+        return c
+    }
+    return c
+}
+
+// if / elif / else chains
+fn gen_if(c: Ctx, si: i64) -> Ctx {
+    let s = c.stmts[si]
+    c = gen_expr(c, s.e)
+    c = emit(c, "if (" + c.rets[0] + ") {")
+    c.ind[0] = c.ind[0] + 4
+    c = cg_push_scope(c)
+    c = gen_stmts(c, s.body_start, s.body_count)
+    c = cg_pop_scope(c)
+    c.ind[0] = c.ind[0] - 4
+    if s.els_count > 0 {
+        // a single nested if statement continues the chain with `} else`
+        let esi = c.blk[s.els_start]
+        if s.els_count == 1 && c.stmts[esi].kind == S_IF {
+            c = emit(c, "} else")
+            c = gen_if(c, esi)
+            return c
+        }
+        c = emit(c, "} else {")
+        c.ind[0] = c.ind[0] + 4
+        c = cg_push_scope(c)
+        c = gen_stmts(c, s.els_start, s.els_count)
+        c = cg_pop_scope(c)
+        c.ind[0] = c.ind[0] - 4
+    }
+    c = emit(c, "}")
+    return c
+}
+
+// ---------------------------------------------------------------------------
+// Expressions — rets[0] = the C expression string (may emit lines first)
+// ---------------------------------------------------------------------------
+
+fn gen_expr(c: Ctx, e: i64) -> Ctx {
+    let x = c.exprs[e]
+    let k = x.kind
+    if k == E_INT {
+        c.rets[0] = "INT64_C(" + x.sval + ")"
+        return c
+    }
+    if k == E_FLOAT {
+        let t = x.sval
+        if t.contains(".") == false { t = t + ".0" }
+        c.rets[0] = t
+        return c
+    }
+    if k == E_STR {
+        c.rets[0] = x.sval
+        return c
+    }
+    if k == E_BOOL {
+        if x.isint == 1 { c.rets[0] = "1" } else { c.rets[0] = "0" }
+        return c
+    }
+    if k == E_IDENT {
+        let li = cg_lookup(c, x.sval)
+        if li >= 0 {
+            c.rets[0] = c.lcns[li]
+            return c
+        }
+        let ci = find_const(c, x.sval)
+        c.rets[0] = safe_name(c.consts[ci].name)
+        return c
+    }
+    if k == E_UN {
+        c = gen_expr(c, x.l)
+        let v = c.rets[0]
+        if x.op == T_MINUS { c.rets[0] = "(-" + v + ")" }
+        else if x.op == T_BANG { c.rets[0] = "(!" + v + ")" }
+        else { c.rets[0] = "(~" + v + ")" }
+        return c
+    }
+    if k == E_CAST {
+        c = gen_expr(c, x.l)
+        let v = c.rets[0]
+        if ty_kind(c, x.r) == TY_I64 {
+            c.rets[0] = "((int64_t)(" + v + "))"
+        } else {
+            c.rets[0] = "((double)(" + v + "))"
+        }
+        return c
+    }
+    if k == E_FIELD {
+        c = gen_expr(c, x.l)
+        c.rets[0] = c.rets[0] + "." + x.sval
+        return c
+    }
+    if k == E_INDEX {
+        let recv = x.l
+        let rk = c.exprs[recv].kind
+        c = gen_expr(c, recv)
+        let arr = c.rets[0]
+        let at = c.exprs[recv].ty
+        if rk != E_IDENT && rk != E_FIELD {
+            let tmp = fresh(c, "arr")
+            c = emit(c, ctype(c, at) + " " + tmp + " = " + arr + ";")
+            arr = tmp
+        }
+        c = gen_expr(c, x.r)
+        let get = vec_helper(c, c.types[at].elem, "get")
+        c.rets[0] = get + "(&" + arr + ", " + c.rets[0] + ")"
+        return c
+    }
+    if k == E_BIN {
+        return gen_bin(c, e)
+    }
+    if k == E_ARRLIT {
+        let t = x.ty
+        let newf = vec_helper(c, c.types[t].elem, "new")
+        let tmp = fresh(c, "arr")
+        c = emit(c, vec_cname(c, c.types[t].elem) + " " + tmp + " = " + newf + "(0);")
+        if x.acount > 0 {
+            let push = vec_helper(c, c.types[t].elem, "push")
+            let i = 0
+            while i < x.acount {
+                c = gen_expr(c, c.iargs[x.astart + i])
+                c = emit(c, push + "(&" + tmp + ", " + c.rets[0] + ");")
+                i = i + 1
+            }
+        }
+        c.rets[0] = tmp
+        return c
+    }
+    if k == E_STRUCTLIT {
+        let sd = find_struct(c, x.sval)
+        let def = c.sdefs[sd]
+        let parts: [string] = ["0"]
+        let n = 0
+        let i = 0
+        while i < def.fcount {
+            let fname = c.fdefs[def.fstart + i].name
+            // find an init for this field
+            let j = 0
+            let found = -1
+            while j < x.init_count {
+                if c.finits[x.init_start + j].name == fname { found = j }
+                j = j + 1
+            }
+            if found >= 0 {
+                c = gen_expr(c, c.finits[x.init_start + found].e)
+                if n == 0 { parts[0] = c.rets[0] } else { parts.push(c.rets[0]) }
+            } else if n > 0 {
+                parts.push("0")
+            }
+            n = n + 1
+            i = i + 1
+        }
+        c.rets[0] = "(" + x.sval + "){" + join(parts, ", ") + "}"
+        return c
+    }
+    if k == E_CALL {
+        return gen_call(c, e)
+    }
+    if k == E_METHOD {
+        return gen_method(c, e)
+    }
+    c.rets[0] = "/* ? */"
+    return c
+}
+
+fn gen_bin(c: Ctx, e: i64) -> Ctx {
+    let x = c.exprs[e]
+    c = gen_expr(c, x.l)
+    let l = c.rets[0]
+    c = gen_expr(c, x.r)
+    let r = c.rets[0]
+    let op = x.op
+    let rt = x.ty
+    // string concat / compare
+    if ty_kind(c, c.exprs[x.l].ty) == TY_STR {
+        if op == T_PLUS { c.rets[0] = "vstr_concat(" + l + ", " + r + ")"; return c }
+        if op == T_EQEQ { c.rets[0] = "(strcmp(" + l + ", " + r + ") == 0)"; return c }
+        if op == T_NE { c.rets[0] = "(strcmp(" + l + ", " + r + ") != 0)"; return c }
+    }
+    if op == T_SLASH {
+        if ty_kind(c, rt) == TY_F64 {
+            c.rets[0] = "vdiv_f64(" + l + ", " + r + ")"
+        } else {
+            c.rets[0] = "vdiv_i64(" + l + ", " + r + ")"
+        }
+        return c
+    }
+    if op == T_PCT {
+        c.rets[0] = "vmod_i64(" + l + ", " + r + ")"
+        return c
+    }
+    c.rets[0] = "(" + l + " " + op_text(op) + " " + r + ")"
+    return c
+}
+
+// free-function calls: builtins + user functions
+fn gen_call(c: Ctx, e: i64) -> Ctx {
+    let x = c.exprs[e]
+    let name = x.sval
+    let nargs = x.acount
+    // print / put
+    if name == "print" || name == "put" {
+        let i = 0
+        while i < nargs {
+            if i > 0 { c = emit(c, "printf(\" \");") }
+            let a = c.iargs[x.astart + i]
+            c = gen_expr(c, a)
+            let v = c.rets[0]
+            let ak = ty_kind(c, c.exprs[a].ty)
+            if ak == TY_I64 {
+                c = emit(c, "printf(\"%lld\", (long long)" + v + ");")
+            } else if ak == TY_F64 {
+                c = emit(c, "printf(\"%.6g\", " + v + ");")
+            } else if ak == TY_BOOL {
+                c = emit(c, "printf(\"%s\", (" + v + " ? \"true\" : \"false\"));")
+            } else if ak == TY_STR {
+                c = emit(c, "printf(\"%s\", " + v + ");")
+            } else {
+                // array: [a, b, c]
+                c = gen_print_array(c, a, v)
+            }
+            i = i + 1
+        }
+        if name == "print" { c = emit(c, "printf(\"\\n\");") }
+        c.rets[0] = "(void)0"
+        return c
+    }
+    if name == "to_string" {
+        let a = c.iargs[x.astart]
+        c = gen_expr(c, a)
+        let v = c.rets[0]
+        let ak = ty_kind(c, c.exprs[a].ty)
+        if ak == TY_I64 {
+            c.rets[0] = "vto_str_i64(" + v + ")"
+        } else if ak == TY_F64 {
+            c.rets[0] = "vto_str_f64(" + v + ")"
+        } else if ak == TY_BOOL {
+            c.rets[0] = "(" + v + " ? \"true\" : \"false\")"
+        } else {
+            c.rets[0] = v
+        }
+        return c
+    }
+    if name == "to_int" {
+        c = gen_expr(c, c.iargs[x.astart])
+        c.rets[0] = "vstr_to_int(" + c.rets[0] + ")"
+        return c
+    }
+    if name == "to_float" {
+        c = gen_expr(c, c.iargs[x.astart])
+        c.rets[0] = "vstr_to_float(" + c.rets[0] + ")"
+        return c
+    }
+    if name == "char_at" {
+        c = gen_expr(c, c.iargs[x.astart])
+        let s = c.rets[0]
+        c = gen_expr(c, c.iargs[x.astart + 1])
+        c.rets[0] = "vchat(" + s + ", " + c.rets[0] + ")"
+        return c
+    }
+    if name == "len" {
+        let a = c.iargs[x.astart]
+        c = gen_expr(c, a)
+        let v = c.rets[0]
+        if ty_kind(c, c.exprs[a].ty) == TY_STR {
+            c.rets[0] = "((int64_t)strlen(" + v + "))"
+        } else {
+            c.rets[0] = "(" + v + ".len)"
+        }
+        return c
+    }
+    if name == "arg_count" { c.rets[0] = "varg_count()"; return c }
+    if name == "clock" { c.rets[0] = "vclock()"; return c }
+    if name == "ms_now" { c.rets[0] = "vms_now()"; return c }
+    if name == "input" { c.rets[0] = "input_line()"; return c }
+    if name == "arg" {
+        c = gen_expr(c, c.iargs[x.astart])
+        c.rets[0] = "varg(" + c.rets[0] + ")"
+        return c
+    }
+    if name == "file_read" {
+        c = gen_expr(c, c.iargs[x.astart])
+        c.rets[0] = "vfile_read(" + c.rets[0] + ")"
+        return c
+    }
+    if name == "file_exists" {
+        c = gen_expr(c, c.iargs[x.astart])
+        c.rets[0] = "vfile_exists(" + c.rets[0] + ")"
+        return c
+    }
+    if name == "file_write" {
+        c = gen_expr(c, c.iargs[x.astart])
+        let p = c.rets[0]
+        c = gen_expr(c, c.iargs[x.astart + 1])
+        c.rets[0] = "(vfile_write(" + p + ", " + c.rets[0] + "), (void)0)"
+        return c
+    }
+    if name == "exit" {
+        c = gen_expr(c, c.iargs[x.astart])
+        c.rets[0] = "(exit((int)(" + c.rets[0] + ")), (void)0)"
+        return c
+    }
+    if name == "sleep_ms" {
+        c = gen_expr(c, c.iargs[x.astart])
+        c.rets[0] = "(vsleep(" + c.rets[0] + "), (void)0)"
+        return c
+    }
+    if name == "rand_int" {
+        c = gen_expr(c, c.iargs[x.astart])
+        let lo = c.rets[0]
+        c = gen_expr(c, c.iargs[x.astart + 1])
+        c.rets[0] = "vrand_int(" + lo + ", " + c.rets[0] + ")"
+        return c
+    }
+    if name == "sqrt" || name == "floor" || name == "ceil" || name == "sin" || name == "cos" {
+        c = gen_expr(c, c.iargs[x.astart])
+        c.rets[0] = name + "(" + c.rets[0] + ")"
+        return c
+    }
+    if name == "abs" {
+        c = gen_expr(c, c.iargs[x.astart])
+        c.rets[0] = "fabs(" + c.rets[0] + ")"
+        return c
+    }
+    // user function call
+    let fi = find_fn(c, "", name)
+    let f = c.fns[fi]
+    let args: [string] = [""]
+    let n = 0
+    let i = 0
+    while i < nargs {
+        c = gen_expr(c, c.iargs[x.astart + i])
+        if n == 0 { args[0] = c.rets[0] } else { args.push(c.rets[0]) }
+        n = n + 1
+        i = i + 1
+    }
+    c.rets[0] = safe_name(f.name) + "(" + join(args, ", ") + ")"
+    return c
+}
+
+// print an array value in [a, b, c] form
+fn gen_print_array(c: Ctx, a: i64, v: string) -> Ctx {
+    let at = c.exprs[a].ty
+    let elem = c.types[at].elem
+    let vec = vec_cname(c, elem)
+    let tv = fresh(c, "arr")
+    let ti = fresh(c, "i")
+    c = emit(c, "{ " + vec + " " + tv + " = " + v + "; printf(\"[\");")
+    let ek = ty_kind(c, elem)
+    let fmt = "%s"
+    let item = tv + ".data[" + ti + "]"
+    if ek == TY_I64 || ek == TY_STRUCT {
+        fmt = "%lld"
+        item = "(long long)" + item
+    } else if ek == TY_F64 {
+        fmt = "%.6g"
+    } else if ek == TY_BOOL {
+        item = "(" + item + " ? \"true\" : \"false\")"
+    }
+    c = emit(c, "for (int64_t " + ti + " = 0; " + ti + " < " + tv + ".len; " + ti + "++) { if (" + ti + ") printf(\", \"); printf(\"" + fmt + "\", " + item + "); }")
+    c = emit(c, "printf(\"]\"); }")
+    return c
+}
+
+// method calls: user impl methods + builtin array/string/f64 methods
+fn gen_method(c: Ctx, e: i64) -> Ctx {
+    let x = c.exprs[e]
+    let recv = x.l
+    let rt = c.exprs[recv].ty
+    let rk = ty_kind(c, rt)
+    let name = x.sval
+    let nargs = x.acount
+
+    // user impl methods take priority
+    if rk == TY_STRUCT {
+        let fi = find_fn(c, c.types[rt].name, name)
+        if fi >= 0 {
+            let f = c.fns[fi]
+            c = gen_expr(c, recv)
+            let rv = c.rets[0]
+            // a variable receiver is passed by pointer (methods mutate in
+            // place); any other receiver is materialized into a temp first
+            // (value semantics: a mutating method on a temp mutates the temp)
+            let recvk = c.exprs[recv].kind
+            if recvk != E_IDENT {
+                let tmp = fresh(c, "recv")
+                c = emit(c, ctype(c, rt) + " " + tmp + " = " + rv + ";")
+                rv = tmp
+            }
+            let args: [string] = [""]
+            let n = 0
+            if f.has_self == 1 {
+                args[0] = "&" + rv
+                n = 1
+            }
+            let i = 0
+            while i < nargs {
+                c = gen_expr(c, c.iargs[x.astart + i])
+                if n == 0 { args[0] = c.rets[0] } else { args.push(c.rets[0]) }
+                n = n + 1
+                i = i + 1
+            }
+            c.rets[0] = method_c_name(f.owner, f.name) + "(" + join(args, ", ") + ")"
+            return c
+        }
+    }
+
+    // builtin methods that need an lvalue receiver (&X)
+    if name == "push" || name == "pop" || name == "shift" || name == "last" || name == "insert" || name == "remove" {
+        c = gen_expr(c, recv)
+        let rv = c.rets[0]
+        let recvk = c.exprs[recv].kind
+        if recvk != E_IDENT && recvk != E_FIELD {
+            let tmp = fresh(c, "recv")
+            c = emit(c, ctype(c, rt) + " " + tmp + " = " + rv + ";")
+            rv = tmp
+        }
+        let elem = c.types[rt].elem
+        if name == "push" {
+            c = gen_expr(c, c.iargs[x.astart])
+            c.rets[0] = vec_helper(c, elem, "push") + "(&" + rv + ", " + c.rets[0] + ")"
+            return c
+        }
+        if name == "pop" || name == "shift" || name == "last" {
+            c.rets[0] = vec_helper(c, elem, name) + "(&" + rv + ")"
+            return c
+        }
+        if name == "remove" {
+            c = gen_expr(c, c.iargs[x.astart])
+            c.rets[0] = vec_helper(c, elem, "remove") + "(&" + rv + ", " + c.rets[0] + ")"
+            return c
+        }
+        // insert(index, item)
+        c = gen_expr(c, c.iargs[x.astart])
+        let idx = c.rets[0]
+        c = gen_expr(c, c.iargs[x.astart + 1])
+        c.rets[0] = vec_helper(c, elem, "insert") + "(&" + rv + ", " + idx + ", " + c.rets[0] + ")"
+        return c
+    }
+
+    // remaining builtins: receiver can be any expression
+    c = gen_expr(c, recv)
+    let rv = c.rets[0]
+
+    if name == "len" {
+        if rk == TY_STR {
+            c.rets[0] = "((int64_t)strlen(" + rv + "))"
+        } else {
+            c.rets[0] = "(" + rv + ".len)"
+        }
+        return c
+    }
+    if name == "contains" {
+        if rk == TY_STR {
+            c = gen_expr(c, c.iargs[x.astart])
+            c.rets[0] = "vstr_contains(" + rv + ", " + c.rets[0] + ")"
+            return c
+        }
+        let elem = c.types[rt].elem
+        c = gen_expr(c, c.iargs[x.astart])
+        let h = "vi64_contains"
+        if ty_kind(c, elem) == TY_F64 { h = "vf64_contains" }
+        if ty_kind(c, elem) == TY_BOOL { h = "vbool_contains" }
+        if ty_kind(c, elem) == TY_STR { h = "vstr_contains_val" }
+        c.rets[0] = h + "(&" + rv + ", " + c.rets[0] + ")"
+        return c
+    }
+    if name == "upper" { c.rets[0] = "vstr_upper(" + rv + ")"; return c }
+    if name == "lower" { c.rets[0] = "vstr_lower(" + rv + ")"; return c }
+    if name == "trim" { c.rets[0] = "vstr_trim(" + rv + ")"; return c }
+    if name == "repeat" {
+        c = gen_expr(c, c.iargs[x.astart])
+        c.rets[0] = "vstr_repeat(" + rv + ", " + c.rets[0] + ")"
+        return c
+    }
+    if name == "replace" {
+        c = gen_expr(c, c.iargs[x.astart])
+        let a = c.rets[0]
+        c = gen_expr(c, c.iargs[x.astart + 1])
+        c.rets[0] = "vstr_replace(" + rv + ", " + a + ", " + c.rets[0] + ")"
+        return c
+    }
+    if name == "substring" {
+        c = gen_expr(c, c.iargs[x.astart])
+        let a = c.rets[0]
+        c = gen_expr(c, c.iargs[x.astart + 1])
+        c.rets[0] = "vstr_substring(" + rv + ", " + a + ", " + c.rets[0] + ")"
+        return c
+    }
+    if name == "find" {
+        c = gen_expr(c, c.iargs[x.astart])
+        c.rets[0] = "vstr_find(" + rv + ", " + c.rets[0] + ")"
+        return c
+    }
+    if name == "starts_with" {
+        c = gen_expr(c, c.iargs[x.astart])
+        c.rets[0] = "vstr_starts_with(" + rv + ", " + c.rets[0] + ")"
+        return c
+    }
+    if name == "ends_with" {
+        c = gen_expr(c, c.iargs[x.astart])
+        c.rets[0] = "vstr_ends_with(" + rv + ", " + c.rets[0] + ")"
+        return c
+    }
+    if name == "split" {
+        c = gen_expr(c, c.iargs[x.astart])
+        c.rets[0] = "vstr_split(" + rv + ", " + c.rets[0] + ")"
+        return c
+    }
+    if name == "join" {
+        c = gen_expr(c, c.iargs[x.astart])
+        c.rets[0] = "vstr_join(&" + rv + ", " + c.rets[0] + ")"
+        return c
+    }
+    if name == "sqrt" || name == "floor" || name == "ceil" || name == "sin" || name == "cos" {
+        c.rets[0] = name + "(" + rv + ")"
+        return c
+    }
+    if name == "abs" {
+        c.rets[0] = "fabs(" + rv + ")"
+        return c
+    }
+    c.rets[0] = "/* unknown method */"
+    return c
+}
+
+// ---------------------------------------------------------------------------
+// Driver
+// ---------------------------------------------------------------------------
+
+fn main() -> void {
+    if arg_count() < 1 {
+        die("usage: vulc <input.vulcan> <output.c>")
+    }
+    let path = arg(0)
+    let outp = ""
+    if arg_count() >= 2 { outp = arg(1) }
+    if file_exists(path) == false {
+        die("cannot read " + path)
+    }
+    let src = file_read(path)
+
+    let c = Ctx {
+        src: src, path: path,
+        toks: [Tok { kind: 0, text: "", line: 0 }],
+        pos: [1],
+        exprs: [Expr { kind: 0, ival: 0.0, isint: 0, sval: "", l: -1, r: -1, op: 0,
+                       astart: 0, acount: 0, init_start: 0, init_count: 0, ty: -1, line: 0 }],
+        stmts: [Stmt { kind: 0, name: "", ty: -1, e: -1, e2: -1, op: 0, inc: 0,
+                       body_start: 0, body_count: 0, els_start: 0, els_count: 0, line: 0 }],
+        finits: [FieldInit { name: "", e: -1 }],
+        iargs: [0],
+        types: [
+            Ty { kind: 0, name: "", elem: -1 },
+            Ty { kind: TY_I64, name: "", elem: -1 },
+            Ty { kind: TY_F64, name: "", elem: -1 },
+            Ty { kind: TY_BOOL, name: "", elem: -1 },
+            Ty { kind: TY_STR, name: "", elem: -1 },
+            Ty { kind: TY_UNIT, name: "", elem: -1 }
+        ],
+        fns: [FnDecl { name: "", owner: "", ret: -1, pstart: 0, pcount: 0,
+                       body_start: 0, body_count: 0, has_self: 0, line: 0 }],
+        params: [Param { name: "", ty: -1 }],
+        sdefs: [StructDef { name: "", fstart: 0, fcount: 0 }],
+        fdefs: [FieldDef { name: "", ty: -1 }],
+        consts: [ConstDef { name: "", ty: -1, ctext: "" }],
+        out: [""],
+        ind: [0], tmpn: [0],
+        lnames: [""], lcns: [""], ltys: [-1], lmarks: [0], blk: [0],
+        cur_ret: [-1], retv: [0, 0], rets: [""]
+    }
+
+    c = lex(c)
+    c = parse(c)
+    c = check(c)
+    c = gen(c)
+
+    let text = join(c.out, "\n") + "\n"
+    if outp == "" {
+        print(text)
+    } else {
+        file_write(outp, text)
+    }
+}
+
+// BEGIN GENERATED PRELUDE (scripts/gen-self-prelude.py) — do not edit
+const VPRELUDE: string = "// Generated by the Vulcan compiler\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include <stdint.h>\n#include <math.h>\n#include <time.h>\n#include <ctype.h>\n#include <termios.h>\n#include <unistd.h>\n#include <sys/select.h>\n#include <sys/ioctl.h>\n\ntypedef struct { int64_t* data; int64_t len; int64_t cap; } VecI64;\ntypedef struct { double* data; int64_t len; int64_t cap; } VecF64;\ntypedef struct { int8_t* data; int64_t len; int64_t cap; } VecBool;\ntypedef struct { char** data; int64_t len; int64_t cap; } VecStr;\n\nstatic VecI64 vi64_new(int64_t n){ VecI64 v; v.cap = (n>0?n:8); v.data = malloc(v.cap*sizeof(int64_t)); v.len=0; return v; }\nstatic void vi64_push(VecI64* v, int64_t x){ if(v->len==v->cap){ v->cap*=2; v->data=realloc(v->data,v->cap*sizeof(int64_t)); } v->data[v->len++]=x; }\nstatic VecF64 vf64_new(int64_t n){ VecF64 v; v.cap = (n>0?n:8); v.data = malloc(v.cap*sizeof(double)); v.len=0; return v; }\nstatic void vf64_push(VecF64* v, double x){ if(v->len==v->cap){ v->cap*=2; v->data=realloc(v->data,v->cap*sizeof(double)); } v->data[v->len++]=x; }\nstatic VecBool vbool_new(int64_t n){ VecBool v; v.cap = (n>0?n:8); v.data = malloc(v.cap*sizeof(int8_t)); v.len=0; return v; }\nstatic void vbool_push(VecBool* v, int8_t x){ if(v->len==v->cap){ v->cap*=2; v->data=realloc(v->data,v->cap*sizeof(int8_t)); } v->data[v->len++]=x; }\nstatic VecStr vstr_new(int64_t n){ VecStr v; v.cap = (n>0?n:8); v.data = malloc(v.cap*sizeof(char*)); v.len=0; return v; }\nstatic void vstr_push(VecStr* v, char* x){ if(v->len==v->cap){ v->cap*=2; v->data=realloc(v->data,v->cap*sizeof(char*)); } v->data[v->len++]=x; }\nstatic int64_t vi64_get(VecI64* v, int64_t i){ if(i<0||i>=v->len){ fprintf(stderr,\"vulcan: index %lld out of bounds (len %lld)\\n\",(long long)i,(long long)v->len); exit(1);} return v->data[i]; }\nstatic void vi64_set(VecI64* v, int64_t i, int64_t x){ if(i<0||i>=v->len){ fprintf(stderr,\"vulcan: index %lld out of bounds (len %lld)\\n\",(long long)i,(long long)v->len); exit(1);} v->data[i]=x; }\nstatic double vf64_get(VecF64* v, int64_t i){ if(i<0||i>=v->len){ fprintf(stderr,\"vulcan: index out of bounds\\n\"); exit(1);} return v->data[i]; }\nstatic void vf64_set(VecF64* v, int64_t i, double x){ if(i<0||i>=v->len){ fprintf(stderr,\"vulcan: index out of bounds\\n\"); exit(1);} v->data[i]=x; }\nstatic int8_t vbool_get(VecBool* v, int64_t i){ if(i<0||i>=v->len){ fprintf(stderr,\"vulcan: index out of bounds\\n\"); exit(1);} return v->data[i]; }\nstatic void vbool_set(VecBool* v, int64_t i, int8_t x){ if(i<0||i>=v->len){ fprintf(stderr,\"vulcan: index out of bounds\\n\"); exit(1);} v->data[i]=x; }\nstatic char* vstr_get(VecStr* v, int64_t i){ if(i<0||i>=v->len){ fprintf(stderr,\"vulcan: index out of bounds\\n\"); exit(1);} return v->data[i]; }\nstatic void vstr_set(VecStr* v, int64_t i, char* x){ if(i<0||i>=v->len){ fprintf(stderr,\"vulcan: index out of bounds\\n\"); exit(1);} v->data[i]=x; }\nstatic int64_t vi64_pop(VecI64* v){ return v->len>0 ? v->data[--v->len] : 0; }\nstatic int64_t vi64_shift(VecI64* v){ if(v->len==0) return 0; int64_t x=v->data[0]; memmove(v->data, v->data+1, (size_t)(v->len-1)*sizeof(int64_t)); v->len--; return x; }\nstatic double vf64_shift(VecF64* v){ if(v->len==0) return 0; double x=v->data[0]; memmove(v->data, v->data+1, (size_t)(v->len-1)*sizeof(double)); v->len--; return x; }\nstatic int8_t vbool_shift(VecBool* v){ if(v->len==0) return 0; int8_t x=v->data[0]; memmove(v->data, v->data+1, (size_t)(v->len-1)*sizeof(int8_t)); v->len--; return x; }\nstatic char* vstr_shift(VecStr* v){ if(v->len==0) return (char*)\"\"; char* x=v->data[0]; memmove(v->data, v->data+1, (size_t)(v->len-1)*sizeof(char*)); v->len--; return x; }\nstatic double vf64_pop(VecF64* v){ return v->len>0 ? v->data[--v->len] : 0; }\nstatic int8_t vbool_pop(VecBool* v){ return v->len>0 ? v->data[--v->len] : 0; }\nstatic char* vstr_pop(VecStr* v){ return v->len>0 ? v->data[--v->len] : (char*)\"\"; }\nstatic int8_t vi64_contains(VecI64* v, int64_t x){ for(int64_t i=0;i<v->len;i++) if(v->data[i]==x) return 1; return 0; }\nstatic int8_t vf64_contains(VecF64* v, double x){ for(int64_t i=0;i<v->len;i++) if(v->data[i]==x) return 1; return 0; }\nstatic int8_t vbool_contains(VecBool* v, int8_t x){ for(int64_t i=0;i<v->len;i++) if(v->data[i]==x) return 1; return 0; }\nstatic int8_t vstr_contains_val(VecStr* v, char* x){ for(int64_t i=0;i<v->len;i++) if(strcmp(v->data[i],x)==0) return 1; return 0; }\nstatic int64_t vi64_last(VecI64* v){ return v->len>0 ? v->data[v->len-1] : 0; }\nstatic double vf64_last(VecF64* v){ return v->len>0 ? v->data[v->len-1] : 0; }\n\nstatic void vrt_panic(const char* msg){ fprintf(stderr, \"vulcan: %s\\n\", msg); exit(1); }\nstatic int64_t vdiv_i64(int64_t a, int64_t b){ if(b==0) vrt_panic(\"division by zero\"); return a/b; }\nstatic double vdiv_f64(double a, double b){ if(b==0.0) vrt_panic(\"division by zero\"); return a/b; }\nstatic int64_t vmod_i64(int64_t a, int64_t b){ if(b==0) vrt_panic(\"modulo by zero\"); return a%b; }\nstatic char* vstr_concat(const char* a, const char* b){\n    size_t la = strlen(a), lb = strlen(b);\n    char* s = malloc(la+lb+1); memcpy(s, a, la); memcpy(s+la, b, lb+1); return s;\n}\nstatic char* vstr_repeat(char* s, int64_t count){ size_t n=strlen(s); if(count<0)count=0; size_t total=n*(size_t)count; char* r=malloc(total+1); for(size_t i=0;i<(size_t)count;i++) memcpy(r+i*n, s, n); r[total]=0; return r; }\nstatic char* vstr_upper(char* s){ size_t n=strlen(s); char* r=malloc(n+1); for(size_t i=0;i<n;i++) r[i]=(char)toupper((unsigned char)s[i]); r[n]=0; return r; }\nstatic char* vstr_lower(char* s){ size_t n=strlen(s); char* r=malloc(n+1); for(size_t i=0;i<n;i++) r[i]=(char)tolower((unsigned char)s[i]); r[n]=0; return r; }\nstatic char* vstr_trim(char* s){ char* p=s; while(*p&&isspace((unsigned char)*p))p++; char* e=s+strlen(s); while(e>p&&isspace((unsigned char)*(e-1)))e--; size_t n=(size_t)(e-p); char* r=malloc(n+1); memcpy(r,p,n); r[n]=0; return r; }\nstatic int8_t vstr_contains(const char* a, const char* b){ return strstr(a,b)!=NULL; }\nstatic int8_t vstr_starts_with(const char* s, const char* p){ return strncmp(s,p,strlen(p))==0; }\nstatic int8_t vstr_ends_with(const char* s, const char* p){ size_t ls=strlen(s), lp=strlen(p); return ls>=lp && strcmp(s+ls-lp,p)==0; }\nstatic char* vstr_substring(const char* s, int64_t start, int64_t end){ size_t n=strlen(s); if(start<0)start=0; if(end<0)end=0; if(start>(int64_t)n)start=(int64_t)n; if(end>(int64_t)n)end=(int64_t)n; if(end<start)end=start; size_t k=(size_t)(end-start); char* r=malloc(k+1); memcpy(r,s+start,k); r[k]=0; return r; }\nstatic int64_t vstr_find(const char* s, const char* sub){ const char* p=strstr(s,sub); return p ? (int64_t)(p-s) : -1; }\nstatic char* vstr_replace(const char* s, const char* old, const char* new){ if(!old||!old[0]) return strdup(s); size_t n=strlen(s), m=strlen(old), r=strlen(new); size_t count=0; const char* p=s; while((p=strstr(p,old))){ count++; p+=m; } size_t total=n+count*(r-m)+1; char* out=malloc(total); char* w=out; const char* q=s; while((p=strstr(q,old))){ memcpy(w,q,(size_t)(p-q)); w+=p-q; memcpy(w,new,r); w+=r; q=p+m; } strcpy(w,q); return out; }\nstatic char* vstr_join(VecStr* v, const char* sep){ size_t sl=strlen(sep), total=0; for(int64_t i=0;i<v->len;i++) total+=strlen(v->data[i]); if(v->len>1) total+=sl*(size_t)(v->len-1); char* r=malloc(total+1); char* w=r; for(int64_t i=0;i<v->len;i++){ if(i>0){ memcpy(w,sep,sl); w+=sl; } size_t l=strlen(v->data[i]); memcpy(w,v->data[i],l); w+=l; } *w=0; return r; }\nstatic VecStr vstr_split(const char* s, const char* sep){ VecStr out=vstr_new(0); size_t n=strlen(s), m=strlen(sep); if(m==0){ for(size_t i=0;i<n;i++){ char* r=malloc(2); r[0]=s[i]; r[1]=0; vstr_push(&out,r);} return out; } size_t i=0; while(i<=n){ const char* p=strstr(s+i,sep); size_t j=p?(size_t)(p-s):n; size_t k=j-i; char* r=malloc(k+1); memcpy(r,s+i,k); r[k]=0; vstr_push(&out,r); if(!p)break; i=j+m; } return out; }\nstatic int64_t vstr_to_int(const char* s){ return (int64_t)strtoll(s,NULL,10); }\nstatic double vstr_to_float(const char* s){ return strtod(s,NULL); }\nstatic void vi64_remove(VecI64* v, int64_t i){ if(i<0||i>=v->len){ fprintf(stderr,\"vulcan: index %lld out of bounds (len %lld)\\n\",(long long)i,(long long)v->len); exit(1);} memmove(v->data+i, v->data+i+1, (size_t)(v->len-i-1)*sizeof(int64_t)); v->len--; }\nstatic void vi64_insert(VecI64* v, int64_t i, int64_t x){ if(i<0||i>v->len){ fprintf(stderr,\"vulcan: index %lld out of bounds (len %lld)\\n\",(long long)i,(long long)v->len); exit(1);} if(v->len==v->cap){ v->cap*=2; v->data=realloc(v->data,v->cap*sizeof(int64_t)); } memmove(v->data+i+1, v->data+i, (size_t)(v->len-i)*sizeof(int64_t)); v->data[i]=x; v->len++; }\nstatic void vf64_remove(VecF64* v, int64_t i){ if(i<0||i>=v->len){ fprintf(stderr,\"vulcan: index out of bounds\\n\"); exit(1);} memmove(v->data+i, v->data+i+1, (size_t)(v->len-i-1)*sizeof(double)); v->len--; }\nstatic void vf64_insert(VecF64* v, int64_t i, double x){ if(i<0||i>v->len){ fprintf(stderr,\"vulcan: index out of bounds\\n\"); exit(1);} if(v->len==v->cap){ v->cap*=2; v->data=realloc(v->data,v->cap*sizeof(double)); } memmove(v->data+i+1, v->data+i, (size_t)(v->len-i)*sizeof(double)); v->data[i]=x; v->len++; }\nstatic void vbool_remove(VecBool* v, int64_t i){ if(i<0||i>=v->len){ fprintf(stderr,\"vulcan: index out of bounds\\n\"); exit(1);} memmove(v->data+i, v->data+i+1, (size_t)(v->len-i-1)*sizeof(int8_t)); v->len--; }\nstatic void vbool_insert(VecBool* v, int64_t i, int8_t x){ if(i<0||i>v->len){ fprintf(stderr,\"vulcan: index out of bounds\\n\"); exit(1);} if(v->len==v->cap){ v->cap*=2; v->data=realloc(v->data,v->cap*sizeof(int8_t)); } memmove(v->data+i+1, v->data+i, (size_t)(v->len-i)*sizeof(int8_t)); v->data[i]=x; v->len++; }\nstatic void vstr_remove(VecStr* v, int64_t i){ if(i<0||i>=v->len){ fprintf(stderr,\"vulcan: index out of bounds\\n\"); exit(1);} memmove(v->data+i, v->data+i+1, (size_t)(v->len-i-1)*sizeof(char*)); v->len--; }\nstatic void vstr_insert(VecStr* v, int64_t i, char* x){ if(i<0||i>v->len){ fprintf(stderr,\"vulcan: index out of bounds\\n\"); exit(1);} if(v->len==v->cap){ v->cap*=2; v->data=realloc(v->data,v->cap*sizeof(char*)); } memmove(v->data+i+1, v->data+i, (size_t)(v->len-i)*sizeof(char*)); v->data[i]=x; v->len++; }\nstatic int64_t vchat(const char* s, int64_t i){ size_t n=strlen(s); if(i<0||(size_t)i>=n) return -1; return (int64_t)(unsigned char)s[i]; }\n// ---- files (whole-file read/write) and CLI args ----\nstatic char* vfile_read(const char* path){ FILE* f=fopen(path,\"rb\"); if(!f) return NULL; fseek(f,0,SEEK_END); long n=ftell(f); fseek(f,0,SEEK_SET); char* b=malloc((size_t)n+1); size_t r=fread(b,1,(size_t)n,f); b[r]=0; fclose(f); return b; }\nstatic void vfile_write(const char* path, const char* contents){ FILE* f=fopen(path,\"wb\"); if(!f) return; fputs(contents,f); fclose(f); }\nstatic int64_t vfile_exists(const char* path){ FILE* f=fopen(path,\"rb\"); if(f){ fclose(f); return 1; } return 0; }\nstatic int64_t __vulcan_argc = 0; static char** __vulcan_argv = 0;\nstatic int64_t varg_count(void){ return __vulcan_argc > 1 ? __vulcan_argc - 1 : 0; }\nstatic char* varg(int64_t i){ if(i < 0 || i >= varg_count()) return \"\"; return __vulcan_argv[i+1]; }\nstatic char* vto_str_i64(int64_t x){ char* s=malloc(32); snprintf(s,32,\"%lld\",(long long)x); return s; }\nstatic char* vto_str_f64(double x){ char* s=malloc(48); snprintf(s,48,\"%.6g\",x); return s; }\nstatic char* input_line(void){\n    size_t cap=64, len=0; char* s=malloc(cap); int c;\n    while((c=getchar())!=EOF && c!='\\n'){ if(len+2>cap){ cap*=2; s=realloc(s,cap);} s[len++]=(char)c; }\n    if(len+1>cap){ cap+=1; s=realloc(s,cap);} s[len]=0; return s;\n}\nstatic double vclock(void){ struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return ts.tv_sec + ts.tv_nsec/1e9; }\nstatic uint64_t vrand_state = 88172645463325252ULL;\nstatic int64_t vrand(void){ vrand_state ^= vrand_state<<13; vrand_state ^= vrand_state>>7; vrand_state ^= vrand_state<<17; return (int64_t)(vrand_state>>1); }\nstatic int64_t vmin_i64(int64_t a, int64_t b){ return a<b?a:b; }\nstatic int64_t vmax_i64(int64_t a, int64_t b){ return a>b?a:b; }\nstatic double vmin_f64(double a, double b){ return a<b?a:b; }\nstatic double vmax_f64(double a, double b){ return a>b?a:b; }\nstatic void vsleep(int64_t ms){ if(ms>0){ struct timespec t; t.tv_sec=ms/1000; t.tv_nsec=(ms%1000)*1000000L; nanosleep(&t,NULL); } }\n// ---- game stdlib ----\nstatic int64_t vms_now(void){ struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t); return (int64_t)t.tv_sec*1000 + t.tv_nsec/1000000; }\nstatic int64_t vrand_int(int64_t lo, int64_t hi){ static unsigned vseed = 0; if(!vseed) vseed = (unsigned)vms_now() ^ (unsigned)getpid(); vseed = vseed*1103515245u + 12345u; return lo + (int64_t)(vseed>>16) % (hi - lo + 1); }\nstatic void vprint_at(int64_t x, int64_t y, const char* s){ printf(\"\\033[%lld;%lldH%s\", (long long)(y+1), (long long)(x+1), s); }\nstatic void vset_color(int64_t fg, int64_t bg){ if(fg<0&&bg<0){ printf(\"\\033[0m\"); return; } if(fg>=8) printf(\"\\033[38;5;%lldm\", (long long)(fg%256)); else if(fg>=0) printf(\"\\033[%lldm\", (long long)(30+fg)); if(bg>=8) printf(\"\\033[48;5;%lldm\", (long long)(bg%256)); else if(bg>=0) printf(\"\\033[%lldm\", (long long)(40+bg)); }\nstatic int64_t vscreen_w(void){ struct winsize w; if(ioctl(STDOUT_FILENO,TIOCGWINSZ,&w)==0&&w.ws_col) return (int64_t)w.ws_col; return 80; }\nstatic int64_t vscreen_h(void){ struct winsize w; if(ioctl(STDOUT_FILENO,TIOCGWINSZ,&w)==0&&w.ws_row) return (int64_t)w.ws_row; return 24; }\nstatic void vcursor_visible(int64_t v){ printf(v? \"\\033[?25h\" : \"\\033[?25l\"); }\nstatic struct termios vulcan_torig; static int vulcan_traw = 0;\nstatic unsigned char vheld[256];\nstatic void term_raw(void){ if(tcgetattr(STDIN_FILENO,&vulcan_torig)==0){ struct termios t=vulcan_torig; t.c_lflag&=~(ICANON|ECHO); t.c_cc[VMIN]=0; t.c_cc[VTIME]=0; tcsetattr(STDIN_FILENO,TCSANOW,&t); vulcan_traw=1; } }\nstatic void term_normal(void){ if(vulcan_traw){ tcsetattr(STDIN_FILENO,TCSAFLUSH,&vulcan_torig); vulcan_traw=0; } }\nstatic int vulcan_stdin_eof = 0;\nstatic int64_t key_ready(void){ if(vulcan_stdin_eof) return 0; fd_set s; FD_ZERO(&s); FD_SET(STDIN_FILENO,&s); struct timeval tv={0,0}; return select(STDIN_FILENO+1,&s,NULL,NULL,&tv)>0; }\nstatic int64_t read_key(void){ unsigned char c=0; ssize_t r=read(STDIN_FILENO,&c,1); if(r==0){ vulcan_stdin_eof=1; return 0; } if(r==1){ vheld[c]=1; return (int64_t)c; } return 0; }\nstatic void clear_screen(void){ fputs(\"\\033[2J\\033[H\",stdout); }\n// ---- graphics: 512x288 supersampled framebuffer (2x2 SSAA), resolved to 256x144 on present ----\n#define VFB_W 512\n#define VFB_H 288\n#define VAA 2\n#define VOUT_W 256\n#define VOUT_H 144\nstatic int32_t vfb[VFB_W * VFB_H];\nstatic double vzbuf[VFB_W * VFB_H];\nstatic void vclear(int64_t color){ for(int i=0;i<VFB_W*VFB_H;i++){ vfb[i]=(int32_t)color; vzbuf[i]=1e30; } }\n// depth-buffered triangle: z compared with < (near = smaller); winding-insensitive\nstatic void vdraw_tri(double x0,double y0,double z0,double x1,double y1,double z1,double x2,double y2,double z2,int64_t color){\n    x0*=VAA;y0*=VAA;x1*=VAA;y1*=VAA;x2*=VAA;y2*=VAA;\n    double area=(x1-x0)*(y2-y0)-(x2-x0)*(y1-y0);\n    if(area==0.0) return;\n    if(area<0.0){ double tx=x1,ty=y1,tz=z1; x1=x2;y1=y2;z1=z2; x2=tx;y2=ty;z2=tz; area=-area; }\n    double minx0=x0<x1?x0:x1; if(x2<minx0)minx0=x2;\n    double maxx0=x0>x1?x0:x1; if(x2>maxx0)maxx0=x2;\n    double miny0=y0<y1?y0:y1; if(y2<miny0)miny0=y2;\n    double maxy0=y0>y1?y0:y1; if(y2>maxy0)maxy0=y2;\n    int minx=(int)ceil(minx0-0.5); int maxx=(int)floor(maxx0-0.5);\n    int miny=(int)ceil(miny0-0.5); int maxy=(int)floor(maxy0-0.5);\n    if(minx<0)minx=0; if(miny<0)miny=0; if(maxx>VFB_W-1)maxx=VFB_W-1; if(maxy>VFB_H-1)maxy=VFB_H-1;\n    for(int py=miny;py<=maxy;py++){\n        double cy=py+0.5;\n        for(int px=minx;px<=maxx;px++){\n            double cx=px+0.5;\n            double e0=(x2-x1)*(cy-y1)-(y2-y1)*(cx-x1);\n            double e1=(x0-x2)*(cy-y2)-(y0-y2)*(cx-x2);\n            double e2=(x1-x0)*(cy-y0)-(y1-y0)*(cx-x0);\n            if(e0>=0&&e1>=0&&e2>=0){\n                double z=(e0*z0+e1*z1+e2*z2)/area;\n                int idx=py*VFB_W+px;\n                if(z<vzbuf[idx]){ vzbuf[idx]=z; vfb[idx]=(int32_t)color; }\n            }\n        }\n    }\n}\nstatic const char* vfont_chars = \" 0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ.:-!?/+%\";\nstatic const char* vfont_data = \"000007555726227717477171755711747177475771122757577571775755656567444765556746477464474557557557222711157556554444757755655557555775744755717565574717722225555755552557755525555722712470000202020007002220271302112440272051245\";\nstatic void vdraw_rect(double x, double y, double w, double h, int64_t color){\n    x*=VAA;y*=VAA;w*=VAA;h*=VAA;\n    int x0=(int)ceil(x-0.5), x1=(int)floor(x+w-0.5), y0=(int)ceil(y-0.5), y1=(int)floor(y+h-0.5);\n    if(x0<0)x0=0; if(y0<0)y0=0; if(x1>VFB_W-1)x1=VFB_W-1; if(y1>VFB_H-1)y1=VFB_H-1;\n    for(int py=y0;py<=y1;py++) for(int px=x0;px<=x1;px++) vfb[py*VFB_W+px]=(int32_t)color;\n}\nstatic void vdraw_circle(double x, double y, double r, int64_t color){\n    x*=VAA;y*=VAA;r*=VAA;\n    if(r<0) return;\n    int x0=(int)ceil(x-r-0.5), x1=(int)floor(x+r+0.5), y0=(int)ceil(y-r-0.5), y1=(int)floor(y+r+0.5);\n    if(x0<0)x0=0; if(y0<0)y0=0; if(x1>VFB_W-1)x1=VFB_W-1; if(y1>VFB_H-1)y1=VFB_H-1;\n    double r2=r*r;\n    for(int py=y0;py<=y1;py++) for(int px=x0;px<=x1;px++){\n        double dx=px+0.5-x, dy=py+0.5-y;\n        if(dx*dx+dy*dy<=r2) vfb[py*VFB_W+px]=(int32_t)color;\n    }\n}\nstatic void vdraw_line(double x0, double y0, double x1, double y1, int64_t color){\n    x0*=VAA;y0*=VAA;x1*=VAA;y1*=VAA;\n    int px=(int)llround(x0), py=(int)llround(y0), ex=(int)llround(x1), ey=(int)llround(y1);\n    int dx=abs(ex-px), dy=abs(ey-py);\n    int sx=px<ex?1:-1, sy=py<ey?1:-1, err=dx-dy;\n    for(;;){\n        for(int oy=0;oy<VAA;oy++) for(int ox=0;ox<VAA;ox++)\n            if(px+ox>=0&&px+ox<VFB_W&&py+oy>=0&&py+oy<VFB_H) vfb[(py+oy)*VFB_W+px+ox]=(int32_t)color;\n        if(px==ex&&py==ey) break;\n        int e2=2*err;\n        if(e2>-dy){ err-=dy; px+=sx; }\n        if(e2<dx){ err+=dx; py+=sy; }\n    }\n}\nstatic void vdraw_text(double x, double y, const char* s, int64_t color){\n    int bx=(int)llround(x)*VAA, by=(int)llround(y)*VAA;\n    for(size_t i=0;s[i];i++){\n        const char* p=strchr(vfont_chars, toupper((unsigned char)s[i]));\n        if(!p) continue;\n        int gi=(int)(p-vfont_chars);\n        for(int row=0;row<5;row++){\n            int bits=vfont_data[gi*5+row]-'0';\n            for(int col=0;col<3;col++){\n                if(bits&(4>>col)){\n                    int px=bx+(int)i*4*VAA+col*VAA, py=by+row*VAA;\n                    for(int oy=0;oy<VAA;oy++) for(int ox=0;ox<VAA;ox++)\n                        if(px+ox>=0&&px+ox<VFB_W&&py+oy>=0&&py+oy<VFB_H) vfb[(py+oy)*VFB_W+px+ox]=(int32_t)color;\n                }\n            }\n        }\n    }\n}\nstatic void vpresent(void){\n    // supersampling resolve: average VAAxVAA blocks + subtle vignette -> 256x144\n    static int32_t down[VOUT_W * VOUT_H];\n    for(int y=0;y<VOUT_H;y++){\n        for(int x=0;x<VOUT_W;x++){\n            int ur=0,ug=0,ub=0;\n            for(int sy=0;sy<VAA;sy++) for(int sx=0;sx<VAA;sx++){\n                int32_t v=vfb[(y*VAA+sy)*VFB_W+x*VAA+sx];\n                ur+=(v>>16)&255; ug+=(v>>8)&255; ub+=v&255;\n            }\n            double dx=(x-127.5)/127.5, dy=(y-71.5)/71.5;\n            double f=1.0-(dx*dx+dy*dy)*0.30;\n            if(f<0.0)f=0.0; if(f>1.0)f=1.0;\n            int r=(int)(((ur+2)>>2)*f), g=(int)(((ug+2)>>2)*f), b=(int)(((ub+2)>>2)*f);\n            down[y*VOUT_W+x]=(r<<16)|(g<<8)|b;\n        }\n    }\n    fputs(\"\\033[H\", stdout);\n    for(int cy=0;cy<18;cy++){\n        for(int cx=0;cx<64;cx++){\n            int ur=0,ug=0,ub=0,lr=0,lg=0,lb=0;\n            for(int sy=0;sy<4;sy++) for(int sx=0;sx<4;sx++){\n                int32_t v=down[(cy*8+sy)*VOUT_W+cx*4+sx];\n                ur+=(v>>16)&255; ug+=(v>>8)&255; ub+=v&255;\n            }\n            for(int sy=4;sy<8;sy++) for(int sx=0;sx<4;sx++){\n                int32_t v=down[(cy*8+sy)*VOUT_W+cx*4+sx];\n                lr+=(v>>16)&255; lg+=(v>>8)&255; lb+=v&255;\n            }\n            printf(\"\\033[38;2;%d;%d;%dm\\033[48;2;%d;%d;%dm\\342\\226\\200\", (ur+8)>>4, (ug+8)>>4, (ub+8)>>4, (lr+8)>>4, (lg+8)>>4, (lb+8)>>4);\n        }\n        fputs(\"\\033[0m\\n\", stdout);\n    }\n}\nstatic double vmouse_x(void){ return -1.0; }\nstatic double vmouse_dx(void){ return 0.0; }\nstatic double vmouse_dy(void){ return 0.0; }\nstatic double vmouse_y(void){ return -1.0; }\nstatic int8_t vmouse_down(void){ return 0; }\nstatic void vdrain(void){ unsigned char c; while(key_ready()&&read(STDIN_FILENO,&c,1)==1){ vheld[c]=1; } }\nstatic int8_t vkey_down(int64_t c){ if(c<0||c>255) return 0; vdrain(); if(vheld[c]){ vheld[c]=0; return 1; } return 0; }\n"
+// END GENERATED PRELUDE

@@ -1,0 +1,43 @@
+// Bootstrap smoke test: exercises the core of Vulcan Core.
+struct Point { x: f64, y: f64 }
+impl Point {
+    fn len(self) -> f64 { return sqrt(self.x*self.x + self.y*self.y) }
+    fn translated(self, dx: f64, dy: f64) -> Point {
+        self.x = self.x + dx
+        self.y = self.y + dy
+        return self
+    }
+}
+fn add(a: Point, b: Point) -> Point {
+    return Point { x: a.x + b.x, y: a.y + b.y }
+}
+const Scale = 2
+fn main() {
+    let p = add(Point { x: 3.0, y: 4.0 }, Point { x: 1.0, y: 1.0 })
+    print(p.len())
+    let q = p.translated(1.0, 1.0)
+    print(q.x, p.x)
+    let n = [10, 20, 30]
+    n.push(40)
+    n[1] = 99
+    n[0] += 5
+    print(n)
+    print(n.len(), n.contains(99), n.last())
+    let s = "hi" + " " + "vulcan"
+    print(s.upper())
+    print(s.contains("VUL"), s.find("can"), s.substring(0, 2))
+    let total = 0
+    for i in 0 ..= 4 { total += i }
+    print(total, Scale)
+    let names: [string] = []
+    names.push("a")
+    names.push("b")
+    print(names.join(","))
+    let mutcount = 3
+    while mutcount > 0 { mutcount -= 1 }
+    print(mutcount)
+    print(7 / 2, 7 % 3, 7.0 / 2.0)
+    print(1 < 2, 2 == 2, "a" != "b", true && false)
+    print((3.7 as i64) + 1, (5 as f64) / 2.0)
+    print(to_string(42) + "!")
+}

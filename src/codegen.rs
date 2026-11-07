@@ -2101,6 +2101,14 @@ impl Codegen {
                 if t != Ty::Str { panic!("vulcan: to_int needs a string"); }
                 (format!("vstr_to_int({c})"), Ty::I64)
             }
+            "char_at" => {
+                if args.len() != 2 { panic!("vulcan: char_at(s, i) takes 2 args"); }
+                let (c, t) = self.gen_expr(&args[0]);
+                if t != Ty::Str { panic!("vulcan: char_at needs a string"); }
+                let (i, it) = self.gen_expr(&args[1]);
+                let i = self.cast(&i, &it, &Ty::I64);
+                (format!("vchat({c}, {i})"), Ty::I64)
+            }
             "to_float" => {
                 if args.len() != 1 { panic!("vulcan: to_float(s) takes 1 arg"); }
                 let (c, t) = self.gen_expr(&args[0]);
@@ -2342,6 +2350,7 @@ impl Codegen {
                     Ty::F64 => self.line(&format!("char {tmp}[40]; snprintf({tmp}, 40, \"%.6g\", {c});")),
                     Ty::F32 => self.line(&format!("char {tmp}[40]; snprintf({tmp}, 40, \"%.6g\", (double)({c}));")),
                     t if t.is_int() => self.line(&format!("char {tmp}[32]; snprintf({tmp}, 32, \"%lld\", (long long){c});")),
+                    Ty::Bool => self.line(&format!("const char* {tmp} = ({c}) ? \"true\" : \"false\";")),
                     _ => panic!("vulcan: to_string needs a number"),
                 }
                 (tmp, Ty::Str)
