@@ -750,3 +750,89 @@ impl Parser {
         Expr::Interp(parts)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lexer::lex;
+
+    fn parse(src: &str) -> Vec<Item> {
+        parse_program(&lex(src))
+    }
+
+    #[test]
+    fn parses_a_function_with_params() {
+        let p = parse("fn add(a: i64, b: i64) -> i64 { return a + b }");
+        match &p[0] {
+            Item::Fn(f) => {
+                assert_eq!(f.name, "add");
+                assert_eq!(f.params.len(), 2);
+                assert_eq!(f.params[0], ("a".into(), Ty::I64));
+                assert_eq!(f.ret, Ty::I64);
+            }
+            other => panic!("expected Fn item, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_struct_enum_const() {
+        let p = parse("struct P { x: i64, y: i64 } enum C { Red, Green, Blue } const N: i64 = 16");
+        assert!(matches!(&p[0], Item::Struct(s) if s.name == "P" && s.fields.len() == 2));
+        assert!(matches!(&p[1], Item::Enum(e) if e.variants == vec!["Red", "Green", "Blue"]));
+        assert!(matches!(&p[2], Item::Const(c) if c.name == "N"));
+    }
+
+    #[test]
+    fn parses_array_and_struct_types() {
+        let p = parse("fn f(xs: [i64], m: Mat) -> [[f64]] { return [[1.0]] }");
+        match &p[0] {
+            Item::Fn(f) => {
+                assert_eq!(f.params[0].1, Ty::Array(Box::new(Ty::I64)));
+                assert_eq!(f.params[1].1, Ty::Struct("Mat".into()));
+                assert_eq!(f.ret, Ty::Array(Box::new(Ty::Array(Box::new(Ty::F64)))));
+            }
+            other => panic!("expected Fn item, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_match_and_when() {
+        let src = "fn d(x: i64) -> i64 { match x { when 1 { return 10 } else { return 20 } } }";
+        let p = parse(src);
+        assert!(matches!(&p[0], Item::Fn(_))); // full match statement parses without panic
+    }
+
+    #[test]
+    fn parses_extern_and_link() {
+        let p = parse("extern \"c\" { fn abs(x: i64) -> i64 } link \"m\"");
+        assert!(matches!(&p[0], Item::Extern(_)));
+        assert!(matches!(&p[1], Item::Link(l) if l == "m"));
+    }
+
+    #[test]
+    fn parses_fstring_and_defer() {
+        let src = "fn main() -> void { let n = 3 print(f\"n is {n}\") defer { print(\"bye\") } }";
+        let p = parse(src);
+        assert!(matches!(&p[0], Item::Fn(_)));
+    }
+
+    // Every example and stdlib file must parse without panicking — this is the
+    // parser's regression net until real diagnostics land (Phase 1).
+    #[test]
+    fn parses_all_examples_and_libs() {
+        let mut checked = 0;
+        for dir in ["examples", "lib"] {
+            let entries = std::fs::read_dir(dir).unwrap_or_else(|e| panic!("cannot read {dir}: {e}"));
+            for entry in entries {
+                let path = entry.unwrap().path();
+                if path.extension().and_then(|e| e.to_str()) != Some("vulcan") { continue; }
+                let src = std::fs::read_to_string(&path)
+                    .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+                let items = parse_program(&lex(&src));
+                assert!(!items.is_empty(), "{} parsed to zero items", path.display());
+                checked += 1;
+            }
+        }
+        assert!(checked >= 10, "expected at least 10 vulcan files, saw {checked}");
+    }
+}

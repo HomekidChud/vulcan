@@ -89,7 +89,11 @@ pub fn lex(src: &str) -> Vec<(Tok, usize)> {
                 i += 2;
                 let mut v: i64 = 0;
                 while i < n && chars[i].is_ascii_hexdigit() {
-                    v = v * 16 + chars[i].to_digit(16).unwrap() as i64;
+                    // checked arithmetic: a hex literal that does not fit i64
+                    // is an error, not a silently wrapped value
+                    v = v.checked_mul(16)
+                        .and_then(|v| v.checked_add(chars[i].to_digit(16).unwrap() as i64))
+                        .unwrap_or_else(|| panic!("vulcan: integer literal out of range for i64 (line {line})"));
                     i += 1;
                 }
                 toks.push((Tok::Int(v), line));
@@ -99,7 +103,9 @@ pub fn lex(src: &str) -> Vec<(Tok, usize)> {
                 i += 2;
                 let mut v: i64 = 0;
                 while i < n && (chars[i] == '0' || chars[i] == '1') {
-                    v = v * 2 + (chars[i] == '1') as i64;
+                    v = v.checked_mul(2)
+                        .and_then(|v| v.checked_add((chars[i] == '1') as i64))
+                        .unwrap_or_else(|| panic!("vulcan: integer literal out of range for i64 (line {line})"));
                     i += 1;
                 }
                 toks.push((Tok::Int(v), line));
@@ -123,9 +129,9 @@ pub fn lex(src: &str) -> Vec<(Tok, usize)> {
                 }
             }
             if is_float {
-                toks.push((Tok::Float(s.parse().unwrap()), line));
+                toks.push((Tok::Float(s.parse().unwrap_or_else(|_| panic!("vulcan: bad float literal `{s}` (line {line})"))), line));
             } else {
-                toks.push((Tok::Int(s.parse().unwrap()), line));
+                toks.push((Tok::Int(s.parse().unwrap_or_else(|_| panic!("vulcan: integer literal `{s}` out of range for i64 (line {line})"))), line));
             }
             continue;
         }
@@ -242,4 +248,97 @@ fn lex_fstr(chars: &[char], i: &mut usize) -> String {
     }
     *i += 1; // closing quote
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn integers_decimal() {
+        let t = lex("42 0 1_000_000");
+        assert_eq!(t[0], (Tok::Int(42), 1));
+        assert_eq!(t[1], (Tok::Int(0), 1));
+        assert_eq!(t[2], (Tok::Int(1_000_000), 1));
+        assert_eq!(*t.last().unwrap(), (Tok::EOF, 1));
+    }
+
+    #[test]
+    fn integers_hex_and_binary() {
+        let t = lex("0xFF 0xdeadBEEF 0b1010 0b0");
+        assert_eq!(t[0], (Tok::Int(0xFF), 1));
+        assert_eq!(t[1], (Tok::Int(0xdeadBEEF), 1));
+        assert_eq!(t[2], (Tok::Int(0b1010), 1));
+        assert_eq!(t[3], (Tok::Int(0), 1));
+    }
+
+    #[test]
+    fn i64_max_literals_ok() {
+        let t = lex("0x7FFFFFFFFFFFFFFF 9223372036854775807 0b111111111111111111111111111111111111111111111111111111111111111");
+        assert_eq!(t[0], (Tok::Int(i64::MAX), 1));
+        assert_eq!(t[1], (Tok::Int(i64::MAX), 1));
+        assert_eq!(t[2], (Tok::Int(i64::MAX), 1));
+    }
+
+    // Regression: hex/binary literals used to silently wrap on overflow
+    // (`v = v * 16 + digit` with no check). They must abort with a clear
+    // message instead. (Phase 1 turns this into a real diagnostic.)
+    #[test]
+    #[should_panic(expected = "out of range for i64")]
+    fn hex_overflow_panics() {
+        lex("0xFFFFFFFFFFFFFFFFF"); // 17 hex digits
+    }
+
+    #[test]
+    #[should_panic(expected = "out of range for i64")]
+    fn binary_overflow_panics() {
+        lex("0b1111111111111111111111111111111111111111111111111111111111111111"); // 65 bits
+    }
+
+    #[test]
+    #[should_panic(expected = "out of range for i64")]
+    fn decimal_overflow_panics() {
+        lex("9223372036854775808"); // i64::MAX + 1
+    }
+
+    #[test]
+    fn floats_and_ranges() {
+        let t = lex("3.14 0..10 0..=10");
+        assert_eq!(t[0], (Tok::Float(3.14), 1));
+        assert_eq!(t[1], (Tok::Int(0), 1));
+        assert_eq!(t[2], (Tok::DotDot, 1));
+        assert_eq!(t[3], (Tok::Int(10), 1));
+        assert_eq!(t[5], (Tok::DotDotEq, 1));
+    }
+
+    #[test]
+    fn strings_escapes_and_fstrings() {
+        let t = lex(r#" "hi\nthere" f"n={n}" "#);
+        assert_eq!(t[0], (Tok::Str("hi\nthere".into()), 1));
+        assert_eq!(t[1], (Tok::FStr("n={n}".into()), 1));
+    }
+
+    #[test]
+    fn comments_and_lines() {
+        let src = "// line one comment\nlet x = 1 // trailing\n/* block\ncomment */ let y = 2";
+        let t = lex(src);
+        let idents: Vec<usize> = t.iter().filter(|(k, _)| matches!(k, Tok::Ident(_)))
+            .map(|(_, l)| *l).collect();
+        assert_eq!(idents, vec![2, 4]); // `let x` on line 2, `let y` on line 4
+    }
+
+    #[test]
+    fn keywords_and_operators() {
+        let t = lex("fn let match when <- << == && ..");
+        assert_eq!(t[0], (Tok::KwFn, 1));
+        assert_eq!(t[1], (Tok::KwLet, 1));
+        assert_eq!(t[2], (Tok::KwMatch, 1));
+        assert_eq!(t[3], (Tok::KwWhen, 1));
+        assert_eq!(t[4], (Tok::Lt, 1));
+        assert_eq!(t[5], (Tok::Minus, 1));
+        assert_eq!(t[6], (Tok::Shl, 1));
+        assert_eq!(t[7], (Tok::EqEq, 1));
+        assert_eq!(t[8], (Tok::AndAnd, 1));
+        assert_eq!(t[9], (Tok::DotDot, 1));
+    }
 }
