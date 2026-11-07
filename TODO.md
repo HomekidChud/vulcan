@@ -76,6 +76,11 @@ tests (lexer, parser, pkg) run in CI next to selftest on both gcc and clang.
       panics with a clear message today. Needs Vec_Point emitted before
       Vec_Vec_Point in the struct-emission loop (see the panic in
       `generate_inner` field scan). Grids of scalars already work.
+- [x] ~~Reference parameters~~ — DONE (Phase 1): `&T`/`&mut T` params,
+      `&`/`&mut` call arguments, forwarding, pointee copy on let/match,
+      method calls on ref receivers; semantics in DECISIONS.md. Selftest
+      case 31. Gated (clear errors): non-struct refs, returning refs,
+      ref locals, reassigning refs.
 - [ ] **Closures / function values** — the biggest language gap. Start with
       non-capturing function pointers (`let f: fn(i64) -> i64 = double`), then
       closures over immutable locals. Needs parser (new Expr arm), all three

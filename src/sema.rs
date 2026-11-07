@@ -60,6 +60,9 @@ impl Tables {
     // an unknown field is a numeric method receiver, e.g. `1.0.sin()`),
     // pending the real semantic pass which will make this an error.
     pub fn field_ty(&self, recv_ty: &Ty, fname: &str) -> Ty {
+        if let Ty::Ref(i) | Ty::RefMut(i) = recv_ty {
+            return self.field_ty(i, fname);
+        }
         if let Ty::Struct(sname) = recv_ty {
             if let Some(fields) = self.structs.get(sname) {
                 if let Some((_, t)) = fields.iter().find(|(n, _)| n == fname) {
@@ -161,6 +164,7 @@ fn push_ty(out: &mut Vec<Ty>, t: &Ty) {
         Ty::Array(i) => push_ty(out, i),
         Ty::Option(i) => push_ty(out, i),
         Ty::Result(a, b) => { push_ty(out, a); push_ty(out, b); }
+        Ty::Ref(i) | Ty::RefMut(i) => push_ty(out, i),
         _ => {}
     }
 }
@@ -220,6 +224,7 @@ fn walk_expr(e: &Expr, out: &mut Vec<Ty>) {
         },
         Expr::As(inner, t) => { walk_expr(inner, out); push_ty(out, t); }
         Expr::Try(inner) => walk_expr(inner, out),
+        Expr::Addr { inner, .. } => walk_expr(inner, out),
         Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bool(_) | Expr::Char(_) | Expr::Ident(_) => {}
     }
 }

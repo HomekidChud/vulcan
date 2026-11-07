@@ -9,6 +9,8 @@ pub enum Ty {
     Struct(String),
     Option(Box<Ty>),
     Result(Box<Ty>, Box<Ty>),
+    Ref(Box<Ty>),
+    RefMut(Box<Ty>),
 }
 
 // source-level name of a type (used to key Option/Result instantiations)
@@ -22,6 +24,8 @@ pub fn ty_name(t: &Ty) -> String {
         Ty::Struct(n) => n.clone(),
         Ty::Option(i) => format!("Option<{}>", ty_name(i)),
         Ty::Result(a, b) => format!("Result<{}, {}>", ty_name(a), ty_name(b)),
+        Ty::Ref(i) => format!("&{}", ty_name(i)),
+        Ty::RefMut(i) => format!("&mut {}", ty_name(i)),
     }
 }
 
@@ -152,6 +156,7 @@ pub enum Expr {
     Interp(Vec<IPart>),          // f"sum is {x}"
     As(Box<Expr>, Ty),           // x as f64
     Try(Box<Expr>),              // expr? — early-return None/Err, bind the payload
+    Addr { inner: Box<Expr>, mutable: bool }, // &expr / &mut expr (call arguments)
 }
 
 pub struct Parser {
@@ -221,6 +226,15 @@ impl Parser {
                 let inner = self.parse_ty();
                 self.expect(Tok::RBracket, "] in array type");
                 Ty::Array(Box::new(inner))
+            }
+            Tok::Amp => {
+                // &mut T or &T
+                if matches!(self.peek(), Tok::Ident(kw) if kw == "mut") {
+                    self.next(); // mut
+                    Ty::RefMut(Box::new(self.parse_ty()))
+                } else {
+                    Ty::Ref(Box::new(self.parse_ty()))
+                }
             }
             other => self.err(format!("expected type, got {other:?}")),
         }
@@ -739,6 +753,14 @@ impl Parser {
                 self.expect(Tok::RParen, ")");
                 e
             }
+            Tok::Amp => {
+                // &expr / &mut expr — a reference argument (postfix allowed:
+                // &Color.Green, &mut grid[0])
+                let mutable = matches!(self.peek(), Tok::Ident(kw) if kw == "mut");
+                if mutable { self.next(); }
+                let inner = self.parse_postfix();
+                Expr::Addr { inner: Box::new(inner), mutable }
+            }
             Tok::LBracket => {
                 let mut items = Vec::new();
                 if !self.eat(&Tok::RBracket) {
@@ -844,6 +866,7 @@ pub fn fold_const(e: &Expr) -> Option<ConstVal> {
         Expr::Bool(v) => Some(ConstVal::Bool(*v)),
         Expr::Char(v) => Some(ConstVal::Int(*v)),
         Expr::Try(_) => None, // runtime: tag check + early return
+        Expr::Addr { .. } => None, // runtime: address-of
         Expr::BinOp(l, op, r) => {
             let lv = fold_const(l)?;
             let rv = fold_const(r)?;

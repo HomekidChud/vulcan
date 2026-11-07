@@ -75,3 +75,23 @@ down here, and keep going.
   gated with a clear compile error (noted in TODO.md).
 - Value semantics: payload enum values copy on assignment/argument/
   return (like structs) on all backends.
+
+## Reference parameters (&T / &mut T)
+
+- References are function parameters and call arguments only (Phase 1):
+  `fn translate(p: &mut Point, dx: f64)`, called as `translate(&mut p, 1.0, 2.0)`.
+  `let r = &mut p`, returning references, and let/field types of ref kinds
+  are gated with clear compile errors.
+- `&expr` / `&mut expr` are address-of argument expressions (postfix
+  allowed: `&Color.Green`). The callee sees the pointee: field reads
+  auto-deref (`p->x` on C), writes through `&mut` stick on every backend.
+- Call-site rules: a place (or `&`-expression) passed to a `&`/`&mut`
+  param shares the object (no clone) — on C the address is taken; a ref
+  passed on to a value param is dereferenced and copied (JS/Py clone at
+  the boundary to match). A ref can be forwarded to another ref param.
+- `let q = p` where p is a ref param copies the pointee (all backends).
+- `match` on a reference matches the pointee (copied on C, shared on
+  JS/Py — identical observable behavior).
+- References to non-struct types (e.g. `&[i64]`, `&i64`) are gated with
+  a clear error; struct-typed (incl. enum) refs only for now.
+- Reassigning a reference parameter is an error on every backend.

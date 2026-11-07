@@ -624,6 +624,14 @@ fn generate_inner(program: &[Item], tests: Option<&[String]>) -> String {
 
 // Formats an f64 literal so it is always a valid C double literal
 // (Rust's `{}` prints 1.0 as `1`, which would become integer division in C).
+// strip & / &mut
+fn deref_ty(t: &Ty) -> Ty {
+    match t {
+        Ty::Ref(i) | Ty::RefMut(i) => (**i).clone(),
+        other => other.clone(),
+    }
+}
+
 // zero initializer for a C type (payload-enum constructors zero all slots
 // so eager match bindings can safely read an unset slot)
 fn zero_of(ctype: &str) -> &'static str {
@@ -720,6 +728,8 @@ impl Codegen {
             Ty::F32 => "float".into(),
             Ty::Array(_) => self.vec_cname(t),
             Ty::Option(_) | Ty::Result(_, _) => c_enum_name(&crate::parser::ty_name(t)),
+            Ty::Ref(i) => format!("const {}*", self.ctype(i)),
+            Ty::RefMut(i) => format!("{}*", self.ctype(i)),
             Ty::Struct(name) => {
                 if self.is_enum(name) && !self.is_payload_enum(name) { "int64_t".into() }
                 else if self.is_payload_enum(name) { c_enum_name(name) }
@@ -761,6 +771,16 @@ impl Codegen {
     }
 
     fn gen_fn(&mut self, f: &FnDecl) {
+        if matches!(f.ret, Ty::Ref(_) | Ty::RefMut(_)) {
+            panic!("vulcan: functions cannot return references (`{}`)", f.name);
+        }
+        for (_, pt) in &f.params {
+            if let Ty::Ref(i) | Ty::RefMut(i) = pt {
+                if !matches!(&**i, Ty::Struct(_)) {
+                    panic!("vulcan: references to non-struct types are not supported yet (`{}`)", f.name);
+                }
+            }
+        }
         self.cur_ret = f.ret.clone();
         self.counter = 0;
         self.is_main = f.name == "main";
@@ -878,6 +898,17 @@ impl Codegen {
                 } else {
                     self.gen_expr_hint(&init, ty.as_ref())
                 };
+                if matches!(ty, Some(Ty::Ref(_)) | Some(Ty::RefMut(_))) {
+                    panic!("vulcan: references are only supported as function parameters, not let types");
+                }
+                if matches!(init, Expr::Addr { .. }) {
+                    panic!("vulcan: references are only supported as function arguments, not let values");
+                }
+                // `let q = p` where p is a reference: q is a copy of the pointee
+                let (init_c, init_ty) = match init_ty {
+                    Ty::Ref(_) | Ty::RefMut(_) => (format!("(*{init_c})"), deref_ty(&init_ty)),
+                    _ => (init_c, init_ty),
+                };
                 let final_ty = ty.clone().unwrap_or_else(|| init_ty.clone());
                 self.check_assignable(&init_ty, &final_ty, "let initializer");
                 let cvar = self.fresh(name);
@@ -889,6 +920,9 @@ impl Codegen {
                 match target {
                     Expr::Ident(name) => {
                         let (var_ty, cvar) = self.lookup(name).unwrap_or_else(|| panic!("vulcan: assign to undeclared `{name}`"));
+                        if matches!(var_ty, Ty::Ref(_) | Ty::RefMut(_)) {
+                            panic!("vulcan: cannot reassign a reference (`{name}`)");
+                        }
                         let cast = self.cast(&val_c, &val_ty, &var_ty);
                         self.line(&format!("{cvar} = {cast};"));
                     }
@@ -944,8 +978,12 @@ impl Codegen {
                             self.line(&format!("    {tmp}.{fname} = {cast};"));
                             self.line(&format!("    {set}(&{arr_c}, {idx_c}, {tmp}); }}"));
                         } else {
-                            let (recv_c, _) = self.gen_expr(recv);
-                            self.line(&format!("{recv_c}.{fname} = {val_c};"));
+                            let (recv_c, recv_ty) = self.gen_expr(recv);
+                            if matches!(recv_ty, Ty::Ref(_) | Ty::RefMut(_)) {
+                                self.line(&format!("{recv_c}->{fname} = {val_c};"));
+                            } else {
+                                self.line(&format!("{recv_c}.{fname} = {val_c};"));
+                            }
                         }
                     }
                     _ => panic!("vulcan: invalid assignment target"),
@@ -992,13 +1030,14 @@ impl Codegen {
                             let (recv_c, recv_ty) = self.gen_expr(recv);
                             let fty = self.field_ty(&recv_ty, fname);
                             let cast = self.cast(&val_c, &val_ty, &fty);
+                            let dot = if matches!(recv_ty, Ty::Ref(_) | Ty::RefMut(_)) { "->" } else { "." };
                             if op == "/=" || op == "%=" {
                                 let f = if op == "/=" {
                                     if self.norm(&fty) == Ty::F64 { "vdiv_f64" } else { "vdiv_i64" }
                                 } else { "vmod_i64" };
-                                self.line(&format!("{recv_c}.{fname} = {f}({recv_c}.{fname}, {cast});"));
+                                self.line(&format!("{recv_c}{dot}{fname} = {f}({recv_c}{dot}{fname}, {cast});"));
                             } else {
-                                self.line(&format!("{recv_c}.{fname} {op} {cast};"));
+                                self.line(&format!("{recv_c}{dot}{fname} {op} {cast};"));
                             }
                         }
                     }
@@ -1056,8 +1095,9 @@ impl Codegen {
                             self.line(&format!("    {tmp}.{fname}{op};"));
                             self.line(&format!("    {set}(&{arr_c}, {idx_c}, {tmp}); }}"));
                         } else {
-                            let (recv_c, _) = self.gen_expr(recv);
-                            self.line(&format!("{recv_c}.{fname}{op};"));
+                            let (recv_c, recv_ty) = self.gen_expr(recv);
+                            let dot = if matches!(recv_ty, Ty::Ref(_) | Ty::RefMut(_)) { "->" } else { "." };
+                            self.line(&format!("{recv_c}{dot}{fname}{op};"));
                         }
                     }
                     Expr::Index(recv, idx) => {
@@ -1165,7 +1205,16 @@ impl Codegen {
             Stmt::Match { scrutinee, arms, default } => {
                 let (sc, st) = self.gen_expr(scrutinee);
                 let tmp = self.fresh("m");
-                self.line(&format!("{} {} = {};", self.ctype(&st), tmp, sc));
+                // match on a reference: match the pointee (copied on C,
+                // shared on JS/Py — identical observable behavior)
+                let st = if matches!(st, Ty::Ref(_) | Ty::RefMut(_)) {
+                    let inner = deref_ty(&st);
+                    self.line(&format!("{} {} = (*{});", self.ctype(&inner), tmp, sc));
+                    inner
+                } else {
+                    self.line(&format!("{} {} = {};", self.ctype(&st), tmp, sc));
+                    st
+                };
                 // payload enums / Option / Result: compare __tag, bind payloads
                 let pkey = match &st {
                     Ty::Struct(n) if self.is_payload_enum(n) => Some(n.clone()),
@@ -1636,6 +1685,15 @@ impl Codegen {
                 (acc.unwrap_or_else(|| "\"\"".into()), Ty::Str)
             }
             Expr::Call { callee, args } => self.gen_call(callee, args),
+            Expr::Addr { inner, mutable } => {
+                // &expr / &mut expr (call arguments): the address of the value
+                let (c, t) = self.gen_expr(inner);
+                if matches!(t, Ty::Ref(_) | Ty::RefMut(_)) {
+                    panic!("vulcan: cannot take a reference to a reference");
+                }
+                let ty = if *mutable { Ty::RefMut(Box::new(t)) } else { Ty::Ref(Box::new(t)) };
+                (format!("&({c})"), ty)
+            }
             Expr::Try(inner) => {
                 // `expr?` — propagate None/Err, yield the payload
                 let (c, t) = self.gen_expr(inner);
@@ -1678,6 +1736,12 @@ impl Codegen {
                     }
                 }
                 let (recv_c, recv_ty) = self.gen_expr(recv);
+                // references auto-deref for method lookup and self passing
+                let is_ref_recv = matches!(recv_ty, Ty::Ref(_) | Ty::RefMut(_));
+                let recv_ty = match recv_ty {
+                    Ty::Ref(i) | Ty::RefMut(i) => *i,
+                    other => other,
+                };
                 // user-defined impl methods take priority over same-named builtins
                 if let Ty::Struct(sname) = &recv_ty {
                     if let Some(m) = self.impls.get(&(sname.clone(), name.clone())).cloned() {
@@ -1685,7 +1749,8 @@ impl Codegen {
                         // are materialized into a temp first. Note: a *mutating*
                         // method on a temporary mutates the temp, not the
                         // underlying storage (value semantics).
-                        let recv_c = if matches!(&**recv, Expr::Ident(_)) {
+                        let recv_c = if matches!(&**recv, Expr::Ident(_)) || is_ref_recv {
+                            // a reference receiver is already a pointer — pass it on
                             recv_c
                         } else {
                             let tmp = self.fresh("recv");
@@ -1699,13 +1764,29 @@ impl Codegen {
                         }
                         let mut call_args: Vec<String> = Vec::new();
                         if has_self {
-                            call_args.push(format!("&{recv_c}"));
+                            // a reference receiver is already a pointer
+                            if is_ref_recv {
+                                call_args.push(recv_c.clone());
+                            } else {
+                                call_args.push(format!("&{recv_c}"));
+                            }
                         }
                         for (i, (_, pty)) in m.params.iter().enumerate() {
                             if has_self && i == 0 { continue; }
                             let arg = &args[if has_self { i - 1 } else { i }];
                             let (ac, at) = self.gen_expr(arg);
-                            let ac = self.cast(&ac, &at, pty);
+                            let ac = match pty {
+                                Ty::Ref(_) | Ty::RefMut(_) => {
+                                    match at {
+                                        Ty::Ref(_) | Ty::RefMut(_) => ac,
+                                        _ => format!("&({ac})"),
+                                    }
+                                }
+                                _ if matches!(at, Ty::Ref(_) | Ty::RefMut(_)) => {
+                                    self.cast(&format!("(*{ac})"), &deref_ty(&at), pty)
+                                }
+                                _ => self.cast(&ac, &at, pty),
+                            };
                             call_args.push(ac);
                         }
                         return (format!("{}({})", method_c_name(sname, name), call_args.join(", ")), m.ret.clone());
@@ -1870,6 +1951,19 @@ impl Codegen {
                     }
                 }
                 let (recv_c, recv_ty) = self.gen_expr(recv);
+                if let Ty::Ref(i) | Ty::RefMut(i) = &recv_ty {
+                    // reference: field access auto-dereferences
+                    if let Ty::Struct(sname) = &**i {
+                        if self.is_enum(sname) {
+                            return (format!("{recv_c}->{fname}"), Ty::Struct(sname.clone()));
+                        }
+                        let fields = self.structs.get(sname).unwrap_or_else(|| panic!("vulcan: unknown struct {sname}")).clone();
+                        let fty = fields.iter().find(|(n, _)| n == fname)
+                            .unwrap_or_else(|| panic!("vulcan: struct {sname} has no field {fname}")).1.clone();
+                        return (format!("{recv_c}->{fname}"), fty);
+                    }
+                    panic!("vulcan: field access on a reference to a non-struct");
+                }
                 if let Ty::Struct(sname) = recv_ty {
                     let fields = self.structs.get(&sname).unwrap_or_else(|| panic!("vulcan: unknown struct {sname}")).clone();
                     let fty = fields.iter().find(|(n, _)| n == fname)
@@ -2260,7 +2354,22 @@ impl Codegen {
                 let mut cs = Vec::new();
                 for (a, pt) in args.iter().zip(&ptys) {
                     let (c, t) = self.gen_expr(a);
-                    cs.push(self.cast(&c, &t, pt));
+                    match pt {
+                        // ref param: take the address of a place, forward
+                        // refs as-is
+                        Ty::Ref(_) | Ty::RefMut(_) => {
+                            match t {
+                                Ty::Ref(_) | Ty::RefMut(_) => cs.push(c),
+                                _ => cs.push(format!("&({c})")),
+                            }
+                        }
+                        // value param receiving a ref: deref (copies, matching
+                        // the JS/Py clone-at-boundary)
+                        _ if matches!(t, Ty::Ref(_) | Ty::RefMut(_)) => {
+                            cs.push(self.cast(&format!("(*{c})"), &deref_ty(&t), pt));
+                        }
+                        _ => cs.push(self.cast(&c, &t, pt)),
+                    }
                 }
                 (format!("{}({})", safe_c_name(callee), cs.join(", ")), ret)
             }

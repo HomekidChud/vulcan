@@ -817,6 +817,61 @@ struct Cell { x: i64, y: i64 }
         expected: "g[1][2] = 12 len: 3 row1: 4\nmutated: 99 16\nlevel: world 30 2\ncube: 4 5\ncells: 3 6\npopped len: 4 grid len: 2\n",
     },
     Case {
+        name: "reference parameters",
+        src: r#"
+struct Point { x: f64, y: f64 }
+
+impl Point {
+    fn double(self) -> void {
+        self.x = self.x * 2
+        self.y = self.y * 2
+    }
+}
+
+fn translate(p: &mut Point, dx: f64, dy: f64) -> void {
+    p.x = p.x + dx
+    p.y = p.y + dy
+}
+
+fn get_x(p: &Point) -> f64 {
+    return p.x
+}
+
+fn outer(p: &mut Point) -> void {
+    translate(p, 1.0, 2.0)
+}
+
+fn takes_value(p: Point) -> f64 {
+    return p.x + p.y
+}
+
+enum Color { Red, Green, Blue }
+
+fn name(c: &Color) -> string {
+    match c {
+        when Color.Red { return "red" }
+        when Color.Green { return "green" }
+        else { return "blue" }
+    }
+}
+
+fn main() -> void {
+    let a = Point { x: 1.0, y: 2.0 }
+    translate(&mut a, 10.0, 20.0)
+    print("a:", a.x, a.y)
+    print("get_x:", get_x(&a))
+    outer(&mut a)
+    print("outer:", a.x, a.y)
+    (&mut a).double()
+    print("doubled:", a.x, a.y)
+    print("copy:", takes_value(a))
+    print("name:", name(&Color.Green))
+    print("literal:", get_x(&Point { x: 42.0, y: 0.0 }))
+}
+"#,
+        expected: "a: 11 22\nget_x: 11\nouter: 12 24\ndoubled: 24 48\ncopy: 72\nname: green\nliteral: 42\n",
+    },
+    Case {
         name: "payload enums / Option / Result / ?",
         src: r#"
 enum Shape { Circle(f64), Rect(f64, f64), Point }
@@ -932,6 +987,8 @@ fn doc_ty(t: &crate::parser::Ty) -> String {
         Array(inner) => format!("[{}]", doc_ty(inner)),
         Option(p) => format!("Option<{}>", doc_ty(p)),
         Result(o, e) => format!("Result<{}, {}>", doc_ty(o), doc_ty(e)),
+        Ref(i) => format!("&{}", doc_ty(i)),
+        RefMut(i) => format!("&mut {}", doc_ty(i)),
         Struct(n) => n.clone(),
     }
 }

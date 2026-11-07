@@ -45,7 +45,14 @@ backends kept byte-identical.**
 - Not yet supported (gated with clear errors): arrays of payload enums /
   Option / Result, printing payload enums directly, `==` on payload
   enums. Noted in TODO.md.
-- Selftest grew 24 → 30 cases; every case runs on C (gcc), JS and Python
+- **Reference parameters** — `&T` / `&mut T` function parameters with
+  `&expr` / `&mut expr` call arguments on all backends. Reads and writes
+  through the reference see the caller's value (`p->x` on C, shared
+  objects on JS/Py); refs passed to value params are dereferenced and
+  copied; `match` on a reference matches the pointee. Gated with clear
+  errors: non-struct references, returning references, `let r = &mut x`,
+  reassigning a reference.
+- Selftest grew 24 → 31 cases; every case runs on C (gcc), JS and Python
   and must be byte-identical.
 
 ## 1.10

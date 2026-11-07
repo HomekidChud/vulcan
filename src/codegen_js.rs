@@ -507,7 +507,17 @@ impl JsGen {
     fn array_elem(&self, t: &Ty) -> Ty { self.sema.array_elem(t) }
 
     fn gen_fn(&mut self, f: &FnDecl) {
-        self.cur_ret = f.ret.clone();
+        self.cur_ret = f.ret.clone();        if matches!(f.ret, Ty::Ref(_) | Ty::RefMut(_)) {
+            panic!("vulcan: functions cannot return references (`{}`)", f.name);
+        }
+        for (_, pt) in &f.params {
+            if let Ty::Ref(i) | Ty::RefMut(i) = pt {
+                if !matches!(&**i, Ty::Struct(_)) {
+                    panic!("vulcan: references to non-struct types are not supported yet (`{}`)", f.name);
+                }
+            }
+        }
+
         self.counter = 0;
         self.is_main = f.name == "main";
         self.defers.clear();
@@ -586,6 +596,17 @@ impl JsGen {
                 } else {
                     self.gen_expr_hint(&init, ty.as_ref())
                 };
+                if matches!(ty, Some(Ty::Ref(_)) | Some(Ty::RefMut(_))) {
+                    panic!("vulcan: references are only supported as function parameters, not let types");
+                }
+                if matches!(init, Expr::Addr { .. }) {
+                    panic!("vulcan: references are only supported as function arguments, not let values");
+                }
+                // `let q = p` where p is a reference: q is a copy of the pointee
+                let init_ty = match init_ty {
+                    Ty::Ref(i) | Ty::RefMut(i) => *i,
+                    other => other,
+                };
                 let final_ty = ty.clone().unwrap_or_else(|| init_ty.clone());
                 self.check_assignable(&init_ty, &final_ty, "let initializer");
                 let cvar = self.fresh(name);
@@ -598,6 +619,9 @@ impl JsGen {
                 match target {
                     Expr::Ident(name) => {
                         let (var_ty, cvar) = self.lookup(name).unwrap_or_else(|| panic!("vulcan: assign to undeclared `{name}`"));
+                        if matches!(var_ty, Ty::Ref(_) | Ty::RefMut(_)) {
+                            panic!("vulcan: cannot reassign a reference (`{name}`)");
+                        }
                         let cast = self.cast(&val_c, &val_ty, &var_ty);
                         let cast = self.val_sem(&cast, value, &var_ty);
                         self.line(&format!("{cvar} = {cast};"));
@@ -766,6 +790,11 @@ impl JsGen {
             Stmt::Match { scrutinee, arms, default } => {
                 let (sc, st) = self.gen_expr(scrutinee);
                 let tmp = self.fresh("m");
+                // match on a reference: match the pointee (the shared object)
+                let st = match st {
+                    Ty::Ref(i) | Ty::RefMut(i) => *i,
+                    other => other,
+                };
                 self.line(&format!("const {tmp} = {sc};"));
                 // payload enums / Option / Result: compare __tag, bind payloads
                 let pkey = match &st {
@@ -1141,6 +1170,15 @@ impl JsGen {
                 }
             }
             Expr::Call { callee, args } => self.gen_call(callee, args),
+            Expr::Addr { inner, mutable } => {
+                // &expr / &mut expr (call arguments): the object itself
+                let (c, t) = self.gen_expr(inner);
+                if matches!(t, Ty::Ref(_) | Ty::RefMut(_)) {
+                    panic!("vulcan: cannot take a reference to a reference");
+                }
+                let ty = if *mutable { Ty::RefMut(Box::new(t)) } else { Ty::Ref(Box::new(t)) };
+                (c, ty)
+            }
             Expr::Try(inner) => {
                 // `expr?` — propagate None/Err, yield the payload
                 let (c, t) = self.gen_expr(inner);
@@ -1177,6 +1215,11 @@ impl JsGen {
                     }
                 }
                 let (recv_c, recv_ty) = self.gen_expr(recv);
+                // references auto-deref (the object is shared as-is)
+                let recv_ty = match recv_ty {
+                    Ty::Ref(i) | Ty::RefMut(i) => *i,
+                    other => other,
+                };
                 // user-defined impl methods take priority over same-named builtins
                 if let Ty::Struct(sname) = &recv_ty {
                     if !self.is_enum(sname) {
@@ -1191,7 +1234,7 @@ impl JsGen {
                                 // C passes &variable for `self` (mutating methods stick),
                                 // and materializes non-variable receivers into a temp
                                 // copy first. Match that: variable -> as-is, temp -> clone.
-                                if matches!(&**recv, Expr::Ident(_)) {
+                                if matches!(&**recv, Expr::Ident(_)) || matches!(&**recv, Expr::Addr { .. }) {
                                     call_args.push(recv_c.clone());
                                 } else {
                                     call_args.push(format!("__sclone({recv_c})"));
@@ -1201,8 +1244,18 @@ impl JsGen {
                                 if has_self && i == 0 { continue; }
                                 let arg = &args[if has_self { i - 1 } else { i }];
                                 let (ac, at) = self.gen_expr(arg);
-                                let cast = self.cast(&ac, &at, pty);
-                                call_args.push(self.val_sem(&cast, arg, pty));
+                                match pty {
+                                    Ty::Ref(_) | Ty::RefMut(_) => { call_args.push(ac); }
+                                    _ if matches!(at, Ty::Ref(_) | Ty::RefMut(_)) => {
+                                        let inner = match &at { Ty::Ref(i) | Ty::RefMut(i) => (**i).clone(), _ => unreachable!() };
+                                        let cast = self.cast(&ac, &inner, pty);
+                                        call_args.push(self.val_sem(&cast, arg, &inner));
+                                    }
+                                    _ => {
+                                        let cast = self.cast(&ac, &at, pty);
+                                        call_args.push(self.val_sem(&cast, arg, pty));
+                                    }
+                                }
                             }
                             return (format!("await {}({})", method_js_name(sname, name), call_args.join(", ")), m.ret.clone());
                         }
@@ -1364,6 +1417,11 @@ impl JsGen {
                     }
                 }
                 let (recv_c, recv_ty) = self.gen_expr(recv);
+                // references auto-deref (objects pass by reference here)
+                let recv_ty = match recv_ty {
+                    Ty::Ref(i) | Ty::RefMut(i) => *i,
+                    other => other,
+                };
                 if let Ty::Struct(sname) = recv_ty {
                     if self.is_enum(&sname) {
                         return (format!("{recv_c}.{fname}"), Ty::Struct(sname));
@@ -1736,8 +1794,21 @@ impl JsGen {
                 let mut call_args = Vec::new();
                 for (a, pty) in args.iter().zip(ptys.iter()) {
                     let (ac, at) = self.gen_expr(a);
-                    let cast = self.cast(&ac, &at, pty);
-                    call_args.push(self.val_sem(&cast, a, pty));
+                    match pty {
+                        // ref param: share the object (no clone)
+                        Ty::Ref(_) | Ty::RefMut(_) => { call_args.push(ac); }
+                        // value param receiving a ref: clone the pointee
+                        // (matches the C deref-and-copy)
+                        _ if matches!(at, Ty::Ref(_) | Ty::RefMut(_)) => {
+                            let inner = match &at { Ty::Ref(i) | Ty::RefMut(i) => (**i).clone(), _ => unreachable!() };
+                            let cast = self.cast(&ac, &inner, pty);
+                            call_args.push(self.val_sem(&cast, a, &inner));
+                        }
+                        _ => {
+                            let cast = self.cast(&ac, &at, pty);
+                            call_args.push(self.val_sem(&cast, a, pty));
+                        }
+                    }
                 }
                 if self.externs.iter().any(|n| n == callee) {
                     // FFI: the host provides this function via the __ffi table
