@@ -1163,7 +1163,7 @@ impl JsGen {
             }
             "clock" => ("__clock()".into(), Ty::F64),
             "rand" => ("__rand()".into(), Ty::I64),
-            "input" => ("__input()".into(), Ty::Str),
+            "input" => ("(await __input())".into(), Ty::Str),
             "to_int" => {
                 if args.len() != 1 { panic!("vulcan: to_int(s) takes 1 arg"); }
                 let (c, t) = self.gen_expr(&args[0]);

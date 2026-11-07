@@ -555,9 +555,11 @@ cv.addEventListener("mousemove", (e) => {
 cv.addEventListener("mousedown", (e) => { input[2] = 1; e.preventDefault(); pushInput(); });
 window.addEventListener("mouseup", () => { input[2] = 0; pushInput(); });
 cv.addEventListener("mouseleave", () => { input[2] = 0; pushInput(); });
-const KEYMAP = { ArrowLeft: 37, ArrowUp: 38, ArrowRight: 39, ArrowDown: 40, Space: 32, Enter: 13, Shift: 16, Control: 17, Alt: 18, Tab: 9, Backspace: 8, Escape: 27, Delete: 46 };
+// normalized to lowercase char codes to match the engine KEY_* constants
+// (same convention as the web bundle and the native terminal backend)
+const KEYMAP = { ArrowLeft: 97, ArrowUp: 119, ArrowRight: 100, ArrowDown: 115, Space: 32, Enter: 13, Shift: 16, Control: 17, Alt: 18, Tab: 9, Backspace: 127, Escape: 27, Delete: 46 };
 function keyCode(e) {
-  if (e.key.length === 1) return e.key.charCodeAt(0);
+  if (e.key.length === 1) return e.key.toLowerCase().charCodeAt(0);
   return KEYMAP[e.key] || 0;
 }
 window.addEventListener("keydown", (e) => {

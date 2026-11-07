@@ -129,11 +129,12 @@ static int64_t vscreen_w(void){ struct winsize w; if(ioctl(STDOUT_FILENO,TIOCGWI
 static int64_t vscreen_h(void){ struct winsize w; if(ioctl(STDOUT_FILENO,TIOCGWINSZ,&w)==0&&w.ws_row) return (int64_t)w.ws_row; return 24; }
 static void vcursor_visible(int64_t v){ printf(v? "\033[?25h" : "\033[?25l"); }
 static struct termios vulcan_torig; static int vulcan_traw = 0;
+static unsigned char vheld[256];
 static void term_raw(void){ if(tcgetattr(STDIN_FILENO,&vulcan_torig)==0){ struct termios t=vulcan_torig; t.c_lflag&=~(ICANON|ECHO); t.c_cc[VMIN]=0; t.c_cc[VTIME]=0; tcsetattr(STDIN_FILENO,TCSANOW,&t); vulcan_traw=1; } }
 static void term_normal(void){ if(vulcan_traw){ tcsetattr(STDIN_FILENO,TCSAFLUSH,&vulcan_torig); vulcan_traw=0; } }
 static int vulcan_stdin_eof = 0;
 static int64_t key_ready(void){ if(vulcan_stdin_eof) return 0; fd_set s; FD_ZERO(&s); FD_SET(STDIN_FILENO,&s); struct timeval tv={0,0}; return select(STDIN_FILENO+1,&s,NULL,NULL,&tv)>0; }
-static int64_t read_key(void){ unsigned char c=0; ssize_t r=read(STDIN_FILENO,&c,1); if(r==0){ vulcan_stdin_eof=1; return 0; } return r==1 ? (int64_t)c : 0; }
+static int64_t read_key(void){ unsigned char c=0; ssize_t r=read(STDIN_FILENO,&c,1); if(r==0){ vulcan_stdin_eof=1; return 0; } if(r==1){ vheld[c]=1; return (int64_t)c; } return 0; }
 static void clear_screen(void){ fputs("\033[2J\033[H",stdout); }
 // ---- graphics: 512x288 supersampled framebuffer (2x2 SSAA), resolved to 256x144 on present ----
 #define VFB_W 512
@@ -262,7 +263,8 @@ static double vmouse_dx(void){ return 0.0; }
 static double vmouse_dy(void){ return 0.0; }
 static double vmouse_y(void){ return -1.0; }
 static int8_t vmouse_down(void){ return 0; }
-static int8_t vkey_down(int64_t c){ (void)c; return 0; }
+static void vdrain(void){ unsigned char c; while(key_ready()&&read(STDIN_FILENO,&c,1)==1){ vheld[c]=1; } }
+static int8_t vkey_down(int64_t c){ if(c<0||c>255) return 0; vdrain(); if(vheld[c]){ vheld[c]=0; return 1; } return 0; }
 "#;
 
 pub fn generate(program: &[Item]) -> String {

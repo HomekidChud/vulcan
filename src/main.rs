@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn usage() {
-    println!("Vulcan 1.8 — a small, fast language with multiple backends,
+    println!("Vulcan 1.9 — a small, fast language with multiple backends,
 a 2D physics engine and a browser IDE
 
 USAGE (single file):
@@ -24,7 +24,7 @@ USAGE (single file):
   vulcan build <file.vulcan>  emit native binary (C backend)
   vulcan emit <file.vulcan>   show generated code
   vulcan bench <file.vulcan>  compile, run, time it
-  vulcan package <file.vulcan> --platform <p>   ship it: web, desktop,
+  vulcan package <file.vulcan> --platform <p>   ship it: web, desktop, android, ios,
                                mobile (iOS+Android), linux, windows, macos
   vulcan test <file.vulcan>   run every fn test_*() in the file
   vulcan doc <file|dir>       print the public API (structs, fns, consts)
@@ -129,7 +129,7 @@ fn main() {
     }
     if cmd == "package" {
         let file = args.get(2).map(|s| s.as_str())
-            .unwrap_or_else(|| { eprintln!("usage: vulcan package <file.vulcan> --platform <web|desktop|mobile|linux|windows|macos>"); std::process::exit(1); });
+            .unwrap_or_else(|| { eprintln!("usage: vulcan package <file.vulcan> --platform <web|desktop|mobile|android|ios|linux|windows|macos>"); std::process::exit(1); });
         if !Path::new(file).exists() {
             eprintln!("error: file not found: {file}");
             std::process::exit(1);

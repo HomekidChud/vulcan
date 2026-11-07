@@ -1,7 +1,11 @@
-// Packaging: ship a Vulcan program anywhere.
+// Packaging: ship a Vulcan program anywhere — all of it OURS, no Electron,
+// no Capacitor, no third-party scaffolding:
 //  - web:     single self-contained HTML file (terminal emulator + web worker)
-//  - desktop: Electron project wrapping the web bundle (macOS/Windows/Linux)
-//  - mobile:  Capacitor project wrapping the web bundle (iOS/Android)
+//  - desktop: native webview shell in plain C (macOS WKWebView / Linux
+//             WebKitGTK; Windows uses Edge in --app mode)
+//  - android: complete Gradle project + our own WebView activity
+//  - ios:     complete Xcode project + our own WKWebView delegate
+//  - mobile:  android + ios together
 //  - linux/windows/macos: native C cross-build scripts
 pub fn package(entry: &str, platform: &str) {
     let program = crate::modules::load_program(std::path::Path::new(entry));
@@ -11,22 +15,23 @@ pub fn package(entry: &str, platform: &str) {
         "web" => web_bundle(stem, &js),
         "desktop" => desktop_bundle(stem, &js),
         "mobile" => mobile_bundle(stem, &js),
+        "android" => android_bundle(stem, &js),
+        "ios" => ios_bundle(stem, &js),
         "linux" | "windows" | "macos" => {
             let c_src = crate::codegen::generate(&program);
             native_bundle(stem, platform, &c_src)
         }
-        "android" | "ios" => {
-            eprintln!("vulcan: for {platform} use `--platform mobile` (Capacitor wraps the web build)");
-            std::process::exit(1);
-        }
         _ => {
-            eprintln!("vulcan: unknown platform `{platform}` (web, desktop, mobile, linux, windows, macos)");
+            eprintln!("vulcan: unknown platform `{platform}` (web, desktop, mobile, android, ios, linux, windows, macos)");
             std::process::exit(1);
         }
     };
     let _ = std::fs::create_dir_all(&dir);
     for (name, content) in files {
         let path = format!("{dir}/{name}");
+        if let Some(parent) = std::path::Path::new(&path).parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
         std::fs::write(&path, content).unwrap();
         if name == "build.sh" {
             #[cfg(unix)]
@@ -55,27 +60,65 @@ fn web_bundle(stem: &str, js: &str) -> (String, Vec<(String, String)>) {
     (dir, vec![("index.html".into(), html)])
 }
 
+// Desktop: OUR OWN native webview shell — a single C file that opens the
+// OS webview (macOS WKWebView / Linux WebKitGTK) on the bundled index.html.
+// No Electron, no npm, no third-party runtime.
 fn desktop_bundle(stem: &str, js: &str) -> (String, Vec<(String, String)>) {
-    let (webdir, webfiles) = web_bundle(stem, js);
+    let (_webdir, webfiles) = web_bundle(stem, js);
     let name = file_stem(stem);
     let dir = format!("package-{name}-desktop");
     let mut files: Vec<(String, String)> = webfiles;
-    files.push(("package.json".into(), ELECTRON_PKG.replace("__NAME__", &name)));
-    files.push(("main.js".into(), ELECTRON_MAIN.to_string()));
-    files.push(("README.md".into(), ELECTRON_README.into()));
-    let _ = webdir;
+    files.push(("shell.c".into(), DESKTOP_SHELL.replace("__NAME__", &name)));
+    files.push(("build.sh".into(), DESKTOP_BUILD_SH.replace("__NAME__", &name)));
+    files.push(("run-windows.cmd".into(), DESKTOP_WIN_CMD.replace("__NAME__", &name)));
+    files.push(("README.md".into(), DESKTOP_README.replace("__NAME__", &name)));
     (dir, files)
 }
 
-fn mobile_bundle(stem: &str, js: &str) -> (String, Vec<(String, String)>) {
-    let (webdir, webfiles) = web_bundle(stem, js);
+// Mobile: OUR OWN native projects, generated from scratch — a complete
+// Android Studio / Gradle project and a complete Xcode project, each with a
+// ~40-line WebView shell written by us. No Capacitor, no CocoaPods, no npm.
+fn android_bundle(stem: &str, js: &str) -> (String, Vec<(String, String)>) {
+    let (_webdir, webfiles) = web_bundle(stem, js);
     let name = file_stem(stem);
+    let dir = format!("package-{name}-android");
+    let mut files: Vec<(String, String)> = vec![];
+    for (n, c) in webfiles { files.push((format!("app/src/main/assets/{n}"), c)); }
+    files.push(("settings.gradle".into(), AND_SETTINGS.replace("__NAME__", &name)));
+    files.push(("build.gradle".into(), AND_ROOT_GRADLE.into()));
+    files.push(("gradle.properties".into(), AND_GRADLE_PROPS.into()));
+    files.push(("app/build.gradle".into(), AND_APP_GRADLE.replace("__NAME__", &name)));
+    files.push(("app/src/main/AndroidManifest.xml".into(), AND_MANIFEST.replace("__NAME__", &name)));
+    files.push(("app/src/main/java/com/vulcan/app/MainActivity.java".into(), AND_MAIN_ACTIVITY.replace("__NAME__", &name)));
+    files.push(("app/src/main/res/values/strings.xml".into(), AND_STRINGS.replace("__NAME__", &name)));
+    files.push(("README.md".into(), AND_README.replace("__NAME__", &name)));
+    (dir, files)
+}
+
+fn ios_bundle(stem: &str, js: &str) -> (String, Vec<(String, String)>) {
+    let (_webdir, webfiles) = web_bundle(stem, js);
+    let name = file_stem(stem);
+    let dir = format!("package-{name}-ios");
+    let mut files: Vec<(String, String)> = vec![];
+    for (n, c) in webfiles { files.push((format!("VulcanApp/Resources/{n}"), c)); }
+    files.push(("VulcanApp.xcodeproj/project.pbxproj".into(), IOS_PBXPROJ.replace("__NAME__", &name)));
+    files.push(("VulcanApp/Info.plist".into(), IOS_PLIST.replace("__NAME__", &name)));
+    files.push(("VulcanApp/AppDelegate.swift".into(), IOS_APPDELEGATE.replace("__NAME__", &name)));
+    files.push(("README.md".into(), IOS_README.replace("__NAME__", &name)));
+    (dir, files)
+}
+
+// `mobile` = both native projects in one folder
+fn mobile_bundle(stem: &str, js: &str) -> (String, Vec<(String, String)>) {
+    let name = file_stem(stem);
+    let (adir, afiles) = android_bundle(stem, js);
+    let (idir, ifiles) = ios_bundle(stem, js);
+    let _ = (adir, idir);
     let dir = format!("package-{name}-mobile");
-    let mut files: Vec<(String, String)> = webfiles;
-    files.push(("package.json".into(), CAP_PKG.replace("__NAME__", &name)));
-    files.push(("capacitor.config.json".into(), CAP_CONFIG.replace("__NAME__", &name)));
-    files.push(("README.md".into(), CAP_README.into()));
-    let _ = webdir;
+    let mut files: Vec<(String, String)> = vec![];
+    for (n, c) in afiles { files.push((format!("android/{n}"), c)); }
+    for (n, c) in ifiles { files.push((format!("ios/{n}"), c)); }
+    files.push(("README.md".into(), MOBILE_README.replace("__NAME__", &name)));
     (dir, files)
 }
 
@@ -149,17 +192,22 @@ __out = (s) => postMessage({ out: s });
 __key_ready = () => __vkeys.length > 0;
 __key_down = (c) => __held.has(c);
 __read_key = () => { const k = __vkeys.shift(); return k === undefined ? 0 : k; };
-__input = () => {
+// IMPORTANT: __sleep stays the DEFAULT promise-based version (setTimeout).
+// The worker event loop must stay alive between frames so onmessage can
+// deliver key/mouse input — a spin-wait would block it forever and kill
+// all input (this exact bug shipped in 1.8).
+__input = () => new Promise((resolve) => {
     let line = "";
-    for (;;) {
-        while (__vkeys.length === 0) { /* wait for a key */ }
-        const k = __vkeys.shift();
-        if (k === 10 || k === 13) break;
-        if (k >= 32 && k < 127) line += String.fromCharCode(k);
-    }
-    return line;
-};
-__sleep = (ms) => { const t = Date.now() + ms; while (Date.now() < t) { /* spin */ } };
+    const consume = () => {
+        while (__vkeys.length > 0) {
+            const k = __vkeys.shift();
+            if (k === 10 || k === 13) { resolve(line); return; }
+            if (k >= 32 && k < 127) line += String.fromCharCode(k);
+        }
+        setTimeout(consume, 25);
+    };
+    consume();
+});
 __ms_now = () => Date.now();
 __rand = () => Math.floor(Math.random() * 2147483647);
 __rand_int = (lo, hi) => lo + Math.floor(Math.random() * (hi - lo + 1));
@@ -221,6 +269,12 @@ const HTML_TEMPLATE: &str = r##"<!DOCTYPE html>
     }
     #firebtn { right: 20px; }
     #jumpbtn { right: 108px; bottom: 110px; width: 60px; height: 60px; line-height: 56px; }
+    .sbtn {
+        position: fixed; top: 12px; right: 12px; width: 52px; height: 34px; border-radius: 8px;
+        background: rgba(120, 130, 150, 0.35); border: 2px solid rgba(200, 210, 230, 0.5);
+        color: #e8edf2; font-size: 12px; font-weight: bold; text-align: center;
+        line-height: 30px; user-select: none; -webkit-user-select: none; z-index: 10;
+    }
     #joy {
         position: fixed; bottom: 20px; left: 20px; width: 96px; height: 96px;
         border-radius: 50%; background: rgba(120, 130, 150, 0.18);
@@ -238,7 +292,7 @@ const HTML_TEMPLATE: &str = r##"<!DOCTYPE html>
 <body>
 <header><span><b>__TITLE__</b> — built with <a href="https://github.com/HomekidChud/vulcan">Vulcan</a></span><span>WASD move · F fire · R restart · drag to look</span></header>
 <main><canvas id="vscreen" width="256" height="144"></canvas><div id="term"><pre id="screen"></pre></div></main>
-<div id="touchui"><div id="joy"><div id="knob"></div></div><div class="tbtn" id="firebtn">FIRE</div><div class="tbtn" id="jumpbtn">JUMP</div></div>
+<div id="touchui"><div id="joy"><div id="knob"></div></div><div class="tbtn" id="firebtn">FIRE</div><div class="tbtn" id="jumpbtn">JUMP</div><div class="sbtn" id="rstbtn">RST</div></div>
 <div id="status">running…</div>
 <script>
 "use strict";
@@ -369,17 +423,19 @@ worker.onmessage = (e) => {
     if (d.exit !== undefined) { document.getElementById("status").textContent = "program exited with code " + d.exit; worker.terminate(); }
     if (d.error) { document.getElementById("status").textContent = "error: " + d.error; }
 };
-const KEYMAP = { Enter: 10, Backspace: 127, Escape: 27, ArrowUp: 119, ArrowDown: 115, ArrowLeft: 97, ArrowRight: 100 };
+// key codes are normalized to LOWERCASE character codes so they match the
+// engine's KEY_* constants everywhere (web, IDE, native terminal).
+const KEYMAP = { Enter: 13, Backspace: 127, Escape: 27, Tab: 9, ArrowUp: 119, ArrowDown: 115, ArrowLeft: 97, ArrowRight: 100 };
+function normKey(e) {
+    if (e.key.length === 1) return e.key.toLowerCase().charCodeAt(0);
+    return KEYMAP[e.key] !== undefined ? KEYMAP[e.key] : null;
+}
 document.addEventListener("keydown", (e) => {
-    let code = null;
-    if (e.key.length === 1) code = e.key.charCodeAt(0);
-    else if (KEYMAP[e.key] !== undefined) code = KEYMAP[e.key];
+    const code = normKey(e);
     if (code !== null && !e.repeat) { e.preventDefault(); worker.postMessage({ keys: [code] }); }
 });
 document.addEventListener("keyup", (e) => {
-    let code = null;
-    if (e.key.length === 1) code = e.key.charCodeAt(0);
-    else if (KEYMAP[e.key] !== undefined) code = KEYMAP[e.key];
+    const code = normKey(e);
     if (code !== null) worker.postMessage({ keysup: [code] });
 });
 // mouse look: drag on the canvas to look around (like an orbit control)
@@ -416,6 +472,10 @@ vscreen.addEventListener("touchstart", (e) => {
         const r = vscreen.getBoundingClientRect();
         if (t.clientX - r.left < r.width * 0.45 && joyId === null) {
             joyId = t.identifier; joyX0 = t.clientX; joyY0 = t.clientY;
+            const joy = document.getElementById("joy");
+            joy.style.left = (t.clientX - 48) + "px";
+            joy.style.top = (t.clientY - 48) + "px";
+            joy.style.bottom = "auto";
         } else if (lookId === null) {
             lookId = t.identifier; lookX = t.clientX; lookY = t.clientY;
         }
@@ -433,86 +493,393 @@ vscreen.addEventListener("touchmove", (e) => {
 }, { passive: false });
 vscreen.addEventListener("touchend", (e) => {
     for (const t of e.changedTouches) {
-        if (t.identifier === joyId) { joyId = null; joyUpdate(0, 0); }
+        if (t.identifier === joyId) {
+            joyId = null; joyUpdate(0, 0);
+            const joy = document.getElementById("joy");
+            joy.style.left = "20px"; joy.style.top = "auto"; joy.style.bottom = "20px";
+        }
         if (t.identifier === lookId) lookId = null;
     }
 });
-const fireBtn = document.getElementById("firebtn");
-fireBtn.addEventListener("touchstart", (e) => { e.preventDefault(); worker.postMessage({ keys: [K.f] }); }, { passive: false });
-const jumpBtn = document.getElementById("jumpbtn");
-jumpBtn.addEventListener("touchstart", (e) => { e.preventDefault(); worker.postMessage({ keys: [K.space] }); }, { passive: false });
+function holdBtn(el, code) {
+    el.addEventListener("touchstart", (e) => { e.preventDefault(); worker.postMessage({ keys: [code] }); }, { passive: false });
+    el.addEventListener("touchend", (e) => { e.preventDefault(); worker.postMessage({ keysup: [code] }); }, { passive: false });
+    el.addEventListener("touchcancel", () => worker.postMessage({ keysup: [code] }));
+}
+holdBtn(document.getElementById("firebtn"), K.f);
+holdBtn(document.getElementById("jumpbtn"), K.space);
+// restart (R) — one-shot, safe to tap any time
+const rstBtn = document.getElementById("rstbtn");
+rstBtn.addEventListener("touchstart", (e) => {
+    e.preventDefault();
+    worker.postMessage({ keys: [114], keysup: [114] });
+}, { passive: false });
 worker.postMessage({ init: true, fs: savedFs });
 </script>
 </body>
 </html>
 "##;
 
-const ELECTRON_PKG: &str = r#"{
-  "name": "__NAME__",
-  "version": "1.0.0",
-  "main": "main.js",
-  "scripts": { "start": "electron ." },
-  "devDependencies": { "electron": "^33" }
+// ---------------------------------------------------------------------------
+// Desktop: our own native webview shell (no Electron)
+// ---------------------------------------------------------------------------
+
+const DESKTOP_SHELL: &str = r#"// Vulcan desktop shell — opens the OS webview on the bundled index.html.
+// Written and shipped by the Vulcan toolchain itself. No Electron, no npm.
+//   macOS:  AppKit + WKWebView   (clang shell.c -o __NAME__ -framework AppKit -framework WebKit)
+//   Linux:  WebKitGTK            (cc shell.c -o __NAME__ $(pkg-config --cflags --libs webkit2gtk-4.1))
+#ifdef __APPLE__
+#import <AppKit/AppKit.h>
+#import <WebKit/WebKit.h>
+int main(void) {
+    @autoreleasepool {
+        NSRect r = NSMakeRect(0, 0, 800, 600);
+        NSWindow *w = [[NSWindow alloc] initWithContentRect:r
+            styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
+                     NSWindowStyleMaskResizable
+            backing:NSBackingStoreBuffered defer:NO];
+        [w setTitle:@"__NAME__"];
+        WKWebView *web = [[WKWebView alloc] initWithFrame:r];
+        [web loadRequest:[NSURLRequest requestWithURL:
+            [NSURL fileURLWithPath:[[NSBundle mainBundle] resourcePath]
+                stringByAppendingPathComponent:@"index.html"] isDirectory:NO]]];
+        [w setContentView:web];
+        [w makeKeyAndOrderFront:nil];
+        [[NSApplication sharedApplication] run];
+    }
+    return 0;
+}
+#else
+#include <gtk/gtk.h>
+#include <webkit2/webkit2.h>
+int main(int argc, char **argv) {
+    gtk_init(&argc, &argv);
+    GtkWidget *win = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+    gtk_window_set_title(GTK_WINDOW(win), "__NAME__");
+    gtk_window_set_default_size(GTK_WINDOW(win), 800, 600);
+    g_signal_connect(win, "destroy", G_CALLBACK(gtk_main_quit), NULL);
+    WebKitWebView *web = WEBKIT_WEB_VIEW(webkit_web_view_new());
+    char path[4096];
+    realpath("index.html", path);
+    webkit_web_view_load_uri(web, g_filename_to_uri(path, NULL, NULL));
+    gtk_container_add(GTK_CONTAINER(win), GTK_WIDGET(web));
+    gtk_widget_show_all(win);
+    gtk_main();
+    return 0;
+}
+#endif
+"#;
+
+const DESKTOP_BUILD_SH: &str = r#"set -e
+NAME=__NAME__
+case "$(uname -s)" in
+  Darwin)
+    clang -Wall -o "$NAME" shell.c -framework AppKit -framework WebKit
+    echo "built ./$NAME (macOS WKWebView shell)"
+    ;;
+  Linux)
+    if ! pkg-config --exists webkit2gtk-4.1 2>/dev/null; then
+      echo "WebkitGTK 4.1 dev files required: sudo apt install libwebkit2gtk-4.1-dev (or dnf install webkit2gtk4.1-devel)"
+      exit 1
+    fi
+    cc -Wall -o "$NAME" shell.c $(pkg-config --cflags --libs webkit2gtk-4.1)
+    echo "built ./$NAME (Linux WebKitGTK shell)"
+    ;;
+  *)
+    echo "On Windows use run-windows.cmd instead (Edge --app window)."
+    exit 1
+    ;;
+esac
+./"$NAME" &"#;
+
+const DESKTOP_WIN_CMD: &str = r#"@echo off
+rem Vulcan desktop shell for Windows: Edge (WebView2) in app mode.
+rem No install, no build — Edge ships with Windows 10/11.
+start msedge --app="%~dp0index.html" --window-size=800,600
+echo Launched __NAME__ in an Edge app window (WebView2)."#;
+
+const DESKTOP_README: &str = r#"# Desktop app (Vulcan's own native shell)
+
+Your Vulcan program as a desktop app — a ~60-line C webview shell that the
+Vulcan toolchain generates itself. No Electron, no npm, no bundler.
+
+## macOS
+
+    ./build.sh          # builds + launches (needs Xcode command line tools)
+
+## Linux
+
+    sudo apt install libwebkit2gtk-4.1-dev   # one-time dependency
+    ./build.sh
+
+## Windows
+
+    double-click run-windows.cmd
+    (opens the app in an Edge WebView2 app window — zero dependencies)
+
+The shell opens `index.html` (the same self-contained web bundle) in the
+operating system's own webview, so the app is small and starts instantly.
+"#;
+
+// ---------------------------------------------------------------------------
+// Android: complete Gradle project, our own WebView activity (no Capacitor)
+// ---------------------------------------------------------------------------
+
+const AND_SETTINGS: &str = r#"pluginManagement {
+    repositories { google(); mavenCentral(); gradlePluginPortal() }
+}
+dependencyResolutionManagement {
+    repositories { google(); mavenCentral() }
+}
+rootProject.name = "__NAME__"
+include ":app"
+"#;
+
+const AND_ROOT_GRADLE: &str = r#"// generated by the Vulcan toolchain
+plugins {
+    id "com.android.application" version "8.5.2" apply false
 }
 "#;
 
-const ELECTRON_MAIN: &str = r#"const { app, BrowserWindow } = require("electron");
-app.whenReady().then(() => {
-  const win = new BrowserWindow({
-    width: 780, height: 560,
-    title: "__NAME__",
-    webPreferences: { contextIsolation: true }
-  });
-  win.setMenuBarVisibility(false);
-  win.loadFile("index.html");
-});
-app.on("window-all-closed", () => app.quit());
+const AND_GRADLE_PROPS: &str = r#"org.gradle.jvmargs=-Xmx2048m
+android.useAndroidX=true
+android.nonTransitiveRClass=true
 "#;
 
-const ELECTRON_README: &str = r#"# Desktop app (Electron)
-
-Your Vulcan program as a desktop app for macOS, Windows and Linux.
-
-    npm install
-    npm start
-
-Build installers (produces .dmg / .exe / AppImage):
-
-    npx electron-packager . __NAME__ --platform=mac --arch=arm64,x64
-    npx electron-packager . __NAME__ --platform=win32
-    npx electron-packager . __NAME__ --platform=linux
-"#;
-
-const CAP_PKG: &str = r#"{
-  "name": "__NAME__",
-  "version": "1.0.0",
-  "dependencies": {
-    "@capacitor/core": "^6",
-    "@capacitor/cli": "^6"
-  }
+const AND_APP_GRADLE: &str = r#"plugins { id "com.android.application" }
+android {
+    namespace "com.vulcan.app"
+    compileSdk 34
+    defaultConfig {
+        applicationId "com.vulcan.app.__NAME__"
+        minSdk 24
+        targetSdk 34
+        versionCode 1
+        versionName "1.0"
+    }
+    buildTypes {
+        release {
+            minifyEnabled false
+        }
+    }
 }
 "#;
 
-const CAP_CONFIG: &str = r#"{
-  "appId": "com.vulcan.__NAME__",
-  "appName": "__NAME__",
-  "webDir": "."
+const AND_MANIFEST: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application
+        android:label="@string/app_name"
+        android:icon="@android:drawable/sym_def_app_icon"
+        android:hardwareAccelerated="true">
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:configChanges="orientation|screenSize|keyboardHidden">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
+"#;
+
+const AND_MAIN_ACTIVITY: &str = r#"package com.vulcan.app;
+
+// Vulcan's own Android shell — a WebView activity written by the toolchain.
+// No Capacitor, no plugins, no webview dependency: just the platform WebView.
+import android.app.Activity;
+import android.os.Bundle;
+import android.webkit.WebView;
+import android.webkit.WebSettings;
+
+public class MainActivity extends Activity {
+    private WebView web;
+
+    @Override
+    protected void onCreate(Bundle b) {
+        super.onCreate(b);
+        web = new WebView(this);
+        setContentView(web);
+        WebSettings s = web.getSettings();
+        s.setJavaScriptEnabled(true);
+        s.setDomStorageEnabled(true);
+        s.setAllowFileAccess(true);
+        // the game runs in a web worker; keep it running when the screen dims
+        WebView.setWebContentsDebuggingEnabled(false);
+        web.loadUrl("file:///android_asset/index.html");
+    }
+
+    @Override
+    protected void onPause()   { super.onPause();   if (web != null) web.onPause(); }
+    @Override
+    protected void onResume()  { super.onResume();  if (web != null) web.onResume(); }
+    @Override
+    public void onBackPressed() { /* let the game handle it */ }
 }
 "#;
 
-const CAP_README: &str = r#"# Mobile app (Capacitor — iOS + Android)
+const AND_STRINGS: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">__NAME__</string>
+</resources>
+"#;
 
-Your Vulcan program as a native mobile app. The web build (index.html) runs
-inside a native WebView shell.
+const AND_README: &str = r#"# Android app (Vulcan's own Gradle project)
 
-    npm install
-    npx cap add ios       # requires Xcode (macOS)
-    npx cap add android   # requires Android Studio
-    npx cap sync
-    npx cap open ios      # or: npx cap open android
+A complete Android Studio project generated by the Vulcan toolchain — no
+Capacitor, no Cordova, no npm. The app is a ~40-line WebView activity we
+generate, loading the self-contained web build from app/src/main/assets/.
 
-Keyboard note: on-device keyboards appear when the app needs input; for games
-that read raw keys, tap the screen area first so it gets focus.
+## Build the APK
+
+    # on a machine with Android Studio (or just the Android SDK + Gradle):
+    cd __NAME__-android   # this folder
+    gradle assembleDebug  # or: ./gradlew assembleDebug if you add a wrapper
+
+The APK lands in app/build/outputs/apk/debug/app-debug.apk — install it with:
+
+    adb install app/build/outputs/apk/debug/app-debug.apk
+
+## Release / Play Store APK
+
+    gradle assembleRelease   # needs a signing config in app/build.gradle
+
+The generated project uses only the Android platform WebView (System WebView
+/ Chrome), so the APK is tiny (~100 KB + your game).
+"#;
+
+// ---------------------------------------------------------------------------
+// iOS: complete Xcode project, our own WKWebView delegate (no CocoaPods)
+// ---------------------------------------------------------------------------
+
+const IOS_PBXPROJ: &str = r#"// !SOURCE: generated by the Vulcan toolchain
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	objectVersion = 56;
+	classes = {};
+	objects = {
+/* Begin PBXFileReference section */
+		1000001 /* AppDelegate.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
+		1000002 /* index.html */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.html; path = index.html; sourceTree = "<group>"; };
+		1000003 /* Info.plist */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		1000004 /* __NAME__.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "__NAME__.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+/* Begin PBXBuildFile section */
+		2000001 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1000001; };
+		2000002 /* index.html in Resources */ = {isa = PBXBuildFile; fileRef = 1000002; };
+/* End PBXBuildFile section */
+/* Begin PBXGroup section */
+		3000001 /* VulcanApp */ = {isa = PBXGroup; children = (1000001, 1000002, 1000003); path = VulcanApp; sourceTree = "<group>"; };
+		3000002 /* main */ = {isa = PBXGroup; children = (3000001); sourceTree = "<group>"; };
+		3000003 /* Products */ = {isa = PBXGroup; children = (1000004); name = Products; sourceTree = "<group>"; };
+		3000004 /* root */ = {isa = PBXGroup; children = (3000002, 3000003); sourceTree = "<group>"; };
+/* End PBXGroup section */
+/* Begin PBXNativeTarget section */
+		4000001 /* __NAME__ */ = {isa = PBXNativeTarget; buildConfigurationList = 5000001; buildPhases = (4000002, 4000003, 4000004); buildRules = (); dependencies = (); name = "__NAME__"; productName = "__NAME__"; productReference = 1000004; productType = "com.apple.product-type.application"; };
+		4000002 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (2000001); runOnlyForDeploymentPostprocessing = 0; };
+		4000003 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		4000004 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (2000002); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXNativeTarget section */
+/* Begin PBXProject section */
+		6000001 /* Project object */ = {isa = PBXProject; attributes = {BuildIndependentTargetsInParallel = 1; LastUpgradeCheck = 1540; }; buildConfigurationList = 5000002; compatibilityVersion = "Xcode 14.0"; developmentRegion = en; hasScannedForEncodings = 0; knownRegions = (en, Base); mainGroup = 3000004; productRefGroup = 3000003; projectDirPath = ""; projectRoot = ""; targets = (4000001); };
+/* End PBXProject section */
+/* Begin XCConfigurationList section */
+		5000001 /* Build configuration list for PBXNativeTarget "__NAME__" */ = {isa = XCConfigurationList; buildConfigurations = (5000003); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+		5000002 /* Build configuration list for PBXProject "__NAME__" */ = {isa = XCConfigurationList; buildConfigurations = (5000004); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+/* End XCConfigurationList section */
+/* Begin XCBuildConfiguration section */
+		5000003 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon; CODE_SIGN_STYLE = Automatic; CURRENT_PROJECT_VERSION = 1; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = VulcanApp/Info.plist; IPHONEOS_DEPLOYMENT_TARGET = 15.0; LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks"; PRODUCT_BUNDLE_IDENTIFIER = com.vulcan.__NAME__; PRODUCT_NAME = "$(TARGET_NAME)"; SWIFT_VERSION = 5.0; TARGETED_DEVICE_FAMILY = "1,2"; }; name = Release; };
+		5000004 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {ALWAYS_SEARCH_USER_PATHS = NO; CLANG_ENABLE_MODULES = YES; IPHONEOS_DEPLOYMENT_TARGET = 15.0; SDKROOT = iphoneos; SWIFT_OPTIMIZATION_LEVEL = "-Owholemodule"; }; name = Release; };
+/* End XCBuildConfiguration section */
+	};
+	rootObject = 6000001;
+}
+"#;
+
+const IOS_PLIST: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key><string>en</string>
+    <key>CFBundleDisplayName</key><string>__NAME__</string>
+    <key>CFBundleExecutable</key><string>$(EXECUTABLE_NAME)</string>
+    <key>CFBundleIdentifier</key><string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+    <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+    <key>CFBundleName</key><string>$(PRODUCT_NAME)</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleShortVersionString</key><string>1.0</string>
+    <key>CFBundleVersion</key><string>1</string>
+    <key>LSRequiresIPhoneOS</key><true/>
+    <key>UIRequiresFullScreen</key><true/>
+    <key>UISupportedInterfaceOrientations</key>
+    <array>
+        <string>UIInterfaceOrientationPortrait</string>
+        <string>UIInterfaceOrientationLandscapeLeft</string>
+        <string>UIInterfaceOrientationLandscapeRight</string>
+    </array>
+</dict>
+</plist>
+"#;
+
+const IOS_APPDELEGATE: &str = r#"import UIKit
+import WebKit
+
+// Vulcan's own iOS shell — a WKWebView delegate written by the toolchain.
+// No CocoaPods, no SwiftPM, no Capacitor: just WebKit (a system framework).
+@main
+class AppDelegate: UIResponder, UIApplicationDelegate {
+    var window: UIWindow?
+
+    func application(_ application: UIApplication,
+                     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
+        window = UIWindow(frame: UIScreen.main.bounds)
+        let web = WKWebView(frame: window!.bounds)
+        web.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        web.scrollView.isScrollEnabled = false
+        if let url = Bundle.main.url(forResource: "index", withExtension: "html") {
+            web.loadFileURL(url, allowingReadAccessTo: url.deletingLastPathComponent())
+        }
+        window?.rootViewController = UIViewController()
+        window?.rootViewController?.view = web
+        window?.makeKeyAndVisible()
+        return true
+    }
+}
+"#;
+
+const IOS_README: &str = r#"# iOS app (Vulcan's own Xcode project)
+
+A complete Xcode project generated by the Vulcan toolchain — no CocoaPods,
+no Capacitor, no npm. The app is a ~25-line WKWebView delegate we generate,
+loading the self-contained web build from VulcanApp/Resources/.
+
+## Build & run
+
+    open VulcanApp.xcodeproj     # on a Mac with Xcode
+    # select an iPhone simulator (or a connected device) and press Cmd+R
+
+## App Store IPA
+
+    Product > Archive, then distribute through Xcode's organizer.
+    (needs an Apple Developer account for device + store builds)
+
+WKWebView is a system framework, so the app has zero third-party code.
+"#;
+
+const MOBILE_README: &str = r#"# Mobile apps (Vulcan's own packaging)
+
+Generated by the Vulcan toolchain itself — no Capacitor, no Cordova, no npm:
+
+- `android/` — a complete Gradle project with our own WebView activity.
+  Build the APK on any machine with the Android SDK: `cd android && gradle assembleDebug`
+- `ios/` — a complete Xcode project with our own WKWebView delegate.
+  Open `ios/VulcanApp.xcodeproj` on a Mac and press Cmd+R.
+
+Both shells run the same self-contained `index.html` (the web build), so
+your game behaves identically to the browser version, including touch
+controls. See the README inside each folder for details.
 "#;
 
 const NATIVE_LINUX: &str = r#"set -e

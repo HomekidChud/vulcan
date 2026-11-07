@@ -97,24 +97,10 @@ fn main() -> void {
         if pitch > 0.9 { pitch = 0.9 }
         if pitch < -0.9 { pitch = -0.9 }
 
-        // --- one-shot keys (fire, restart) ---
+        // --- one-shot keys (restart) ---
         if key_ready() > 0 {
             let k = read_key()
-            if k == 102 {
-                // f = fire
-                if state == ST_PLAYING && weapon_can_fire(weapon) {
-                    weapon = weapon_fire(weapon)
-                    let eye = s.camera
-                    let dir = cam_forward(s.camera)
-                    s = scene_shoot(s, player, Vec3 { x: eye.x, y: eye.y, z: eye.z }, dir, 60.0, weapon.damage)
-                    // muzzle flash
-                    s = scene_spawn_particle(s,
-                        Vec3 { x: eye.x + dir.x, y: eye.y + dir.y, z: eye.z + dir.z },
-                        Vec3 { x: dir.x * 6.0, y: dir.y * 6.0 + 1.0, z: dir.z * 6.0 }, 0.15, 0xFFD54F)
-                    spawn_flash = 0.08
-                }
-            }
-            if k == 114 && state != ST_PLAYING {
+            if k == KEY_R && state != ST_PLAYING {
                 // r = restart
                 s = scene_new()
                 s = terrain_sines(s, 16, 3.0)
@@ -138,6 +124,30 @@ fn main() -> void {
                 s.camera = cam_first_person(s.entities[pi].pos, yaw, pitch)
             }
             s = player_move_cam(s, player, dt)
+            // clamp the player inside the arena (no walking off the island)
+            let pc = scene_find(s, player)
+            if pc >= 0 {
+                let pp = s.entities[pc]
+                let pr = sqrt(pp.pos.x * pp.pos.x + pp.pos.z * pp.pos.z)
+                if pr > 26.0 {
+                    let k2 = 26.0 / pr
+                    pp.pos.x = pp.pos.x * k2
+                    pp.pos.z = pp.pos.z * k2
+                    s.entities[pc] = pp
+                }
+            }
+            // fire: hold F / FIRE (the weapon's own cooldown gates the rate)
+            if key_down(KEY_F) && weapon_can_fire(weapon) {
+                weapon = weapon_fire(weapon)
+                let eye = s.camera
+                let dir = cam_forward(s.camera)
+                s = scene_shoot(s, player, Vec3 { x: eye.x, y: eye.y, z: eye.z }, dir, 60.0, weapon.damage)
+                // muzzle flash
+                s = scene_spawn_particle(s,
+                    Vec3 { x: eye.x + dir.x, y: eye.y + dir.y, z: eye.z + dir.z },
+                    Vec3 { x: dir.x * 6.0, y: dir.y * 6.0 + 1.0, z: dir.z * 6.0 }, 0.15, 0xFFD54F)
+                spawn_flash = 0.08
+            }
             s = bot_think(s, dt)
             s = engine_tick(s, dt, dt)
 

@@ -13,6 +13,38 @@ fn main() {
 }
 ```
 
+## Vulcan 1.9 — what's new
+
+**Input fixed for real, and Vulcan's own packaging — no more Electron or
+Capacitor.**
+
+- **The big input fix** — the web runtime's sleep was a busy spin, which
+  blocked the worker's event loop, so key/mouse messages from the page were
+  never delivered. Every web game's input was silently dead. The runtime now
+  yields between frames; held keys, fire, and mouse look all work (verified
+  end-to-end in a real browser).
+- **Key codes unified** — the engine's `KEY_W` etc. now match what every
+  input path actually delivers (lowercase character codes, normalized from
+  Shift-held input). Before this, `KEY_W` was 87 but web/IDE/native all
+  sent 119, so movement never triggered.
+- **Native `key_down()` implemented** — the C backend had a stub that always
+  returned false; it now drains pending terminal input (terminal key
+  auto-repeat makes held keys work).
+- **Touch fixes** — FIRE/JUMP buttons now release (they used to stick held
+  forever), a RESTART button appears on touch devices, and the joystick
+  spawns wherever your thumb lands.
+- **Hold-to-fire** in the arena game (the weapon's own cooldown sets the
+  rate), plus arena bounds so you can't walk off the island.
+- **`vulcan package` is 100% ours now**:
+  - `--platform android` emits a complete Gradle project with our own
+    ~40-line WebView activity (no Capacitor, no npm) — `gradle assembleDebug`
+    produces the APK on any machine with the Android SDK.
+  - `--platform ios` emits a complete Xcode project with our own ~25-line
+    WKWebView delegate (no CocoaPods) — open and press Cmd+R.
+  - `--platform desktop` emits a ~60-line C webview shell (macOS WKWebView /
+    Linux WebKitGTK; Windows uses an Edge app window) instead of Electron.
+  - `--platform mobile` emits both the android and ios projects.
+
 ## Vulcan 1.8 — what's new
 
 **Mobile support and the first real game.** You can now build and play
