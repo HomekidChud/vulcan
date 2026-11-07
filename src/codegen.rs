@@ -15,6 +15,7 @@ pub struct Codegen {
     fns: HashMap<String, (Vec<Ty>, Ty)>,
     structs: HashMap<String, Vec<(String, Ty)>>,
     enums: HashMap<String, Vec<String>>,
+    sema: crate::sema::Tables,
     consts: HashMap<String, (Ty, String)>, // name -> (type, C global name)
     defers: Vec<Vec<Stmt>>, // defer stack (LIFO at scope exit / return)
     impls: HashMap<(String, String), FnDecl>, // (struct, method) -> decl
@@ -307,6 +308,7 @@ fn generate_inner(program: &[Item], tests: Option<&[String]>) -> String {
         fns: HashMap::new(),
         structs: HashMap::new(),
         enums: HashMap::new(),
+        sema: crate::sema::Tables::from_program(program),
         consts: HashMap::new(),
         defers: Vec::new(),
         impls: HashMap::new(),
@@ -328,7 +330,7 @@ fn generate_inner(program: &[Item], tests: Option<&[String]>) -> String {
             }
             Item::Const(c) => {
                 let cname = format!("vk_{}", c.name);
-                g.consts.insert(c.name.clone(), (const_ty(c), cname));
+                g.consts.insert(c.name.clone(), (crate::sema::const_ty(c), cname));
             }
             Item::Impl(i) => {
                 for m in &i.fns {
@@ -378,7 +380,7 @@ fn generate_inner(program: &[Item], tests: Option<&[String]>) -> String {
                 (ConstVal::Str(s), _) => (format!("\"{}\"", escape_c(s)), ()),
                 (ConstVal::Bool(b), _) => (format!("{}", if *b {1} else {0}), ()),
             };
-            let _ = writeln!(g.out, "static const {} vk_{} = {};", g.ctype(&const_ty(c)), c.name, cval);
+            let _ = writeln!(g.out, "static const {} vk_{} = {};", g.ctype(&crate::sema::const_ty(c)), c.name, cval);
         }
     }
     let _ = write!(g.out, "\n// ---- enums ----\n");
@@ -595,18 +597,6 @@ fn emit_vec_typedef(out: &mut String, name: &str) {
     let _ = write!(out, "static void vs_{name}_insert(Vec_{name}* v, int64_t i, {name} x){{ if(i<0||i>v->len){{ fprintf(stderr,\"vulcan: index out of bounds\\n\"); exit(1);}} if(v->len==v->cap){{ v->cap*=2; v->data=realloc(v->data,v->cap*sizeof({name})); }} memmove(v->data+i+1, v->data+i, (size_t)(v->len-i)*sizeof({name})); v->data[i]=x; v->len++; }}\n");
 }
 
-fn const_ty(c: &ConstDecl) -> Ty {
-    match &c.ty {
-        Some(t) => t.clone(),
-        None => match c.value {
-            ConstVal::Int(_) => Ty::I64,
-            ConstVal::Float(_) => Ty::F64,
-            ConstVal::Str(_) => Ty::Str,
-            ConstVal::Bool(_) => Ty::Bool,
-        },
-    }
-}
-
 fn escape_c(s: &str) -> String {
     let mut esc = String::new();
     for c in s.chars() {
@@ -655,7 +645,7 @@ impl Codegen {
     }
 
     // enums are int64_t under the hood
-    fn is_enum(&self, name: &str) -> bool { self.enums.contains_key(name) }
+    fn is_enum(&self, name: &str) -> bool { self.sema.is_enum(name) }
 
     fn ctype(&self, t: &Ty) -> String {
         match t {
@@ -688,13 +678,7 @@ impl Codegen {
     }
 
     // normalize enum types to I64 for assignability / casts
-    fn norm(&self, t: &Ty) -> Ty {
-        match t {
-            Ty::Struct(n) if self.is_enum(n) => Ty::I64,
-            Ty::Array(inner) => Ty::Array(Box::new(self.norm(inner))),
-            other => other.clone(),
-        }
-    }
+    fn norm(&self, t: &Ty) -> Ty { self.sema.norm(t) }
 
     fn lookup(&self, name: &str) -> Option<(Ty, String)> {
         for scope in self.locals.iter().rev() {
@@ -1155,24 +1139,10 @@ impl Codegen {
         }
     }
 
-    fn field_ty(&self, recv_ty: &Ty, fname: &str) -> Ty {
-        if let Ty::Struct(sname) = recv_ty {
-            if let Some(fields) = self.structs.get(sname) {
-                if let Some((_, t)) = fields.iter().find(|(n, _)| n == fname) {
-                    return t.clone();
-                }
-            }
-        }
-        Ty::F64
-    }
+    fn field_ty(&self, recv_ty: &Ty, fname: &str) -> Ty { self.sema.field_ty(recv_ty, fname) }
 
     fn check_assignable(&self, from: &Ty, to: &Ty, what: &str) {
-        let from = self.norm(from);
-        let to = self.norm(to);
-        let ok = from == to || (from == Ty::I64 && to == Ty::F64);
-        if !ok {
-            panic!("vulcan: type mismatch in {what}: {from:?} vs {to:?}");
-        }
+        self.sema.check_assignable(from, to, what);
     }
 
     fn cast(&self, c: &str, from: &Ty, to: &Ty) -> String {
@@ -1184,12 +1154,7 @@ impl Codegen {
         panic!("vulcan: invalid cast {from:?} -> {to:?}");
     }
 
-    fn array_elem(&self, t: &Ty) -> Ty {
-        match t {
-            Ty::Array(inner) => (**inner).clone(),
-            _ => panic!("vulcan: indexing a non-array value ({t:?})"),
-        }
-    }
+    fn array_elem(&self, t: &Ty) -> Ty { self.sema.array_elem(t) }
 
     fn vec_helper(&mut self, arr_ty: &Ty, kind: &str) -> String {
         let elem = self.array_elem(arr_ty);

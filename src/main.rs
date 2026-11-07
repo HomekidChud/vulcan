@@ -4,6 +4,7 @@
 mod lexer;
 mod parser;
 mod codegen;
+mod sema;
 mod codegen_js;
 mod codegen_py;
 mod cli;

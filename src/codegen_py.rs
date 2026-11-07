@@ -291,6 +291,7 @@ pub fn generate_py(program: &[Item]) -> String {
         fns: HashMap::new(),
         structs: HashMap::new(),
         enums: HashMap::new(),
+        sema: crate::sema::Tables::from_program(program),
         consts: HashMap::new(),
         impls: HashMap::new(),
         defers: Vec::new(),
@@ -305,7 +306,7 @@ pub fn generate_py(program: &[Item]) -> String {
             }
             Item::Struct(s) => { g.structs.insert(s.name.clone(), s.fields.clone()); }
             Item::Enum(e) => { g.enums.insert(e.name.clone(), e.variants.clone()); }
-            Item::Const(c) => { g.consts.insert(c.name.clone(), const_ty(c)); }
+            Item::Const(c) => { g.consts.insert(c.name.clone(), crate::sema::const_ty(c)); }
             Item::Impl(i) => {
                 for m in &i.fns {
                     g.impls.insert((i.struct_name.clone(), m.name.clone()), m.clone());
@@ -379,18 +380,6 @@ pub fn generate_py(program: &[Item]) -> String {
     out
 }
 
-fn const_ty(c: &ConstDecl) -> Ty {
-    match &c.ty {
-        Some(t) => t.clone(),
-        None => match c.value {
-            ConstVal::Int(_) => Ty::I64,
-            ConstVal::Float(_) => Ty::F64,
-            ConstVal::Str(_) => Ty::Str,
-            ConstVal::Bool(_) => Ty::Bool,
-        },
-    }
-}
-
 // Formats an f64 literal so it stays a float in Python
 // (Rust's `{}` prints 1.0 as `1`, which would be an int in Python).
 fn pyfloat(v: f64) -> String {
@@ -449,6 +438,7 @@ pub struct PyGen {
     fns: HashMap<String, (Vec<Ty>, Ty)>,
     structs: HashMap<String, Vec<(String, Ty)>>,
     enums: HashMap<String, Vec<String>>,
+    sema: crate::sema::Tables,
     consts: HashMap<String, Ty>,
     impls: HashMap<(String, String), FnDecl>,
     defers: Vec<Vec<Stmt>>,
@@ -463,15 +453,9 @@ impl PyGen {
         format!("v{}_{}", self.counter, py_name(name))
     }
 
-    fn is_enum(&self, name: &str) -> bool { self.enums.contains_key(name) }
+    fn is_enum(&self, name: &str) -> bool { self.sema.is_enum(name) }
 
-    fn norm(&self, t: &Ty) -> Ty {
-        match t {
-            Ty::Struct(n) if self.is_enum(n) => Ty::I64,
-            Ty::Array(inner) => Ty::Array(Box::new(self.norm(inner))),
-            other => other.clone(),
-        }
-    }
+    fn norm(&self, t: &Ty) -> Ty { self.sema.norm(t) }
 
     fn lookup(&self, name: &str) -> Option<(Ty, String)> {
         for scope in self.locals.iter().rev() {
@@ -482,23 +466,10 @@ impl PyGen {
         None
     }
 
-    fn field_ty(&self, recv_ty: &Ty, fname: &str) -> Ty {
-        if let Ty::Struct(sname) = recv_ty {
-            if let Some(fields) = self.structs.get(sname) {
-                if let Some((_, t)) = fields.iter().find(|(n, _)| n == fname) {
-                    return t.clone();
-                }
-            }
-        }
-        Ty::F64
-    }
+    fn field_ty(&self, recv_ty: &Ty, fname: &str) -> Ty { self.sema.field_ty(recv_ty, fname) }
 
     fn check_assignable(&self, from: &Ty, to: &Ty, what: &str) {
-        let from = self.norm(from);
-        let to = self.norm(to);
-        if from == to { return; }
-        let ok = (from == Ty::I64 && to == Ty::F64) || (from == Ty::F64 && to == Ty::I64);
-        if !ok { panic!("vulcan: {what}: cannot use {from:?} as {to:?}"); }
+        self.sema.check_assignable(from, to, what);
     }
 
     fn cast(&self, c: &str, from: &Ty, to: &Ty) -> String {
@@ -510,12 +481,7 @@ impl PyGen {
         panic!("vulcan: invalid cast {from:?} -> {to:?}");
     }
 
-    fn array_elem(&self, t: &Ty) -> Ty {
-        match t {
-            Ty::Array(inner) => (**inner).clone(),
-            _ => panic!("vulcan: indexing a non-array value ({t:?})"),
-        }
-    }
+    fn array_elem(&self, t: &Ty) -> Ty { self.sema.array_elem(t) }
 
     fn gen_fn(&mut self, f: &FnDecl) {
         self.cur_ret = f.ret.clone();
