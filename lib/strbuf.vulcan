@@ -1,0 +1,53 @@
+// StringBuilder — amortized O(1) appends, one join at the end.
+// Usage:
+//   import strbuf
+//   let b = strbuf_new()
+//   b.push("hello")
+//   b.push_num(42)
+//   print(b.build())   // hello42
+
+pub struct StrBuf { parts: [string] }
+
+impl StrBuf {
+    // append a string
+    fn push(self, s: string) -> void {
+        self.parts.push(s)
+    }
+
+    // append an integer (its decimal form)
+    fn push_num(self, n: i64) -> void {
+        self.parts.push(to_string(n))
+    }
+
+    // append a float (shortest round-trip form, like print)
+    fn push_float(self, n: f64) -> void {
+        self.parts.push(to_string(n))
+    }
+
+    // how many parts have been pushed
+    fn part_count(self) -> i64 {
+        return self.parts.len()
+    }
+
+    // concatenate everything pushed so far
+    fn build(self) -> string {
+        return self.parts.join("")
+    }
+
+    // concatenate with a separator between parts
+    fn build_sep(self, sep: string) -> string {
+        return self.parts.join(sep)
+    }
+
+    // start over (keep capacity on C)
+    fn clear(self) -> void {
+        while self.parts.len() > 0 {
+            self.parts.pop()
+        }
+    }
+}
+
+pub fn strbuf_new() -> StrBuf {
+    let parts: [string] = []
+    return StrBuf { parts: parts }
+}

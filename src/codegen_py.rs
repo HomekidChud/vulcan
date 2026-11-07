@@ -1052,6 +1052,24 @@ impl PyGen {
                         if at != Ty::Str { panic!("vulcan: split needs a string separator"); }
                         (format!("{recv_c}.split({ac})"), Ty::Array(Box::new(Ty::Str)))
                     }
+                    "replace" => {
+                        if recv_ty != Ty::Str { panic!("vulcan: replace is a string method"); }
+                        if args.len() != 2 { panic!("vulcan: replace(old, new) takes 2 args"); }
+                        let (a, at) = self.gen_expr(&args[0]);
+                        if at != Ty::Str { panic!("vulcan: replace needs string args"); }
+                        let (b, bt) = self.gen_expr(&args[1]);
+                        if bt != Ty::Str { panic!("vulcan: replace needs string args"); }
+                        // empty old = no-op (matches C)
+                        (format!("({recv_c} if {a} == \"\" else {recv_c}.replace({a}, {b}))"), Ty::Str)
+                    }
+                    "join" => {
+                        let elem = self.array_elem(&recv_ty);
+                        if elem != Ty::Str { panic!("vulcan: join is a [string] method"); }
+                        if args.len() != 1 { panic!("vulcan: join takes 1 arg"); }
+                        let (ac, at) = self.gen_expr(&args[0]);
+                        if at != Ty::Str { panic!("vulcan: join needs a string separator"); }
+                        (format!("{ac}.join({recv_c})"), Ty::Str)
+                    }
                     "starts_with" => {
                         if recv_ty != Ty::Str { panic!("vulcan: starts_with is a string method"); }
                         if args.len() != 1 { panic!("vulcan: starts_with takes 1 arg"); }

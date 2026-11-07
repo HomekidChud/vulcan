@@ -87,6 +87,8 @@ static int8_t vstr_starts_with(const char* s, const char* p){ return strncmp(s,p
 static int8_t vstr_ends_with(const char* s, const char* p){ size_t ls=strlen(s), lp=strlen(p); return ls>=lp && strcmp(s+ls-lp,p)==0; }
 static char* vstr_substring(const char* s, int64_t start, int64_t end){ size_t n=strlen(s); if(start<0)start=0; if(end<0)end=0; if(start>(int64_t)n)start=(int64_t)n; if(end>(int64_t)n)end=(int64_t)n; if(end<start)end=start; size_t k=(size_t)(end-start); char* r=malloc(k+1); memcpy(r,s+start,k); r[k]=0; return r; }
 static int64_t vstr_find(const char* s, const char* sub){ const char* p=strstr(s,sub); return p ? (int64_t)(p-s) : -1; }
+static char* vstr_replace(const char* s, const char* old, const char* new){ if(!old||!old[0]) return strdup(s); size_t n=strlen(s), m=strlen(old), r=strlen(new); size_t count=0; const char* p=s; while((p=strstr(p,old))){ count++; p+=m; } size_t total=n+count*(r-m)+1; char* out=malloc(total); char* w=out; const char* q=s; while((p=strstr(q,old))){ memcpy(w,q,(size_t)(p-q)); w+=p-q; memcpy(w,new,r); w+=r; q=p+m; } strcpy(w,q); return out; }
+static char* vstr_join(VecStr* v, const char* sep){ size_t sl=strlen(sep), total=0; for(int64_t i=0;i<v->len;i++) total+=strlen(v->data[i]); if(v->len>1) total+=sl*(size_t)(v->len-1); char* r=malloc(total+1); char* w=r; for(int64_t i=0;i<v->len;i++){ if(i>0){ memcpy(w,sep,sl); w+=sl; } size_t l=strlen(v->data[i]); memcpy(w,v->data[i],l); w+=l; } *w=0; return r; }
 static VecStr vstr_split(const char* s, const char* sep){ VecStr out=vstr_new(0); size_t n=strlen(s), m=strlen(sep); if(m==0){ for(size_t i=0;i<n;i++){ char* r=malloc(2); r[0]=s[i]; r[1]=0; vstr_push(&out,r);} return out; } size_t i=0; while(i<=n){ const char* p=strstr(s+i,sep); size_t j=p?(size_t)(p-s):n; size_t k=j-i; char* r=malloc(k+1); memcpy(r,s+i,k); r[k]=0; vstr_push(&out,r); if(!p)break; i=j+m; } return out; }
 static int64_t vstr_to_int(const char* s){ return (int64_t)strtoll(s,NULL,10); }
 static double vstr_to_float(const char* s){ return strtod(s,NULL); }
@@ -1370,6 +1372,15 @@ impl Codegen {
                         let push = self.vec_helper(&recv_ty, "push");
                         (format!("{push}(&{recv_c}, {ac})"), Ty::Void)
                     }
+                    "join" => {
+                        // [string].join(sep) -> string
+                        let elem = self.array_elem(&recv_ty);
+                        if elem != Ty::Str { panic!("vulcan: join is a [string] method"); }
+                        if args.len() != 1 { panic!("vulcan: join takes 1 arg"); }
+                        let (ac, at) = self.gen_expr(&args[0]);
+                        if at != Ty::Str { panic!("vulcan: join needs a string separator"); }
+                        (format!("vstr_join(&{recv_c}, {ac})"), Ty::Str)
+                    }
                     "pop" => {
                         if !args.is_empty() { panic!("vulcan: pop takes 0 args"); }
                         let elem = self.array_elem(&recv_ty);
@@ -1429,6 +1440,15 @@ impl Codegen {
                         let (ac, at) = self.gen_expr(&args[0]);
                         if at != Ty::Str { panic!("vulcan: split needs a string separator"); }
                         (format!("vstr_split({recv_c}, {ac})"), Ty::Array(Box::new(Ty::Str)))
+                    }
+                    "replace" => {
+                        if recv_ty != Ty::Str { panic!("vulcan: replace is a string method"); }
+                        if args.len() != 2 { panic!("vulcan: replace(old, new) takes 2 args"); }
+                        let (a, at) = self.gen_expr(&args[0]);
+                        if at != Ty::Str { panic!("vulcan: replace needs string args"); }
+                        let (b, bt) = self.gen_expr(&args[1]);
+                        if bt != Ty::Str { panic!("vulcan: replace needs string args"); }
+                        (format!("vstr_replace({recv_c}, {a}, {b})"), Ty::Str)
                     }
                     "starts_with" | "ends_with" => {
                         if recv_ty != Ty::Str { panic!("vulcan: {name} is a string method"); }

@@ -1,6 +1,31 @@
 // Embedded self-test suite: compiles and runs sample programs, verifying output.
 use std::process::Command;
 
+// String-builder selftest main — appended after lib/strbuf.vulcan
+const STRBUF_TEST_MAIN: &str = r#"
+fn main() -> void {
+    let s = "one two one two one"
+    print(s.replace("one", "1"))
+    print(s.replace("zzz", "1"))
+    print("no-sep".replace("", "X"))
+    let parts = s.split(" ")
+    print(parts.join("-"))
+    print(["a", "b", "c"].join(", "))
+    let b = strbuf_new()
+    b.push("hello, ")
+    b.push("world")
+    b.push_num(7)
+    print(b.build())
+    print("parts:", b.part_count())
+    b.clear()
+    b.push("a")
+    b.push("b")
+    print(b.build_sep("-"))
+}
+"#;
+
+const STRBUF_TEST_EXPECTED: &str = "1 two 1 two 1\none two one two one\nno-sep\none-two-one-two-one\na, b, c\nhello, world7\nparts: 3\na-b\n";
+
 struct Case {
     name: &'static str,
     src: &'static str,
@@ -854,6 +879,9 @@ pub fn selftest() {
         + &include_str!("../lib/engine.vulcan").replace("import render3d\n", "");
     let engine_src = engine_src + ENGINE_TEST_MAIN;
     failures += run_case("engine (all backends)", &engine_src, ENGINE_TEST_EXPECTED, &dir);
+    // the string-builder case: lib source + test main
+    let strbuf_src = include_str!("../lib/strbuf.vulcan").to_string() + STRBUF_TEST_MAIN;
+    failures += run_case("string replace/join + strbuf (all backends)", &strbuf_src, STRBUF_TEST_EXPECTED, &dir);
     for case in CASES {
         failures += run_case(case.name, case.src, case.expected, &dir);
     }
@@ -861,7 +889,7 @@ pub fn selftest() {
         eprintln!("{failures} selftest case(s) failed");
         std::process::exit(1);
     }
-    println!("vulcan selftest: {} cases passed", CASES.len() + 3);
+    println!("vulcan selftest: {} cases passed", CASES.len() + 4);
 }
 
 fn run_case(name: &str, src: &str, expected: &str, dir: &std::path::Path) -> usize {
