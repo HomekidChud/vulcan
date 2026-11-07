@@ -127,22 +127,59 @@ fn test_sum_of_squares() -> void {
 }
 "#;
 
+// The on-disk folder name for a dependency source. STRICTLY validated:
+// dependency sources are untrusted input, and `vulcan add` deletes
+// `deps/<name>` before installing, so a name like `..` (from a source ending
+// in `/..`) must never get through — it could delete outside deps/.
+fn dep_dir_name(source: &str) -> Option<String> {
+    let name = source.rsplit('/').next().unwrap_or("").trim_end_matches(".git");
+    if name.is_empty() { return None; }
+    // only plain file-name characters; no dots-only, no leading dot/dash,
+    // no separators or parent refs can survive this
+    let ok = name.len() <= 64
+        && !name.starts_with('.')
+        && !name.starts_with('-')
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
+        && name != ".";
+    if ok { Some(name.to_string()) } else { None }
+}
+
+// Remove `deps/<name>` only when the canonicalized target really is inside
+// the canonicalized deps/ directory (defense in depth on top of the name
+// validation above).
+fn safe_remove_dep(deps_dir: &Path, name: &str) {
+    let target = deps_dir.join(name);
+    let canon_deps = deps_dir.canonicalize().ok();
+    let canon_target = target.canonicalize().ok();
+    match (canon_deps, canon_target) {
+        (Some(d), Some(t)) if t.starts_with(&d) && t != d => {
+            let _ = std::fs::remove_dir_all(&t);
+        }
+        // target doesn't exist yet — fine, nothing to clean
+        (Some(_), None) => {}
+        _ => panic!("vulcan: refusing to remove {} (outside deps/)", target.display()),
+    }
+}
+
 // `vulcan add <source>` — source is "user/repo" (git) or a local path.
 pub fn add(proj: &Path, source: &str) {
     let deps_dir = proj.join("deps");
     std::fs::create_dir_all(&deps_dir).unwrap();
-    let (dep_name, spec, commit);
+    let name = match dep_dir_name(source) {
+        Some(n) => n,
+        None => panic!("vulcan: invalid dependency source `{source}`: cannot derive a safe folder name"),
+    };
+    let target = deps_dir.join(&name);
+    safe_remove_dep(&deps_dir, &name);
+    let (spec, commit);
     if source.contains("://") || (!Path::new(source).exists() && source.contains('/')) {
         // git dependency: user/repo
-        let name = source.rsplit('/').next().unwrap_or("dep").to_string();
-        let target = deps_dir.join(&name);
-        if target.exists() {
-            std::fs::remove_dir_all(&target).unwrap();
-        }
         println!("fetching {source} ...");
         let url = if source.contains("://") { source.to_string() } else { format!("https://github.com/{source}") };
         let ok = Command::new("git")
-            .args(["clone", "--depth", "1", &url, &target.to_string_lossy()])
+            // `--` ends option parsing so a URL starting with `-` is treated
+            // as a value, not a git option
+            .args(["clone", "--depth", "1", "--", &url, &target.to_string_lossy()])
             .status()
             .map(|s| s.success())
             .unwrap_or(false);
@@ -150,23 +187,16 @@ pub fn add(proj: &Path, source: &str) {
             panic!("vulcan: failed to clone {url}");
         }
         commit = git_head(&target).unwrap_or_else(|| "unknown".into());
-        dep_name = name;
         spec = format!("git:{source}");
     } else {
         // local path dependency: copy into deps/<name>
         let src = Path::new(source);
         if !src.exists() { panic!("vulcan: no such dependency source: {source}"); }
-        let name = src.file_name().map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_else(|| "dep".into());
-        let target = deps_dir.join(&name);
-        if target.exists() {
-            std::fs::remove_dir_all(&target).unwrap();
-        }
         copy_dir(src, &target);
-        dep_name = name;
-        spec = format!("path:deps/{dep_name}");
+        spec = format!("path:deps/{name}");
         commit = "local".into();
     }
+    let dep_name = name;
     let mut m = read_manifest(proj);
     m.deps.retain(|(k, _)| *k != dep_name);
     m.deps.push((dep_name.clone(), spec.clone()));
@@ -203,5 +233,47 @@ fn copy_dir(src: &Path, dst: &Path) {
         } else {
             std::fs::copy(&from, &to).unwrap();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Regression: a source ending in `/..` (or `/.`, or empty) must never
+    // produce a folder name that escapes deps/ when remove_dir_all runs.
+    #[test]
+    fn dep_names_are_sanitized() {
+        assert_eq!(dep_dir_name("user/repo"), Some("repo".into()));
+        assert_eq!(dep_dir_name("https://github.com/user/repo.git"), Some("repo".into()));
+        assert_eq!(dep_dir_name("user/my-lib_2"), Some("my-lib_2".into()));
+        // traversal / hostile names rejected
+        assert_eq!(dep_dir_name("user/repo/.."), None); // last segment is `..`
+        assert_eq!(dep_dir_name("user/repo/."), None);
+        assert_eq!(dep_dir_name("user/repo/"), None);
+        assert_eq!(dep_dir_name(""), None);
+        assert_eq!(dep_dir_name("-evil"), None);
+        assert_eq!(dep_dir_name(".hidden"), None);
+        assert_eq!(dep_dir_name("a/b/c d"), None); // space not allowed
+    }
+
+    #[test]
+    fn safe_remove_dep_stays_inside_deps() {
+        let tmp = std::env::temp_dir().join(format!("vulcan-pkg-test-{}", std::process::id()));
+        let deps = tmp.join("deps");
+        let outside = tmp.join("keepme.txt");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&deps).unwrap();
+        std::fs::write(&outside, "important").unwrap();
+        // removing a normal dep works
+        std::fs::create_dir_all(deps.join("dep")).unwrap();
+        safe_remove_dep(&deps, "dep");
+        assert!(!deps.join("dep").exists());
+        // the guard itself refuses traversal-shaped names (they are rejected
+        // earlier by dep_dir_name; safe_remove_dep must also never touch
+        // anything outside deps/)
+        let outside_canon = outside.canonicalize().unwrap();
+        assert!(outside_canon.exists()); // untouched
+        std::fs::remove_dir_all(&tmp).unwrap();
     }
 }
