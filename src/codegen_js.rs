@@ -723,7 +723,12 @@ impl JsGen {
                             panic!("vulcan: match pattern type mismatch");
                         }
                     }
-                    let cond = conds.join(" || ");
+                    let mut cond = conds.join(" || ");
+                    if let Some(g) = &arm.guard {
+                        let (gc, gt) = self.gen_expr(g);
+                        if gt != Ty::Bool { panic!("vulcan: match guard must be bool"); }
+                        cond = format!("(({cond}) && {gc})");
+                    }
                     if i == 0 {
                         self.line(&format!("if ({cond}) {{"));
                     } else {

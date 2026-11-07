@@ -771,7 +771,12 @@ impl PyGen {
                             panic!("vulcan: match pattern type mismatch");
                         }
                     }
-                    let cond = conds.join(" or ");
+                    let mut cond = conds.join(" or ");
+                    if let Some(g) = &arm.guard {
+                        let (gc, gt) = self.gen_expr(g);
+                        if gt != Ty::Bool { panic!("vulcan: match guard must be bool"); }
+                        cond = format!("(({cond}) and {gc})");
+                    }
                     if i == 0 {
                         self.line(&format!("if {cond}:"));
                     } else {

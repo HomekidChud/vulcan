@@ -72,6 +72,7 @@ pub enum ConstVal { Int(i64), Float(f64), Str(String), Bool(bool) }
 #[derive(Debug, Clone)]
 pub struct MatchArm {
     pub pats: Vec<Expr>,
+    pub guard: Option<Expr>, // `when p if cond` — arm only matches when cond holds
     pub body: Vec<Stmt>,
 }
 
@@ -407,9 +408,13 @@ impl Parser {
                         self.expect(Tok::KwWhen, "when (or else) in match");
                         let mut pats = vec![self.parse_expr()];
                         while self.eat(&Tok::Comma) { pats.push(self.parse_expr()); }
+                        let guard = if self.peek() == &Tok::KwIf {
+                            self.next();
+                            Some(self.parse_expr())
+                        } else { None };
                         self.expect(Tok::LBrace, "{ after match arm patterns");
                         let body = self.parse_block();
-                        arms.push(MatchArm { pats, body });
+                        arms.push(MatchArm { pats, guard, body });
                     }
                 }
                 if arms.is_empty() { self.err("match needs at least one `when` arm".into()); }

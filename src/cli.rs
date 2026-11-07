@@ -504,6 +504,32 @@ fn main() -> void {
         expected: "p = 4 6\nlen2 = 52\nscaled = 8 12\npts[1].y = 3\n",
     },
     Case {
+        name: "match guards (all backends)",
+        src: r#"
+fn classify(x: i64) -> string {
+    match x {
+        when 5, 10 if x > 7 { return "big-mid" }
+        when 5, 10 { return "small-mid" }
+        when 1 if false { return "never" }
+        else { return "other" }
+    }
+}
+
+fn main() -> void {
+    let xs = [1, 5, 10, 15, 20]
+    for x in xs {
+        print(x, classify(x))
+    }
+    let s = "hit"
+    match s {
+        when "hit" if s.len() == 3 { print("str guard ok") }
+        else { print("str guard fail") }
+    }
+}
+"#,
+        expected: "1 other\n5 small-mid\n10 big-mid\n15 other\n20 other\nstr guard ok\n",
+    },
+    Case {
         name: "struct value semantics (all backends)",
         src: r#"
 struct Inner { v: i64 }
