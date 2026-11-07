@@ -5,7 +5,7 @@ effort. Verify with `cargo build --release && VULCAN_CC=gcc ./target/release/vul
 after every change — all 24 cases must pass byte-identically on C, JS, and
 Python backends before pushing.
 
-## Current state (v1.5)
+## Current state (v1.6)
 
 - Language: structs, enums, impl methods, match, f-strings, defer, FFI
   (`extern "c"` + `link`), nested arrays `[[T]]` (scalar bases in struct
@@ -18,14 +18,16 @@ Python backends before pushing.
   output, including method receivers on temporaries (JS/Py clone the
   receiver so mutating methods match C's value semantics).
 - Libs: `lib/physics.vulcan` (2D rigid bodies), `lib/render3d.vulcan`
-  (Vec3, camera, software 3D), `lib/engine.vulcan` (**Engine v0.2**:
+  (Vec3, camera, software 3D), `lib/engine.vulcan` (**Engine v0.3**:
   entities, scene, heightmap terrain + `terrain_sines` procedural
   islands, ray-sphere/ray-AABB + `scene_raycast` line-of-sight,
   `scene_shoot` hitscan, `scene_fire_projectile` with swept-impact
   anti-tunneling test, `bot_think` wander/chase/attack AI with steering,
-  player controller, HUD, fixed-timestep loop).
+  player controller, HUD, fixed-timestep loop, meshes with flat shading,
+  first-person/orbit/spectator cameras, particles, weapons with
+  ammo/reload, save/load level format).
 - Tooling: IDE, package manager, `vulcan test`, `vulcan package`
-  (web/desktop/mobile/native bundles), selftest (24 cases).
+  (web/desktop/mobile/native bundles), selftest (24 cases). `vulcan doc` + GitHub Actions CI.
 
 ## Compiler / language (highest impact first)
 
@@ -105,9 +107,9 @@ proprietary product) — it is vulcan's own engine, built in pure vulcan.
       cooldown, fires projectiles).
 - [x] ~~Terrain generation~~ — DONE in v0.2 (`terrain_sines` sum-of-sines
       island heightmap with edge falloff).
-- [ ] **Mesh component** — vertex arrays `[Vec3]` + face index arrays
-      `[[i64]]` (nested arrays now make this possible), draw via `draw_tri`,
-      flat shading with `color_shade`. Next big engine item.
+- [x] ~~Mesh component~~ — DONE in v0.3 (`Mesh` struct, `mesh_vert` /
+      `mesh_face` builders, `mesh_cube` primitive, `mesh_draw` with yaw
+      rotation + flat shading via face normals, backface-agnostic).
 - [ ] **Entity-terrain collision beyond rest height** — currently entities
       just rest on the heightmap; add slope sliding and wall push-out
       (sample terrain gradient via finite differences).
@@ -116,19 +118,20 @@ proprietary product) — it is vulcan's own engine, built in pure vulcan.
       through them.
 - [ ] **Audio** — FFI to miniaudio or SDL_mixer via `extern "c"` + `link`
       (native backend only; no-op stubs on JS/Py).
-- [ ] **Level format** — serialize Scene (terrain grid + entity list) to a
-      `.json`-ish text file with file_read/file_write; a loader in vulcan.
+- [x] ~~Level format~~ — DONE in v0.3 (the `scene_save` text format IS the
+      level format: terrain grid + entities; `scene_load` rebuilds a Scene).
 - [ ] **Raylib/SDL3 binding layer** — `lib/raylib.vulcan` with `extern "c"`
       declarations for windowed GPU rendering, textures, and input at native
       speed. This is the real path to Fortnite-scale visuals.
-- [ ] **Camera modes** — first-person, orbit, and spectator (currently
-      third-person chase only).
-- [ ] **Inventory / weapon system** — slots, ammo, reload timing, fire-rate
-      gating (bot fire cooldown shows the pattern).
-- [ ] **Particles** — simple pool-based particle entities (lifetime +
-      velocity + fade), rendered as colored pixels via `px`.
-- [ ] **Save states** — serialize the whole Scene to a string (f-string or
-      manual encoder), load it back; enables checkpoints and replays.
+- [x] ~~Camera modes~~ — DONE in v0.3 (`cam_first_person`, `cam_orbit`,
+      `cam_spectator`; chase remains the default scene camera).
+- [x] ~~Weapon system~~ — DONE in v0.3 (`Weapon` struct: fire-rate gating,
+      ammo magazine, reload timing; `weapon_tick` / `weapon_can_fire` /
+      `weapon_fire` / `weapon_reload`).
+- [x] ~~Particles~~ — DONE in v0.3 (`Particle` pool on Scene capped at
+      `MAX_PARTICLES`, gravity + lifetime, `draw_particles` with fading).
+- [x] ~~Save states~~ — DONE in v0.3 (`scene_save` / `scene_load` text
+      format; %.6g floats round-trip identically on all backends).
 - [ ] **Multiplayer-ready determinism** — fixed timestep already helps;
       document + test that identical input sequences give identical
       scenes across backends (extend selftest with a 1000-tick
@@ -136,13 +139,16 @@ proprietary product) — it is vulcan's own engine, built in pure vulcan.
 
 ## Tooling / ecosystem
 
-- [ ] `vulcan doc` — generate a docs page from `pub fn` signatures + comments.
+- [x] ~~`vulcan doc`~~ — DONE in v1.6 (`vulcan doc <file|dir>` prints
+      structs, fns, impl methods, consts; `vulcan doc lib` documents the
+      whole standard library).
 - [ ] `vulcan fmt` — canonical formatter (canonical style is already used
       throughout lib/ and examples/).
 - [ ] LSP server (hover, go-to-definition) — reuse the lexer/parser crates.
 - [ ] Package registry: `vulcan add` currently does git/path only; add a
       central index repo.
-- [ ] CI: GitHub Actions running build + selftest on every push.
+- [x] ~~CI~~ — DONE in v1.6 (`.github/workflows/ci.yml`: build + selftest
+      on every push/PR to master; watch the Actions tab for the first run).
 - [ ] **Playground examples for the IDE** — add engine demos (terrain
       flyover, bot arena) to `src/ide.rs` examples list once the engine
       renders something visual.

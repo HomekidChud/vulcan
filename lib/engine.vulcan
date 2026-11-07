@@ -55,8 +55,20 @@ pub const AI_ATTACK: i64 = 3
 // Scene / world
 // ---------------------------------------------------------------------------
 
+// A lightweight visual effect particle: flies with velocity, fades over
+// its lifetime, drawn as a small shaded rectangle.
+pub struct Particle {
+    active: bool,
+    pos: Vec3,
+    vel: Vec3,
+    life: f64,      // seconds remaining
+    max_life: f64,  // life at spawn (for fading)
+    color: i64,     // 0xRRGGBB
+}
+
 pub struct Scene {
     entities: [Entity],
+    particles: [Particle],
     next_id: i64,
     camera: Camera,
     time: f64,              // simulated seconds
@@ -69,8 +81,10 @@ pub struct Scene {
 pub fn scene_new() -> Scene {
     let ents: [Entity] = []
     let terr: [[f64]] = []
+    let parts: [Particle] = []
     return Scene {
         entities: ents,
+        particles: parts,
         next_id: 1,
         camera: Camera { x: 0.0, y: 10.0, z: 0.0, yaw: 0.0, pitch: 0.0 },
         time: 0.0,
@@ -209,6 +223,7 @@ pub fn scene_step(s: Scene, dt: f64) -> Scene {
         s.entities[i] = e
     }
     s = scene_step_projectiles(s, dt)
+    s = scene_step_particles(s, dt)
     s.time = s.time + dt
     return s
 }
@@ -581,6 +596,345 @@ pub fn engine_tick(s: Scene, frame_dt: f64, fixed_dt: f64) -> Scene {
     while remaining >= fixed_dt {
         s = scene_step(s, fixed_dt)
         remaining = remaining - fixed_dt
+    }
+    return s
+}
+
+// ---------------------------------------------------------------------------
+// Particles (Engine v0.3)
+// ---------------------------------------------------------------------------
+
+// Spawn a particle (pos/vel are copied — no aliasing on JS/Py backends).
+// The pool is capped; the oldest particle is dropped when full.
+pub const MAX_PARTICLES: i64 = 256
+
+pub fn scene_spawn_particle(s: Scene, pos: Vec3, vel: Vec3, life: f64, color: i64) -> Scene {
+    if s.particles.len() >= MAX_PARTICLES {
+        // recycle the first slot
+        s.particles[0] = Particle {
+            active: true,
+            pos: Vec3 { x: pos.x, y: pos.y, z: pos.z },
+            vel: Vec3 { x: vel.x, y: vel.y, z: vel.z },
+            life: life,
+            max_life: life,
+            color: color,
+        }
+        return s
+    }
+    s.particles.push(Particle {
+        active: true,
+        pos: Vec3 { x: pos.x, y: pos.y, z: pos.z },
+        vel: Vec3 { x: vel.x, y: vel.y, z: vel.z },
+        life: life,
+        max_life: life,
+        color: color,
+    })
+    return s
+}
+
+// Move particles, apply a fraction of gravity, expire dead ones.
+fn scene_step_particles(s: Scene, dt: f64) -> Scene {
+    for i in 0 .. s.particles.len() {
+        let p = s.particles[i]
+        if !p.active { continue }
+        p.life = p.life - dt
+        if p.life <= 0.0 {
+            p.active = false
+            s.particles[i] = p
+            continue
+        }
+        p.vel.y = p.vel.y + s.gravity * 0.3 * dt
+        p.pos = p.pos.add(p.vel.scaled(dt))
+        s.particles[i] = p
+    }
+    return s
+}
+
+// Draw live particles as fading 2x2 rectangles.
+pub fn draw_particles(s: Scene) -> void {
+    for i in 0 .. s.particles.len() {
+        let p = s.particles[i]
+        if !p.active { continue }
+        let pr = project(s.camera, p.pos)
+        if pr.visible != 1 { continue }
+        let t = p.life / p.max_life
+        if t < 0.0 { t = 0.0 }
+        draw_rect(pr.sx - 1.0, pr.sy - 1.0, 2.0, 2.0, color_shade(p.color, 0.3 + 0.7 * t))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Camera modes (Engine v0.3)
+// ---------------------------------------------------------------------------
+
+// First-person: camera at the entity's eye height, looking where you aim.
+pub fn cam_first_person(eye: Vec3, yaw: f64, pitch: f64) -> Camera {
+    return Camera { x: eye.x, y: eye.y + 1.6, z: eye.z, yaw: yaw, pitch: pitch }
+}
+
+// Orbit: circle around a target point at angle (radians), distance, height.
+pub fn cam_orbit(target: Vec3, angle: f64, dist: f64, height: f64) -> Camera {
+    return Camera {
+        x: target.x + cos(angle) * dist,
+        y: target.y + height,
+        z: target.z + sin(angle) * dist,
+        yaw: angle + 3.14159265,
+        pitch: -0.35,
+    }
+}
+
+// Spectator: free-fly camera, same shape as first-person.
+pub fn cam_spectator(pos: Vec3, yaw: f64, pitch: f64) -> Camera {
+    return Camera { x: pos.x, y: pos.y, z: pos.z, yaw: yaw, pitch: pitch }
+}
+
+// ---------------------------------------------------------------------------
+// Meshes (Engine v0.3)
+// ---------------------------------------------------------------------------
+
+// A renderable mesh: vertex list + triangle faces (index triples),
+// drawn flat-shaded with the software renderer (draw_tri).
+pub struct Mesh {
+    verts: [Vec3],
+    faces: [[i64]],
+    color: i64,
+}
+
+pub fn mesh_new(color: i64) -> Mesh {
+    let vs: [Vec3] = []
+    let fs: [[i64]] = []
+    return Mesh { verts: vs, faces: fs, color: color }
+}
+
+pub fn mesh_vert(m: Mesh, v: Vec3) -> Mesh {
+    m.verts.push(Vec3 { x: v.x, y: v.y, z: v.z })
+    return m
+}
+
+pub fn mesh_face(m: Mesh, a: i64, b: i64, c: i64) -> Mesh {
+    let f: [i64] = [a, b, c]
+    m.faces.push(f)
+    return m
+}
+
+// A cube mesh centered on the origin, half-extent `half` (12 triangles).
+pub fn mesh_cube(half: f64, color: i64) -> Mesh {
+    let m = mesh_new(color)
+    // 8 corners
+    m = mesh_vert(m, Vec3 { x: -half, y: -half, z: -half })
+    m = mesh_vert(m, Vec3 { x:  half, y: -half, z: -half })
+    m = mesh_vert(m, Vec3 { x:  half, y: -half, z:  half })
+    m = mesh_vert(m, Vec3 { x: -half, y: -half, z:  half })
+    m = mesh_vert(m, Vec3 { x: -half, y:  half, z: -half })
+    m = mesh_vert(m, Vec3 { x:  half, y:  half, z: -half })
+    m = mesh_vert(m, Vec3 { x:  half, y:  half, z:  half })
+    m = mesh_vert(m, Vec3 { x: -half, y:  half, z:  half })
+    // 6 faces, 2 triangles each (CCW seen from outside)
+    m = mesh_face(m, 1, 2, 6); m = mesh_face(m, 1, 6, 5)  // +X
+    m = mesh_face(m, 0, 4, 7); m = mesh_face(m, 0, 7, 3)  // -X
+    m = mesh_face(m, 4, 5, 6); m = mesh_face(m, 4, 6, 7)  // +Y
+    m = mesh_face(m, 0, 3, 2); m = mesh_face(m, 0, 2, 1)  // -Y
+    m = mesh_face(m, 2, 3, 7); m = mesh_face(m, 2, 7, 6)  // +Z
+    m = mesh_face(m, 0, 1, 5); m = mesh_face(m, 0, 5, 4)  // -Z
+    return m
+}
+
+// Draw a mesh at `pos` rotated `yaw` radians around Y, flat-shaded by a
+// fixed light direction. Skips triangles with any vertex behind the camera.
+pub fn mesh_draw(m: Mesh, cam: Camera, pos: Vec3, yaw: f64) -> void {
+    let light = Vec3 { x: 0.4, y: 1.0, z: 0.3 }.normalized()
+    let cy = cos(yaw)
+    let sy = sin(yaw)
+    for f in 0 .. m.faces.len() {
+        let face = m.faces[f]
+        if face.len() < 3 { continue }
+        let a = m.verts[face[0]]
+        let b = m.verts[face[1]]
+        let c = m.verts[face[2]]
+        // rotate around Y then translate
+        let ra = Vec3 { x: a.x * cy + a.z * sy, y: a.y, z: -a.x * sy + a.z * cy }.add(pos)
+        let rb = Vec3 { x: b.x * cy + b.z * sy, y: b.y, z: -b.x * sy + b.z * cy }.add(pos)
+        let rc = Vec3 { x: c.x * cy + c.z * sy, y: c.y, z: -c.x * sy + c.z * cy }.add(pos)
+        // flat shading from the face normal
+        let n = rb.sub(ra).cross(rc.sub(ra)).normalized()
+        let lum = n.dot(light)
+        if lum < 0.0 { lum = -lum }
+        let col = color_shade(m.color, 0.35 + 0.65 * lum)
+        let pa = project(cam, ra)
+        let pb = project(cam, rb)
+        let pc = project(cam, rc)
+        if pa.visible + pb.visible + pc.visible == 3 {
+            draw_tri(pa.sx, pa.sy, pa.depth, pb.sx, pb.sy, pb.depth, pc.sx, pc.sy, pc.depth, col)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Weapons (Engine v0.3)
+// ---------------------------------------------------------------------------
+
+// A weapon: fire-rate gating, ammo magazine, reload timing. Works with
+// scene_shoot (hitscan) or scene_fire_projectile (ballistic).
+pub struct Weapon {
+    name: string,
+    damage: f64,
+    fire_cooldown: f64,  // seconds between shots
+    cooldown: f64,       // seconds until ready (0 = ready)
+    hitscan: bool,       // true = scene_shoot, false = projectile
+    range: f64,          // hitscan range / projectile lifetime hint
+    mag_size: i64,
+    ammo: i64,
+    reload_time: f64,    // seconds a reload takes
+    reloading: f64,      // seconds of reload left (0 = not reloading)
+}
+
+pub fn weapon_new(name: string, damage: f64, fire_cooldown: f64, hitscan: bool, range: f64, mag_size: i64, reload_time: f64) -> Weapon {
+    return Weapon {
+        name: name,
+        damage: damage,
+        fire_cooldown: fire_cooldown,
+        cooldown: 0.0,
+        hitscan: hitscan,
+        range: range,
+        mag_size: mag_size,
+        ammo: mag_size,
+        reload_time: reload_time,
+        reloading: 0.0,
+    }
+}
+
+// Advance timers. Call once per tick with the same dt as scene_step.
+pub fn weapon_tick(w: Weapon, dt: f64) -> Weapon {
+    if w.cooldown > 0.0 {
+        w.cooldown = w.cooldown - dt
+        if w.cooldown < 0.0 { w.cooldown = 0.0 }
+    }
+    if w.reloading > 0.0 {
+        w.reloading = w.reloading - dt
+        if w.reloading <= 0.0 {
+            w.reloading = 0.0
+            w.ammo = w.mag_size
+        }
+    }
+    return w
+}
+
+pub fn weapon_can_fire(w: Weapon) -> bool {
+    return w.cooldown <= 0.0 && w.reloading <= 0.0 && w.ammo > 0
+}
+
+// Consume a shot (ammo + cooldown). Check weapon_can_fire first.
+pub fn weapon_fire(w: Weapon) -> Weapon {
+    w.ammo = w.ammo - 1
+    w.cooldown = w.fire_cooldown
+    return w
+}
+
+// Start a reload (only useful if ammo < mag_size).
+pub fn weapon_reload(w: Weapon) -> Weapon {
+    if w.ammo < w.mag_size && w.reloading <= 0.0 {
+        w.reloading = w.reload_time
+    }
+    return w
+}
+
+// ---------------------------------------------------------------------------
+// Save / load (Engine v0.3)
+// ---------------------------------------------------------------------------
+
+// Serialize a Scene to a text file (scene_save) and read it back
+// (scene_load). Floats are stored with 6 significant digits (%.6g), so a
+// round-trip is lossy at the 7th digit — plenty for checkpoints and level
+// files. Entity names must not contain spaces.
+
+pub fn scene_save(s: Scene, path: string) -> void {
+    let out = "VULCANSCENE1\n"
+    out = out + "time " + to_string(s.time) + "\n"
+    out = out + "gravity " + to_string(s.gravity) + "\n"
+    out = out + "next_id " + to_string(s.next_id) + "\n"
+    out = out + "terrain " + to_string(s.terrain.len()) + " " + to_string(s.terrain_scale) + "\n"
+    for r in 0 .. s.terrain.len() {
+        let row = s.terrain[r]
+        for c in 0 .. row.len() {
+            if c > 0 { out = out + " " }
+            out = out + to_string(row[c])
+        }
+        out = out + "\n"
+    }
+    for i in 0 .. s.entities.len() {
+        let e = s.entities[i]
+        if !e.active { continue }
+        out = out + "ent "
+        out = out + to_string(e.id) + " " + to_string(e.kind) + " " + to_string(e.radius) + " "
+        out = out + to_string(e.hp) + " " + to_string(e.max_hp) + " " + to_string(e.speed) + " "
+        out = out + to_string(e.ai_state) + " " + to_string(e.target_id) + " "
+        out = out + to_string(e.pos.x) + " " + to_string(e.pos.y) + " " + to_string(e.pos.z) + " "
+        out = out + to_string(e.vel.x) + " " + to_string(e.vel.y) + " " + to_string(e.vel.z) + " "
+        out = out + e.name + "\n"
+    }
+    file_write(path, out)
+}
+
+pub fn scene_load(path: string) -> Scene {
+    let s = scene_new()
+    let raw = file_read(path)
+    let lines = raw.split("\n")
+    let li = 0
+    // header
+    li = 1
+    // time / gravity / next_id
+    let toks = lines[li].split(" ")
+    s.time = to_float(toks[1])
+    li = li + 1
+    toks = lines[li].split(" ")
+    s.gravity = to_float(toks[1])
+    li = li + 1
+    toks = lines[li].split(" ")
+    s.next_id = to_int(toks[1])
+    li = li + 1
+    // terrain
+    toks = lines[li].split(" ")
+    let n = to_int(toks[1])
+    s.terrain_scale = to_float(toks[2])
+    li = li + 1
+    let rows: [[f64]] = []
+    for r in 0 .. n {
+        let row: [f64] = []
+        let h = lines[li].split(" ")
+        for c in 0 .. n {
+            row.push(to_float(h[c]))
+        }
+        rows.push(row)
+        li = li + 1
+    }
+    s.terrain = rows
+    s.terrain_size = (n as f64) * s.terrain_scale
+    // entities
+    for k in li .. lines.len() {
+        let line = lines[k]
+        if line.len() < 4 { continue }
+        if line.substring(0, 4) != "ent " { continue }
+        let t = line.split(" ")
+        if t.len() < 16 { continue }
+        let e = Entity {
+            id: to_int(t[1]),
+            active: true,
+            name: t[15],
+            kind: to_int(t[2]),
+            pos: Vec3 { x: to_float(t[9]), y: to_float(t[10]), z: to_float(t[11]) },
+            vel: Vec3 { x: to_float(t[12]), y: to_float(t[13]), z: to_float(t[14]) },
+            radius: to_float(t[3]),
+            hp: to_float(t[4]),
+            max_hp: to_float(t[5]),
+            speed: to_float(t[6]),
+            alive: true,
+            ai_state: to_int(t[7]),
+            ai_timer: 0.0,
+            target_id: to_int(t[8]),
+            damage: 0.0,
+            lifetime: 0.0,
+        }
+        s.entities.push(e)
     }
     return s
 }

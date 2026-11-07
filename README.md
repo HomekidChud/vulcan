@@ -13,6 +13,39 @@ fn main() {
 }
 ```
 
+## Vulcan 1.6 — what's new
+
+**Vulcan Engine v0.3** — meshes, cameras, particles, weapons, save files — plus `vulcan doc` and CI.
+
+- **Meshes** — `Mesh` with vertex arrays `[Vec3]` and triangle faces `[[i64]]`:
+  ```vulcan
+  let cube = mesh_cube(1.0, 0x8040C0)          // 8 verts, 12 tris
+  mesh_draw(cube, s.camera, entity_pos, yaw)   // flat-shaded, depth-buffered
+  ```
+  `mesh_draw` rotates around Y, shades each face by its normal against a fixed
+  light, and skips triangles with any vertex behind the camera.
+- **Camera modes** — `cam_first_person(eye, yaw, pitch)`,
+  `cam_orbit(target, angle, dist, height)`, `cam_spectator(pos, yaw, pitch)`
+  alongside the existing third-person chase camera.
+- **Particles** — `scene_spawn_particle(s, pos, vel, life, color)` into a capped
+  pool (256); particles fly, feel 30% gravity, and `draw_particles(s)` renders
+  them as fading 2x2 rectangles.
+- **Weapons** — the `Weapon` struct with fire-rate gating, ammo magazine, and
+  reload timing:
+  ```vulcan
+  let w = weapon_new("rifle", 25.0, 0.15, true, 60.0, 5, 2.0)
+  if weapon_can_fire(w) { w = weapon_fire(w) }
+  w = weapon_tick(w, dt)      // call every tick, same dt as scene_step
+  ```
+- **Save files / level format** — `scene_save(s, "level.txt")` writes terrain +
+  entities to a text file; `scene_load("level.txt")` rebuilds the Scene.
+  Floats round-trip identically on all three backends.
+- **`vulcan doc <file|dir>`** — print the public API (structs, fns, impl
+  methods, consts) of a file or a whole directory: `vulcan doc lib`.
+- **CI** — GitHub Actions builds and runs the full selftest on every push.
+- Engine selftest now covers all v0.3 systems (24 cases total, byte-identical
+  across C/JS/Python).
+
 ## Vulcan 1.5 — what's new
 
 Method calls anywhere, any-order functions, and the **Vulcan Engine v0.2**.

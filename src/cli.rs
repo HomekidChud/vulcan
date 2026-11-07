@@ -94,10 +94,55 @@ fn main() -> void {
         steps += 1
     }
     print("bot hp after projectile:", t.entities[tbi].hp, "steps:", steps)
+    // ---- v0.3: camera modes, meshes, particles, weapons, save/load ----
+    let c1 = cam_first_person(Vec3 { x: 1.0, y: 2.0, z: 3.0 }, 0.5, -0.2)
+    print("fp cam:", c1.x, c1.y, c1.z, c1.yaw, c1.pitch)
+    let c2 = cam_orbit(Vec3 { x: 0.0, y: 0.0, z: 0.0 }, 0.0, 10.0, 5.0)
+    print("orbit cam:", c2.x, c2.y, c2.z)
+    let cube = mesh_cube(1.0, 0x8040C0)
+    print("cube verts:", cube.verts.len(), "faces:", cube.faces.len())
+    let ps = scene_new()
+    ps = scene_spawn_particle(ps, Vec3 { x: 1.0, y: 2.0, z: 3.0 }, Vec3 { x: 0.0, y: 1.0, z: 0.0 }, 0.5, 0x00FF00)
+    ps = scene_spawn_particle(ps, Vec3 { x: 2.0, y: 2.0, z: 3.0 }, Vec3 { x: 0.0, y: 1.0, z: 0.0 }, 1.5, 0x0000FF)
+    print("particles:", ps.particles.len())
+    ps = scene_step(ps, 0.1)
+    print("after step p0 life:", ps.particles[0].life, "p0 y:", ps.particles[0].pos.y, "p1 life:", ps.particles[1].life)
+    ps = scene_step(ps, 0.5)
+    print("p0 active:", ps.particles[0].active, "p1 life:", ps.particles[1].life)
+    let w = weapon_new("rifle", 25.0, 0.15, true, 60.0, 5, 2.0)
+    print("weapon:", w.name, "ammo:", w.ammo, "can fire:", weapon_can_fire(w))
+    w = weapon_fire(w)
+    print("after fire ammo:", w.ammo, "can fire:", weapon_can_fire(w))
+    w = weapon_tick(w, 0.2)
+    print("after tick can fire:", weapon_can_fire(w))
+    let shots = 0
+    while w.ammo > 0 {
+        if weapon_can_fire(w) {
+            w = weapon_fire(w)
+            shots = shots + 1
+        }
+        w = weapon_tick(w, 0.05)
+    }
+    print("total shots:", shots, "ammo:", w.ammo)
+    w = weapon_reload(w)
+    print("reloading:", w.reloading > 0.0)
+    w = weapon_tick(w, 2.5)
+    print("after reload ammo:", w.ammo, "reloading:", w.reloading)
+    let sv = scene_new()
+    sv = terrain_sines(sv, 8, 3.0)
+    sv = scene_spawn(sv, "player", ENTITY_KIND_PLAYER, Vec3 { x: 1.0, y: 2.0, z: 3.0 })
+    sv = scene_spawn(sv, "bot", ENTITY_KIND_BOT, Vec3 { x: -4.0, y: 0.5, z: 6.0 })
+    sv.entities[1].hp = 70.0
+    scene_save(sv, "selftest_engine_save.txt")
+    let ld = scene_load("selftest_engine_save.txt")
+    print("loaded time:", ld.time, "gravity:", ld.gravity, "next_id:", ld.next_id)
+    print("loaded terrain n:", ld.terrain.len(), "h[0][0]:", ld.terrain[0][0])
+    print("loaded ents:", ld.entities.len(), "bot hp:", ld.entities[1].hp, "bot name:", ld.entities[1].name)
+    print("loaded bot pos:", ld.entities[1].pos.x, ld.entities[1].pos.y, ld.entities[1].pos.z)
 }
 "#;
 
-const ENGINE_TEST_EXPECTED: &str = "spawned: 1 2 3 alive bots: 2\nplayer settled at y: 0.5 time: 2\nterrain at (0,0): 0 at (16,16): 0\nafter reap, bots alive: 1\nafter tick, time: 2.1\nray_sphere hit: 9\nray_sphere miss: -1\nray_aabb hit: 5\nray_aabb miss: false\nterrain corners flat: 0 0\nterrain center: 3.76924\nbot state: 3 vel z: -8\nbot hp after hit: 70\nentities now: 4\nbot hp after projectile: 45 steps: 4\n";
+const ENGINE_TEST_EXPECTED: &str = "spawned: 1 2 3 alive bots: 2\nplayer settled at y: 0.5 time: 2\nterrain at (0,0): 0 at (16,16): 0\nafter reap, bots alive: 1\nafter tick, time: 2.1\nray_sphere hit: 9\nray_sphere miss: -1\nray_aabb hit: 5\nray_aabb miss: false\nterrain corners flat: 0 0\nterrain center: 3.76924\nbot state: 3 vel z: -8\nbot hp after hit: 70\nentities now: 4\nbot hp after projectile: 45 steps: 4\nfp cam: 1 3.6 3 0.5 -0.2\norbit cam: 10 5 0\ncube verts: 8 faces: 12\nparticles: 2\nafter step p0 life: 0.4 p0 y: 2.01 p1 life: 1.4\np0 active: false p1 life: 0.9\nweapon: rifle ammo: 5 can fire: true\nafter fire ammo: 4 can fire: false\nafter tick can fire: true\ntotal shots: 4 ammo: 0\nreloading: true\nafter reload ammo: 5 reloading: 0\nloaded time: 0 gravity: -30 next_id: 3\nloaded terrain n: 8 h[0][0]: 0\nloaded ents: 2 bot hp: 70 bot name: bot\nloaded bot pos: -4 0.5 6\n";
 
 // 3D renderer selftest main — concatenated after lib/render3d.vulcan
 const RENDER3D_TEST_MAIN: &str = r#"
@@ -603,6 +648,85 @@ fn main() -> void {
         expected: "clamp: 3 0 2\nlerp: 2.5 15\nsign: -1 0 1 -1 0 1\n",
     },
 ];
+
+// ---- `vulcan doc` — print the public API of a file (or every lib/*.vulcan) ----
+
+fn doc_ty(t: &crate::parser::Ty) -> String {
+    use crate::parser::Ty::*;
+    match t {
+        I64 => "i64".into(), F64 => "f64".into(), Bool => "bool".into(),
+        Str => "string".into(), Void => "void".into(),
+        Array(inner) => format!("[{}]", doc_ty(inner)),
+        Struct(n) => n.clone(),
+    }
+}
+
+pub fn doc(path: &str) {
+    use crate::parser::{Item, ConstVal};
+    let p = std::path::Path::new(path);
+    let files: Vec<(String, String)> = if p.is_dir() {
+        let mut v = vec![];
+        if let Ok(rd) = std::fs::read_dir(p) {
+            let mut names: Vec<_> = rd.filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|e| e.extension().map(|x| x == "vulcan").unwrap_or(false))
+                .collect();
+            names.sort();
+            for n in names {
+                if let Ok(src) = std::fs::read_to_string(&n) {
+                    v.push((n.file_name().unwrap().to_string_lossy().into_owned(), src));
+                }
+            }
+        }
+        v
+    } else {
+        match std::fs::read_to_string(p) {
+            Ok(src) => vec![(p.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default(), src)],
+            Err(e) => { eprintln!("vulcan: cannot read {path}: {e}"); std::process::exit(1); }
+        }
+    };
+    if files.is_empty() {
+        eprintln!("vulcan: no .vulcan files found in {path}");
+        std::process::exit(1);
+    }
+    for (name, src) in files {
+        println!("=== {name} ===");
+        let program = crate::parser::parse_program(&crate::lexer::lex(&src));
+        for item in program {
+            match item {
+                Item::Const(c) => {
+                    let val = match c.value {
+                        ConstVal::Int(v) => v.to_string(),
+                        ConstVal::Float(v) => format!("{v}"),
+                        ConstVal::Str(v) => format!("{v:?}"),
+                        ConstVal::Bool(v) => v.to_string(),
+                    };
+                    println!("const {} = {}", c.name, val);
+                }
+                Item::Struct(s) => {
+                    println!("struct {} {{", s.name);
+                    for (f, t) in s.fields {
+                        println!("    {}: {},", f, doc_ty(&t));
+                    }
+                    println!("}}");
+                }
+                Item::Fn(f) => {
+                    let params = f.params.iter().map(|(n, t)| format!("{}: {}", n, doc_ty(t)))
+                        .collect::<Vec<_>>().join(", ");
+                    println!("fn {}({}) -> {}", f.name, params, doc_ty(&f.ret));
+                }
+                Item::Impl(i) => {
+                    for m in &i.fns {
+                        let params = m.params.iter().map(|(n, t)| format!("{}: {}", n, doc_ty(t)))
+                            .collect::<Vec<_>>().join(", ");
+                        println!("impl {}: fn {}({}) -> {}", i.struct_name, m.name, params, doc_ty(&m.ret));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+}
 
 pub fn selftest() {
     let dir = std::env::temp_dir().join("vulcan_selftest");

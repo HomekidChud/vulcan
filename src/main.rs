@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn usage() {
-    println!("Vulcan 1.5 — a small, fast language with multiple backends,
+    println!("Vulcan 1.6 — a small, fast language with multiple backends,
 a 2D physics engine and a browser IDE
 
 USAGE (single file):
@@ -27,6 +27,7 @@ USAGE (single file):
   vulcan package <file.vulcan> --platform <p>   ship it: web, desktop,
                                mobile (iOS+Android), linux, windows, macos
   vulcan test <file.vulcan>   run every fn test_*() in the file
+  vulcan doc <file|dir>       print the public API (structs, fns, consts)
 
 add --target js or --target py to run/emit/bench for the JavaScript
 (Node.js) or Python backend — same program, same output, different
@@ -82,6 +83,14 @@ fn main() {
     let cmd = args[1].clone();
     if cmd == "selftest" {
         cli::selftest();
+        return;
+    }
+    if cmd == "doc" {
+        if args.len() < 3 {
+            eprintln!("usage: vulcan doc <file.vulcan|dir>");
+            std::process::exit(1);
+        }
+        cli::doc(&args[2]);
         return;
     }
     if cmd == "ide" {
