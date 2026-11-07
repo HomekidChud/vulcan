@@ -13,6 +13,31 @@ fn main() {
 }
 ```
 
+## Vulcan 1.8 — what's new
+
+**Mobile support and the first real game.** You can now build and play
+actual games — on desktop and phones.
+
+- **Held-key fix** — `key_down()` in web builds used to only see fresh
+  key presses, which made movement feel dead in the browser. Web
+  workers now track held keys via keydown/keyup, so WASD works like a
+  native game.
+- **Touch controls (every web bundle)** — on touch devices the page
+  shows a virtual joystick (left half of the screen), drag-to-look
+  (right half), and FIRE / JUMP buttons. The joystick maps to WASD key
+  codes, so games need zero extra code for mobile. The web link runs
+  directly on phones — no install.
+- **`player_move_cam` (Engine v0.5)** — camera-relative WASD + jump for
+  first-person games. You aim by setting `s.camera` (e.g.
+  `cam_first_person` + mouse look); the engine moves the player.
+- **VULCAN ARENA** (`examples/arena.vulcan`) — a complete wave-survival
+  FPS built in ~200 lines of pure Vulcan: 5 waves of bots, a hitscan
+  rifle with reload and muzzle flash, medkit pickups, minimap,
+  compass, HUD, game-over/victory screens. No engine changes were
+  needed — proof the library API ships games.
+- **Drag-to-look** — mouse look in web builds now works by dragging
+  (no pointer lock), which also works on touch.
+
 ## Vulcan 1.7 — what's new
 
 **Vulcan Engine v0.4** — antialiasing, a living atmosphere, and mouse look.

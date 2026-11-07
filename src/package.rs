@@ -118,11 +118,13 @@ fn json_escape(s: &str) -> String {
 
 const WORKER_SHIM: &str = r#"// Vulcan web worker shim: stdin/stdout/terminal/files for the browser
 let __vkeys = [];
+let __held = new Set();
 let __vfs = new Map();
 onmessage = (e) => {
     const d = e.data || {};
     if (d.init) { for (const k in d.fs) __vfs.set(k, d.fs[k]); runMain(); }
-    if (d.keys) __vkeys.push(...d.keys);
+    if (d.keys) { for (const k of d.keys) { __vkeys.push(k); __held.add(k); } }
+    if (d.keysup) { for (const k of d.keysup) __held.delete(k); }
     if (d.mouse) { __mdx += d.mouse[0]; __mdy += d.mouse[1]; }
 };
 const process = {
@@ -145,6 +147,7 @@ const WORKER_MAIN: &str = r#"
 // ---- worker bootstrap: rebind I/O to the browser, then run ----
 __out = (s) => postMessage({ out: s });
 __key_ready = () => __vkeys.length > 0;
+__key_down = (c) => __held.has(c);
 __read_key = () => { const k = __vkeys.shift(); return k === undefined ? 0 : k; };
 __input = () => {
     let line = "";
@@ -207,13 +210,35 @@ const HTML_TEMPLATE: &str = r##"<!DOCTYPE html>
     #vscreen {
         display: none; background: #000; border: 1px solid #23252c; border-radius: 8px;
         width: min(720px, 100%); image-rendering: pixelated; image-rendering: crisp-edges;
+        touch-action: none;
+    }
+    #touchui { display: none; }
+    .tbtn {
+        position: fixed; bottom: 24px; width: 74px; height: 74px; border-radius: 50%;
+        background: rgba(120, 130, 150, 0.35); border: 2px solid rgba(200, 210, 230, 0.5);
+        color: #e8edf2; font-size: 13px; font-weight: bold; text-align: center;
+        line-height: 70px; user-select: none; -webkit-user-select: none; z-index: 10;
+    }
+    #firebtn { right: 20px; }
+    #jumpbtn { right: 108px; bottom: 110px; width: 60px; height: 60px; line-height: 56px; }
+    #joy {
+        position: fixed; bottom: 20px; left: 20px; width: 96px; height: 96px;
+        border-radius: 50%; background: rgba(120, 130, 150, 0.18);
+        border: 2px solid rgba(200, 210, 230, 0.35); z-index: 10;
+        pointer-events: none;
+    }
+    #knob {
+        position: absolute; left: 26px; top: 26px; width: 44px; height: 44px;
+        border-radius: 50%; background: rgba(200, 210, 230, 0.45);
+        pointer-events: none;
     }
     #status { padding: 8px 16px; font-size: 12px; color: #6c707a; border-top: 1px solid #23252c; }
 </style>
 </head>
 <body>
-<header><span><b>__TITLE__</b> — built with <a href="https://github.com/HomekidChud/vulcan">Vulcan</a></span><span>keys: WASD · C camera · drag to look</span></header>
+<header><span><b>__TITLE__</b> — built with <a href="https://github.com/HomekidChud/vulcan">Vulcan</a></span><span>WASD move · F fire · R restart · drag to look</span></header>
 <main><canvas id="vscreen" width="256" height="144"></canvas><div id="term"><pre id="screen"></pre></div></main>
+<div id="touchui"><div id="joy"><div id="knob"></div></div><div class="tbtn" id="firebtn">FIRE</div><div class="tbtn" id="jumpbtn">JUMP</div></div>
 <div id="status">running…</div>
 <script>
 "use strict";
@@ -349,7 +374,13 @@ document.addEventListener("keydown", (e) => {
     let code = null;
     if (e.key.length === 1) code = e.key.charCodeAt(0);
     else if (KEYMAP[e.key] !== undefined) code = KEYMAP[e.key];
-    if (code !== null) { e.preventDefault(); worker.postMessage({ keys: [code] }); }
+    if (code !== null && !e.repeat) { e.preventDefault(); worker.postMessage({ keys: [code] }); }
+});
+document.addEventListener("keyup", (e) => {
+    let code = null;
+    if (e.key.length === 1) code = e.key.charCodeAt(0);
+    else if (KEYMAP[e.key] !== undefined) code = KEYMAP[e.key];
+    if (code !== null) worker.postMessage({ keysup: [code] });
 });
 // mouse look: drag on the canvas to look around (like an orbit control)
 const vscreen = document.getElementById("vscreen");
@@ -359,6 +390,57 @@ window.addEventListener("mouseup", () => { __mdown = false; });
 document.addEventListener("mousemove", (e) => {
     if (__mdown) worker.postMessage({ mouse: [e.movementX || 0, e.movementY || 0] });
 });
+// touch controls: left half = virtual joystick (WASD), right half = look,
+// FIRE and JUMP buttons (shown only on touch devices)
+const isTouch = "ontouchstart" in window || navigator.maxTouchPoints > 0;
+const touchUI = document.getElementById("touchui");
+if (isTouch) touchUI.style.display = "block";
+const K = { w: 87, a: 65, s: 83, d: 68, f: 102, space: 32 };
+let joyId = null, joyX0 = 0, joyY0 = 0, joyKeys = [];
+let lookId = null, lookX = 0, lookY = 0;
+function joyUpdate(dx, dy) {
+    const want = [];
+    if (dy < -18) want.push(K.w);
+    if (dy > 18) want.push(K.s);
+    if (dx < -18) want.push(K.a);
+    if (dx > 18) want.push(K.d);
+    for (const k of want) if (!joyKeys.includes(k)) worker.postMessage({ keys: [k] });
+    for (const k of joyKeys) if (!want.includes(k)) worker.postMessage({ keysup: [k] });
+    joyKeys = want;
+    const knob = document.getElementById("knob");
+    knob.style.transform = "translate(" + Math.max(-34, Math.min(34, dx)) + "px," + Math.max(-34, Math.min(34, dy)) + "px)";
+}
+vscreen.addEventListener("touchstart", (e) => {
+    e.preventDefault();
+    for (const t of e.changedTouches) {
+        const r = vscreen.getBoundingClientRect();
+        if (t.clientX - r.left < r.width * 0.45 && joyId === null) {
+            joyId = t.identifier; joyX0 = t.clientX; joyY0 = t.clientY;
+        } else if (lookId === null) {
+            lookId = t.identifier; lookX = t.clientX; lookY = t.clientY;
+        }
+    }
+}, { passive: false });
+vscreen.addEventListener("touchmove", (e) => {
+    e.preventDefault();
+    for (const t of e.changedTouches) {
+        if (t.identifier === joyId) joyUpdate(t.clientX - joyX0, t.clientY - joyY0);
+        if (t.identifier === lookId) {
+            worker.postMessage({ mouse: [t.clientX - lookX, t.clientY - lookY] });
+            lookX = t.clientX; lookY = t.clientY;
+        }
+    }
+}, { passive: false });
+vscreen.addEventListener("touchend", (e) => {
+    for (const t of e.changedTouches) {
+        if (t.identifier === joyId) { joyId = null; joyUpdate(0, 0); }
+        if (t.identifier === lookId) lookId = null;
+    }
+});
+const fireBtn = document.getElementById("firebtn");
+fireBtn.addEventListener("touchstart", (e) => { e.preventDefault(); worker.postMessage({ keys: [K.f] }); }, { passive: false });
+const jumpBtn = document.getElementById("jumpbtn");
+jumpBtn.addEventListener("touchstart", (e) => { e.preventDefault(); worker.postMessage({ keys: [K.space] }); }, { passive: false });
 worker.postMessage({ init: true, fs: savedFs });
 </script>
 </body>

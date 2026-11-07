@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn usage() {
-    println!("Vulcan 1.7 — a small, fast language with multiple backends,
+    println!("Vulcan 1.8 — a small, fast language with multiple backends,
 a 2D physics engine and a browser IDE
 
 USAGE (single file):

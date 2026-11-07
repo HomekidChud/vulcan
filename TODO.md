@@ -5,7 +5,7 @@ effort. Verify with `cargo build --release && VULCAN_CC=gcc ./target/release/vul
 after every change — all 24 cases must pass byte-identically on C, JS, and
 Python backends before pushing.
 
-## Current state (v1.7)
+## Current state (v1.8)
 
 - Language: structs, enums, impl methods, match, f-strings, defer, FFI
   (`extern "c"` + `link`), nested arrays `[[T]]` (scalar bases in struct
@@ -34,7 +34,18 @@ Python backends before pushing.
 - Tooling: IDE, package manager, `vulcan test`, `vulcan package`
   (web/desktop/mobile/native bundles), selftest (24 cases). `vulcan doc` + GitHub Actions CI.
 - Web bundles: single index.html with terminal + 256x144 AA canvas output,
-  keyboard AND mouse input (pointer lock), filesystem shim.
+  keyboard AND mouse input (drag-to-look), filesystem shim, and
+  **mobile touch controls** (virtual joystick, drag-look, FIRE/JUMP
+  buttons — shown automatically on touch devices; joystick maps to
+  WASD key codes so games need zero extra code).
+- **Held-key fix**: web workers now track key *down/up* state (the old
+  `key_down()` only saw fresh presses, so movement felt dead in web
+  builds). Keyboard and touch both go through the same path.
+- **First real game**: `examples/arena.vulcan` — VULCAN ARENA, a
+  complete wave-survival FPS (5 waves, hitscan rifle with recoilless
+  spread + muzzle flash, medkit pickups, minimap, compass, HUD,
+  game-over/victory screens). Built with zero engine-level changes —
+  proof the library API is enough to ship a game.
 
 ## Compiler / language (highest impact first)
 
@@ -130,6 +141,10 @@ one repo. The honest plan is phases, each shippable on its own:
       into engine types.
 
 ### Phase 5 — platform & shipping
+- [x] **Mobile touch controls** — DONE in v1.8: every web bundle now
+      has a virtual joystick + look-drag + FIRE/JUMP buttons on touch
+      devices. The web link itself runs on phones. APK still needs
+      Capacitor + Android SDK on a real machine.
 - [ ] **Android APK** — `vulcan package --platform mobile` scaffold
       exists; needs Capacitor + Android SDK on a real machine, then
       `./gradlew assembleDebug` produces the APK. Document the exact

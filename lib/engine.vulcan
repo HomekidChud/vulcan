@@ -1,4 +1,4 @@
-// lib/engine.vulcan — the Vulcan Engine v0.4
+// lib/engine.vulcan — the Vulcan Engine v0.5
 //
 // A game-engine layer in pure Vulcan, built on the existing stack:
 //   import render3d  (Vec3 / Camera / projection / draw_tri pipeline)
@@ -304,6 +304,37 @@ pub fn player_control(s: Scene, id: i64, dt: f64) -> Scene {
     s.camera.x = lerp(s.camera.x, target.x, clamp(dt * 8.0, 0.0, 1.0))
     s.camera.y = lerp(s.camera.y, target.y, clamp(dt * 8.0, 0.0, 1.0))
     s.camera.z = lerp(s.camera.z, target.z, clamp(dt * 8.0, 0.0, 1.0))
+    return s
+}
+
+// Camera-relative WASD movement + jump for first-person games. Unlike
+// player_control, this never moves the camera — set s.camera yourself
+// (e.g. cam_first_person + mouse look) and call this for movement.
+pub fn player_move_cam(s: Scene, id: i64, dt: f64) -> Scene {
+    let i = scene_find(s, id)
+    if i < 0 { return s }
+    let e = s.entities[i]
+    let fwd = cam_forward(s.camera)
+    let right = cam_right(s.camera)
+    let move_x = 0.0
+    let move_z = 0.0
+    if key_down(KEY_W) { move_x = move_x + fwd.x; move_z = move_z + fwd.z }
+    if key_down(KEY_S) { move_x = move_x - fwd.x; move_z = move_z - fwd.z }
+    if key_down(KEY_D) { move_x = move_x + right.x; move_z = move_z + right.z }
+    if key_down(KEY_A) { move_x = move_x - right.x; move_z = move_z - right.z }
+    let len = sqrt(move_x * move_x + move_z * move_z)
+    if len > 0.0 {
+        e.vel.x = move_x / len * e.speed
+        e.vel.z = move_z / len * e.speed
+    } else {
+        e.vel.x = 0.0
+        e.vel.z = 0.0
+    }
+    let ground = terrain_height(s, e.pos.x, e.pos.z) + e.radius
+    if key_down(KEY_SPACE) && e.pos.y <= ground + 0.01 {
+        e.vel.y = 12.0
+    }
+    s.entities[i] = e
     return s
 }
 
