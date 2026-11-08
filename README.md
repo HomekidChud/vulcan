@@ -1,6 +1,6 @@
 # Vulcan
 
-A small, fast-to-compile language with three backends: native code through C (`clang -O3`), JavaScript (Node.js), and Python. Static types, no garbage collector, no runtime — and the same program produces the same output on every backend.
+A small, fast-to-compile language with three backends: native code through C (`clang -O3`), JavaScript (Node.js), and Python. Static types, no garbage collector, no runtime — and the same program produces the same output on every backend. Its own installer, package registry and self-hosted compiler make it a complete ecosystem, not just a compiler.
 
 ```vulcan
 fn fib(n: i64) -> i64 {
@@ -13,17 +13,37 @@ fn main() {
 }
 ```
 
+Closures and iterator methods, on every backend:
+
+```vulcan
+let xs: [i64] = [1, 2, 3, 4, 5, 6]
+print(xs.map(|x| x * 2).filter(|x| x % 3 == 0).reduce(0, |acc, x| acc + x))  // 18
+print(xs.any(|x| x > 5), xs.all(|x| x > 0))                                    // true true
+```
+
+## Install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/HomekidChud/vulcan/master/scripts/vulcanup.sh | sh
+```
+
+That downloads the latest prebuilt static binary to `~/.vulcan/bin` and fixes
+your PATH (Termux on Android is fully supported — the Linux aarch64 build is a
+static musl binary that runs on Termux, and the installer wires PATH through
+`$PREFIX/etc/profile.d`). From source instead: `sh vulcanup.sh --source`
+(needs [Rust](https://rustup.rs)). Update later with `vulcan self-update`.
+
 ## What's new
 
-The current release is **1.14** (see `vulcan --version`): **frame-perfect
-terminal graphics**. `present()` now clears the terminal into a dedicated
-alternate screen and fills every cell of the real terminal with half-block
-pixels — crisp at any size, flicker-free (only changed cells are re-emitted,
-one write per frame), truecolor when available with automatic 256-color
-fallback. All on the C, JS and Python backends, byte-identical. The compiler
-still lives in `self/vulc.vulcan` and `vulcan bootstrap` still proves the
-fixpoint. The full per-version history lives in
-[CHANGELOG.md](CHANGELOG.md).
+The current release is **1.15** (see `vulcan --version`): **a real language
+ecosystem**. Closures and iterator methods (`map`/`filter`/`reduce`/`any`/
+`all`/`for_each`, with captures and chaining) on all three backends; a
+rustup-style installer (`vulcanup.sh`) and `vulcan self-update`; a package
+registry — `vulcan search` / `add` / `remove` / `update` / `publish` — backed
+by a GitHub index; and tagged releases with prebuilt static binaries
+(x86_64, aarch64/Termux, macOS). The compiler still lives in
+`self/vulc.vulcan` and `vulcan bootstrap` still proves the fixpoint. The full
+per-version history lives in [CHANGELOG.md](CHANGELOG.md).
 
 ## Self-hosting
 
@@ -116,6 +136,11 @@ vulcan run --target js examples/tour.vulcan   # run on Node.js — same output
 vulcan run --target py examples/tour.vulcan   # run on Python 3 — same output
 vulcan selftest                       # run the test suite (all 3 backends)
 vulcan init myproj                    # scaffold a new project
+vulcan search <query>                 # find packages in the registry
+vulcan add <name>                      # add a dependency (bare names resolve via the registry)
+vulcan remove <name>                   # drop a dependency
+vulcan update                          # re-fetch every dependency
+vulcan publish                         # push this project to the registry (needs gh)
 vulcan package examples/todo.vulcan --platform web   # one-file web app (also: desktop, mobile, linux, windows, macos)
 vulcan run examples/todo.vulcan add "buy milk"       # args after the file are forwarded to your program
 ```

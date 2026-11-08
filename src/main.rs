@@ -49,7 +49,12 @@ integer overflow abort at the exact line). C backend only.
 
 USAGE (project — when a vulcan.toml is present):
   vulcan init <name>          scaffold a new project
-  vulcan add <user/repo|path> add a dependency
+  vulcan add <name|user/repo|path> add a dependency (bare names resolve
+                               through the package registry)
+  vulcan remove <name>        drop a dependency
+  vulcan update               re-fetch every dependency
+  vulcan search <query>       find packages in the registry
+  vulcan publish              push this project to the registry (needs gh)
   vulcan run | build | test   work on the whole project
   vulcan bench                time the project entry point
 
@@ -66,6 +71,8 @@ SELF-HOSTING (the compiler is written in Vulcan — self/vulc.vulcan):
 
 OTHER:
   vulcan selftest             run the compiler test suite
+  vulcan self-update          replace this binary with the latest release
+                               (curl is used to fetch GitHub Releases)
 ");
 }
 
@@ -152,10 +159,41 @@ fn main() {
     }
     if cmd == "add" {
         let source = args.get(2).map(|s| s.as_str())
-            .unwrap_or_else(|| { eprintln!("usage: vulcan add <user/repo | local/path>"); std::process::exit(1); });
+            .unwrap_or_else(|| { eprintln!("usage: vulcan add <name | user/repo | local/path>"); std::process::exit(1); });
         let proj = pkg::find_project(Path::new("."))
             .unwrap_or_else(|| { eprintln!("vulcan: no vulcan.toml found (run `vulcan init` first)"); std::process::exit(1); });
-        pkg::add(&proj, source);
+        // the requested name pins the dependency name, so `import <name>`
+        // matches what the user typed (esp. for registry packages)
+        pkg::add_named(&proj, source, Some(source));
+        return;
+    }
+    if cmd == "remove" || cmd == "rm" {
+        let name = args.get(2).map(|s| s.as_str())
+            .unwrap_or_else(|| { eprintln!("usage: vulcan remove <name>"); std::process::exit(1); });
+        let proj = pkg::find_project(Path::new("."))
+            .unwrap_or_else(|| { eprintln!("vulcan: no vulcan.toml found (run `vulcan init` first)"); std::process::exit(1); });
+        pkg::remove(&proj, name);
+        return;
+    }
+    if cmd == "search" {
+        let query = args.get(2).map(|s| s.as_str()).unwrap_or("");
+        pkg::search(query);
+        return;
+    }
+    if cmd == "update" {
+        let proj = pkg::find_project(Path::new("."))
+            .unwrap_or_else(|| { eprintln!("vulcan: no vulcan.toml found (run `vulcan init` first)"); std::process::exit(1); });
+        pkg::update_all(&proj);
+        return;
+    }
+    if cmd == "publish" {
+        let proj = pkg::find_project(Path::new("."))
+            .unwrap_or_else(|| { eprintln!("vulcan: no vulcan.toml found (run `vulcan init` first)"); std::process::exit(1); });
+        pkg::publish(&proj);
+        return;
+    }
+    if cmd == "self-update" {
+        pkg::self_update();
         return;
     }
     // `--platform <p>` for the package command

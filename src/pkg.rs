@@ -1,11 +1,14 @@
 // Vulcan package manager: projects, dependencies, lockfile.
 use std::path::{Path, PathBuf};
 use std::process::Command;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 
 #[derive(Debug, Clone)]
 pub struct Manifest {
     pub name: String,
     pub version: String,
+    pub description: String,
     pub deps: Vec<(String, String)>, // name -> source spec ("git:user/repo" or "path:...")
 }
 
@@ -13,6 +16,7 @@ pub struct Manifest {
 pub fn parse_manifest(src: &str) -> Manifest {
     let mut name = String::from("app");
     let mut version = String::from("0.1.0");
+    let mut description = String::new();
     let mut deps = Vec::new();
     let mut section = String::new();
     for raw in src.lines() {
@@ -29,6 +33,7 @@ pub fn parse_manifest(src: &str) -> Manifest {
                 "package" => match key.as_str() {
                     "name" => name = val,
                     "version" => version = val,
+                    "description" => description = val,
                     _ => {}
                 },
                 "dependencies" => deps.push((key, val)),
@@ -36,7 +41,7 @@ pub fn parse_manifest(src: &str) -> Manifest {
             }
         }
     }
-    Manifest { name, version, deps }
+    Manifest { name, version, description, deps }
 }
 
 pub fn read_manifest(dir: &Path) -> Manifest {
@@ -51,6 +56,9 @@ pub fn write_manifest(dir: &Path, m: &Manifest) {
     out.push_str("[package]\n");
     out.push_str(&format!("name = \"{}\"\n", m.name));
     out.push_str(&format!("version = \"{}\"\n", m.version));
+    if !m.description.is_empty() {
+        out.push_str(&format!("description = \"{}\"\n", m.description));
+    }
     if !m.deps.is_empty() {
         out.push_str("\n[dependencies]\n");
         for (k, v) in &m.deps {
@@ -90,6 +98,7 @@ pub fn init(name: &str) {
     write_manifest(root, &Manifest {
         name: name.to_string(),
         version: "0.1.0".into(),
+        description: String::new(),
         deps: vec![],
     });
     std::fs::write(root.join(".gitignore"), "/build\n*.vbin\n*.v.c\n").unwrap();
@@ -100,8 +109,10 @@ pub fn init(name: &str) {
     println!("\nnext steps:");
     println!("  cd {name}");
     println!("  vulcan run            # compile + execute");
-    println!("  vulcan add user/repo  # add a dependency (git or local path)");
+    println!("  vulcan search <q>     # find packages in the registry");
+    println!("  vulcan add <name>     # add a registry or git dependency");
     println!("  vulcan build          # produce build/{name}");
+    println!("  vulcan publish        # push this project to the registry");
 }
 
 const MAIN_TEMPLATE: &str = r#"// Welcome to Vulcan!
@@ -161,13 +172,48 @@ fn safe_remove_dep(deps_dir: &Path, name: &str) {
     }
 }
 
-// `vulcan add <source>` — source is "user/repo" (git) or a local path.
+// `vulcan add <source>` — source is a registry name, "user/repo" (git) or a
+// local path. `name_override` pins the dependency name (used by the registry
+// resolution and `vulcan update`, so `import <name>` matches the manifest key).
 pub fn add(proj: &Path, source: &str) {
+    add_named(proj, source, None);
+}
+
+pub fn add_named(proj: &Path, source: &str, name_override: Option<&str>) {
+    // A bare name (no '/', not a local path, not a URL) resolves through the
+    // package registry: `vulcan add snake` -> the registry's user/repo.
+    let source_owned;
+    let source = if !source.contains('/') && !source.contains("://") && !Path::new(source).exists() {
+        match registry_index() {
+            Some(index) => {
+                match index.iter().find(|(name, _, _, _)| name == source) {
+                    Some((_, repo, _, _)) => { source_owned = repo.clone(); &source_owned }
+                    None => {
+                        eprintln!("vulcan: `{source}` is not in the package registry");
+                        eprintln!("       search with:  vulcan search {source}");
+                        std::process::exit(1);
+                    }
+                }
+            }
+            None => {
+                eprintln!("vulcan: `{source}` is not a local path, and the registry is unreachable");
+                eprintln!("       (add packages as user/repo, or check your connection)");
+                std::process::exit(1);
+            }
+        }
+    } else {
+        source
+    };
     let deps_dir = proj.join("deps");
     std::fs::create_dir_all(&deps_dir).unwrap();
-    let name = match dep_dir_name(source) {
-        Some(n) => n,
-        None => panic!("vulcan: invalid dependency source `{source}`: cannot derive a safe folder name"),
+    // the dependency name: the override (registry name / manifest key) when
+    // given and valid, otherwise the last path segment of the source
+    let name = match name_override {
+        Some(n) if dep_dir_name(n).is_some() => dep_dir_name(n).unwrap(),
+        _ => match dep_dir_name(source) {
+            Some(n) => n,
+            None => panic!("vulcan: invalid dependency source `{source}`: cannot derive a safe folder name"),
+        },
     };
     let target = deps_dir.join(&name);
     safe_remove_dep(&deps_dir, &name);
@@ -219,6 +265,269 @@ fn git_head(dir: &Path) -> Option<String> {
         .ok()?;
     let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
     if s.is_empty() { None } else { Some(s) }
+}
+
+// ---------------------------------------------------------------------------
+// The package registry — a plain-text index in a public GitHub repo
+// (HomekidChud/vulcan-registry), one line per package:
+//   name|user/repo|description|version
+// Reads go through raw.githubusercontent.com (no auth); writes (publish) go
+// through the `gh` CLI, which is already authenticated.
+// ---------------------------------------------------------------------------
+
+pub const REGISTRY_REPO: &str = "HomekidChud/vulcan-registry";
+const REGISTRY_INDEX_URL: &str = "https://raw.githubusercontent.com/HomekidChud/vulcan-registry/main/index";
+
+fn run_cmd(cmd: &str, args: &[&str]) -> Option<String> {
+    let out = Command::new(cmd).args(args).output().ok()?;
+    if !out.status.success() { return None; }
+    Some(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+/// Fetch a URL's body with curl (or wget). Returns None when neither tool
+/// exists or the request fails — callers print their own diagnostics.
+pub fn http_get(url: &str) -> Option<String> {
+    if let Some(s) = run_cmd("curl", &["-fsSL", "--", url]) { return Some(s); }
+    if let Some(s) = run_cmd("wget", &["-qO-", "--", url]) { return Some(s); }
+    None
+}
+
+/// Download a URL to a file with curl (or wget).
+pub fn http_download(url: &str, dest: &Path) -> bool {
+    let d = dest.to_string_lossy();
+    let ok = Command::new("curl").args(["-fsSL", "-o", &d, "--", url]).status()
+        .map(|s| s.success()).unwrap_or(false)
+        || Command::new("wget").args(["-q", "--", url, "-O", &d]).status()
+            .map(|s| s.success()).unwrap_or(false);
+    ok && dest.exists()
+}
+
+/// The parsed registry index (name, repo, description, version) per line.
+pub fn registry_index() -> Option<Vec<(String, String, String, String)>> {
+    let body = http_get(REGISTRY_INDEX_URL)?;
+    let mut out = Vec::new();
+    for line in body.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') { continue; }
+        let parts: Vec<&str> = line.split('|').collect();
+        if parts.len() >= 2 {
+            out.push((
+                parts[0].to_string(),
+                parts[1].to_string(),
+                parts.get(2).unwrap_or(&"").to_string(),
+                parts.get(3).unwrap_or(&"0.0.0").to_string(),
+            ));
+        }
+    }
+    Some(out)
+}
+
+/// `vulcan search <query>` — list registry packages matching name/description.
+pub fn search(query: &str) {
+    let index = registry_index().unwrap_or_else(|| {
+        eprintln!("vulcan: could not fetch the package index ({REGISTRY_INDEX_URL})");
+        eprintln!("         check your connection — curl or wget is required");
+        std::process::exit(1);
+    });
+    let q = query.to_lowercase();
+    let hits: Vec<_> = index.iter().filter(|(name, _, desc, _)| {
+        q.is_empty() || name.to_lowercase().contains(&q) || desc.to_lowercase().contains(&q)
+    }).collect();
+    if hits.is_empty() {
+        println!("no packages matching `{query}` (registry has {} packages)", index.len());
+        return;
+    }
+    println!("{:<20} {:<24} {}", "PACKAGE", "VERSION", "DESCRIPTION");
+    for (name, _, desc, ver) in hits {
+        println!("{:<20} {:<24} {}", name, ver, desc);
+    }
+    println!("\nadd one with:  vulcan add <name>");
+}
+
+/// `vulcan remove <name>` — drop a dependency from the manifest, lockfile and deps/.
+pub fn remove(proj: &Path, name: &str) {
+    if dep_dir_name(name).is_none() {
+        panic!("vulcan: invalid dependency name `{name}`");
+    }
+    let mut m = read_manifest(proj);
+    let before = m.deps.len();
+    m.deps.retain(|(k, _)| k != name);
+    if m.deps.len() == before {
+        eprintln!("vulcan: `{name}` is not a dependency of this project");
+        std::process::exit(1);
+    }
+    write_manifest(proj, &m);
+    let entries: Vec<(String, String, String)> = m.deps.iter()
+        .map(|(k, v)| (k.clone(), v.clone(), String::new()))
+        .collect();
+    update_lockfile(proj, &entries);
+    safe_remove_dep(&proj.join("deps"), name);
+    println!("removed dependency `{name}`");
+}
+
+/// `vulcan update` — re-fetch every dependency at its manifest spec.
+pub fn update_all(proj: &Path) {
+    let m = read_manifest(proj);
+    if m.deps.is_empty() {
+        println!("no dependencies — add one with `vulcan add <name>`");
+        return;
+    }
+    for (name, spec) in &m.deps {
+        let source = spec.strip_prefix("git:").or_else(|| spec.strip_prefix("path:")).unwrap_or(name);
+        println!("updating {name} ({source}) ...");
+        // pin the dependency name to the manifest key
+        add_named(proj, source, Some(name));
+    }
+}
+
+/// `vulcan publish` — register this project in the package registry.
+/// Requires: a vulcan.toml, a clean-enough git repo, a GitHub remote, and the
+/// `gh` CLI (authenticated) to write to the registry repo.
+pub fn publish(proj: &Path) {
+    let m = read_manifest(proj);
+    if m.name.is_empty() || m.version.is_empty() {
+        eprintln!("vulcan: vulcan.toml needs a name and a version before publishing");
+        std::process::exit(1);
+    }
+    // resolve the GitHub remote (owner/repo) — host-agnostic: take the last
+    // two path segments of the origin URL (works for github.com, SSH remotes
+    // and enterprise mirrors/proxies that keep owner/repo in the path)
+    let remote = run_cmd("git", &["-C", &proj.to_string_lossy(), "remote", "get-url", "origin"]);
+    let remote = remote.unwrap_or_default();
+    let repo = if remote.contains("//") || remote.contains('@') || remote.contains('/') {
+        let r = remote.trim().trim_end_matches(".git").to_string();
+        if let Some(rest) = r.strip_prefix("git@github.com:") {
+            rest.to_string()
+        } else {
+            let segs: Vec<&str> = r.split('/').filter(|s| !s.is_empty()).collect();
+            if segs.len() >= 2 {
+                format!("{}/{}", segs[segs.len() - 2], segs[segs.len() - 1])
+            } else { String::new() }
+        }
+    } else {
+        String::new()
+    };
+    if repo.is_empty() || !repo.contains('/') {
+        eprintln!("vulcan: publish needs a GitHub remote named `origin` (owner/repo)");
+        std::process::exit(1);
+    }
+    // build the new index line
+    let line = format!("{}|{}|{}|{}", m.name, repo, m.description, m.version);
+    // fetch the current index + its SHA (gh api: authenticated, works for the
+    // registry repo owner and public readers alike)
+    let api = format!("repos/{REGISTRY_REPO}/contents/index");
+    let meta = run_cmd("gh", &["api", &api, "--jq", ".sha"]).unwrap_or_default();
+    let sha = meta.trim();
+    if sha.is_empty() {
+        eprintln!("vulcan: could not read the registry index — is the `gh` CLI installed and authenticated?");
+        std::process::exit(1);
+    }
+    let current = run_cmd("gh", &["api", &api, "--jq", ".content"]).unwrap_or_default();
+    // .content is base64 with newlines
+    let b64: String = current.chars().filter(|c| !c.is_whitespace()).collect();
+    let decoded = base64_decode(&b64).unwrap_or_default();
+    // replace or append this package's line
+    let decoded_str = String::from_utf8_lossy(&decoded).to_string();
+    let mut lines: Vec<String> = decoded_str.lines().map(|l| l.to_string()).collect();
+    lines.retain(|l| !l.starts_with(&format!("{}|", m.name)));
+    lines.push(line);
+    let new_index = lines.join("\n") + "\n";
+    // write it back via the contents API
+    let encoded = base64_encode(new_index.as_bytes());
+    let msg = format!("publish {} {}", m.name, m.version);
+    let body = format!("{{\"message\":\"{msg}\",\"content\":\"{encoded}\",\"sha\":\"{sha}\"}}");
+    let tmp = std::env::temp_dir().join(format!("vulcan-publish-{}.json", std::process::id()));
+    std::fs::write(&tmp, body).unwrap();
+    let out = Command::new("gh").args(["api", "-X", "PUT", &api, "--input", &tmp.to_string_lossy()]).output();
+    let _ = std::fs::remove_file(&tmp);
+    match out {
+        Ok(o) if o.status.success() => {
+            println!("published `{}` {} -> github.com/{repo}", m.name, m.version);
+            println!("install it anywhere with:  vulcan add {}", m.name);
+        }
+        _ => {
+            eprintln!("vulcan: publish failed — the registry write was rejected");
+            eprintln!("         (are you a collaborator on {REGISTRY_REPO}?)");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// `vulcan self-update` — replace this binary with the latest release asset.
+pub fn self_update() {
+    let os = std::env::consts::OS;                 // "linux" | "macos" | ...
+    let arch = std::env::consts::ARCH;              // "x86_64" | "aarch64" | ...
+    let asset = format!("vulcan-latest-{os}-{arch}.tar.gz");
+    let url = format!("https://github.com/HomekidChud/vulcan/releases/latest/download/{asset}");
+    let tmp = std::env::temp_dir().join(format!("vulcan-selfupdate-{}.tar.gz", std::process::id()));
+    if !http_download(&url, &tmp) {
+        eprintln!("vulcan: could not download {asset}");
+        eprintln!("         releases: https://github.com/HomekidChud/vulcan/releases");
+        std::process::exit(1);
+    }
+    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("vulcan"));
+    let dir = tmp.parent().unwrap().join(format!("vulcan-su-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let ok = Command::new("tar").args(["-xzf", &tmp.to_string_lossy(), "-C", &dir.to_string_lossy()])
+        .status().map(|s| s.success()).unwrap_or(false);
+    let _ = std::fs::remove_file(&tmp);
+    if !ok {
+        eprintln!("vulcan: failed to extract the release archive");
+        std::process::exit(1);
+    }
+    let new_bin = dir.join("vulcan");
+    if !new_bin.exists() {
+        eprintln!("vulcan: the archive did not contain a `vulcan` binary");
+        std::process::exit(1);
+    }
+    // write the new binary next to the old one, then swap (rename is atomic
+    // on the same filesystem; write-to-temp + rename avoids self-overwrite)
+    let staged = exe.with_extension("vulcan-new");
+    if std::fs::copy(&new_bin, &staged).is_err() {
+        eprintln!("vulcan: could not stage the update (permissions?)");
+        std::process::exit(1);
+    }
+    let _ = std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755));
+    if std::fs::rename(&staged, &exe).is_err() {
+        eprintln!("vulcan: could not replace {} — replace it manually from {}",
+            exe.display(), new_bin.display());
+        std::process::exit(1);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    println!("updated: {} (restart your shell or re-run `vulcan --version`)", exe.display());
+}
+
+// minimal base64 (standard alphabet) — encode/decode without external crates
+const B64: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+pub fn base64_encode(data: &[u8]) -> String {
+    let mut out = String::new();
+    for chunk in data.chunks(3) {
+        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
+        out.push(B64[(n >> 18) as usize & 63] as char);
+        out.push(B64[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 { B64[(n >> 6) as usize & 63] as char } else { '=' });
+        out.push(if chunk.len() > 2 { B64[n as usize & 63] as char } else { '=' });
+    }
+    out
+}
+
+pub fn base64_decode(s: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    let mut acc = 0u32;
+    let mut bits = 0u32;
+    for c in s.chars() {
+        if c == '=' || c.is_whitespace() { continue; }
+        let v = B64.iter().position(|&b| b as char == c)? as u32;
+        acc = (acc << 6) | v;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+        }
+    }
+    Some(out)
 }
 
 fn copy_dir(src: &Path, dst: &Path) {

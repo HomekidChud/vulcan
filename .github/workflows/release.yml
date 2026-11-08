@@ -1,0 +1,68 @@
+name: release
+# Builds and publishes prebuilt `vulcan` binaries on every v* tag.
+# Linux builds are static (musl) so they run on glibc distros AND Termux.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    strategy:
+      matrix:
+        include:
+          - runs-on: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            arch: x86_64
+          - runs-on: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            arch: aarch64
+    runs-on: ${{ matrix.runs-on }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+      - name: Package
+        run: |
+          mkdir -p dist
+          tar -czf dist/vulcan-${GITHUB_REF_NAME}-linux-${{ matrix.arch }}.tar.gz \
+            -C target/${{ matrix.target }}/release vulcan
+          cp dist/vulcan-${GITHUB_REF_NAME}-linux-${{ matrix.arch }}.tar.gz \
+             dist/vulcan-latest-linux-${{ matrix.arch }}.tar.gz
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" --verify-tag --generate-notes --latest || true
+          gh release upload "${GITHUB_REF_NAME}" dist/*.tar.gz --clobber
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Build
+        run: cargo build --release
+      - name: Package
+        run: |
+          mkdir -p dist
+          arch=$(uname -m)
+          tar -czf dist/vulcan-${GITHUB_REF_NAME}-macos-${arch}.tar.gz \
+            -C target/release vulcan
+          cp dist/vulcan-${GITHUB_REF_NAME}-macos-${arch}.tar.gz \
+             dist/vulcan-latest-macos-${arch}.tar.gz
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sleep 5   # let the linux job's release exist first
+          gh release create "${GITHUB_REF_NAME}" --verify-tag --generate-notes --latest || true
+          gh release upload "${GITHUB_REF_NAME}" dist/*.tar.gz --clobber

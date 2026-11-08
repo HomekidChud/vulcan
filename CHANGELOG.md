@@ -3,6 +3,65 @@
 Per-version history, newest first. The version number lives in Cargo.toml
 (single source of truth, exposed by `vulcan --version`).
 
+## 1.15.0 — a real language ecosystem: closures, iterators, packages, installer
+
+**Vulcan grows from a compiler into an ecosystem.** Like Rust (rustup + cargo)
+and Python (pip), everything now has its own installer, package registry and
+release tooling — and the language itself gains its biggest feature since
+`match`: closures and iterator methods.
+
+### Language: closures + iterator methods
+
+```vulcan
+let xs: [i64] = [1, 2, 3, 4, 5, 6]
+let doubled = xs.map(|x| x * 2)            // [2, 4, 6, 8, 10, 12]
+let evens   = xs.filter(|x| x % 2 == 0)   // [2, 4, 6]
+let sum     = xs.reduce(0, |acc, x| acc + x)  // 21
+let any_big = xs.any(|x| x > 5)           // true
+let all_pos = xs.all(|x| x > 0)            // true
+xs.for_each(|x| collected.push(x))        // side effects work
+let capped  = xs.map(|x| x + 1).filter(|x| x % 3 == 0)  // chains work
+```
+
+- Closure literals: `|a, b| expr` (single-expression bodies; captures just
+  work — the C backend inlines the closure as a loop over the array).
+- `map` / `filter` / `reduce` / `any` / `all` / `for_each` on `[T]`, with
+  runtime-checked parameter counts and result types.
+- All three backends (C, JS, Python) produce byte-identical output — the JS
+  and Python backends emit native arrow functions / lambdas, and `print`/
+  `put` now compose inside expressions (comma/tuple expressions) so side
+  effects work inside closures.
+- New `vulcan selftest` case exercises every method + chains + captures
+  (33 cases, all green). The self-hosted compiler (`self/vulc.vulcan`) and
+  its test corpus are untouched, so the bootstrap fixpoint still holds.
+
+### Ecosystem: installer, registry, self-update
+
+- **`vulcanup.sh`** — a rustup-style installer:
+  `curl -fsSL .../scripts/vulcanup.sh | sh` downloads the latest static
+  binary into `~/.vulcan/bin` and manages PATH (Termux-aware: uses
+  `$PREFIX/etc/profile.d`). `--source` builds from source with cargo.
+- **`vulcan self-update`** — replaces the running binary with the latest
+  release asset for the current OS/arch (curl or wget).
+- **Package registry** — `HomekidChud/vulcan-registry` holds a plain-text
+  index (`name|user/repo|description|version`), readable without auth:
+  - `vulcan search <query>` — find packages
+  - `vulcan add <name>` — bare names resolve through the registry
+    (`vulcan add user/repo` and local paths still work)
+  - `vulcan remove <name>` — drop a dependency
+  - `vulcan update` — re-fetch every dependency
+  - `vulcan publish` — push your project to the registry (uses the
+    authenticated `gh` CLI to write the index via the contents API)
+- **vulcan.toml** gains a `description` field (used by search + publish).
+
+### Release tooling
+
+- **`.github/workflows/release.yml`** — on every `v*` tag, builds static
+  musl binaries (x86_64 + aarch64 — the aarch64 build runs natively on
+  GitHub's ARM runners and runs on Termux) plus macOS, and attaches
+  `vulcan-latest-<os>-<arch>.tar.gz` assets to the GitHub release that
+  `vulcanup.sh` and `vulcan self-update` download.
+
 ## 1.14.0 — frame-perfect terminals: full-screen, flicker-free present()
 
 **`present()` now owns the whole terminal.** Previously every frame was
