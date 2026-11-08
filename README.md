@@ -15,11 +15,14 @@ fn main() {
 
 ## What's new
 
-The current release is **1.11** (see `vulcan --version`): **Vulcan compiles
-itself**. The compiler now lives in `self/vulc.vulcan` (~3,100 lines of
-Vulcan), and `vulcan bootstrap` proves the language builds itself with a
-byte-identical fixpoint check — the same stage1 → stage2 → stage3 scheme
-rustc uses. The full per-version history lives in
+The current release is **1.14** (see `vulcan --version`): **frame-perfect
+terminal graphics**. `present()` now clears the terminal into a dedicated
+alternate screen and fills every cell of the real terminal with half-block
+pixels — crisp at any size, flicker-free (only changed cells are re-emitted,
+one write per frame), truecolor when available with automatic 256-color
+fallback. All on the C, JS and Python backends, byte-identical. The compiler
+still lives in `self/vulc.vulcan` and `vulcan bootstrap` still proves the
+fixpoint. The full per-version history lives in
 [CHANGELOG.md](CHANGELOG.md).
 
 ## Self-hosting
@@ -131,6 +134,29 @@ cursor_visible(0)
 ```
 
 The IDE canvas is a live framebuffer with mouse/keyboard input, and `import render3d` gives you a complete software 3D renderer (see Graphics + physics reference below). Write your own games in pure Vulcan — that's what the stack is for.
+
+### Frame-perfect terminal presentation
+
+`present()` is built for flicker-free, full-screen play in **any** terminal:
+
+- **Clears the terminal, then shows the full game.** The first `present()`
+  switches to a dedicated alternate screen (`ESC[?1049h`), clears it and hides
+  the cursor; when your program exits, the screen and cursor are restored
+  automatically — your shell scrollback is never touched.
+- **Fills the real terminal.** The frame is mapped to the terminal's actual
+  size (`screen_width()` x `screen_height()`, re-checked every frame), using
+  half-block cells so each terminal row shows two pixel rows.
+- **Perfect pixels.** Upscaling to a bigger terminal is exact
+  nearest-neighbour, so pixels stay crisp and square; downscaling is an
+  area-average box filter. Truecolor is used when the terminal advertises it
+  (`COLORTERM`), with automatic quantization to the xterm 256-color palette
+  otherwise.
+- **Frame perfect.** Only the cells that changed since the previous frame are
+  re-emitted, built into one buffer and written with a single `write` — no
+  clear-redraw flicker, no tearing, no scrolling. Terminal resizes are picked
+  up on the next frame with a clean full redraw.
+
+The same output is produced by the C, JS and Python backends — byte-identical.
 
 ## How it works
 

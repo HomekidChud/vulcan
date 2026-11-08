@@ -256,6 +256,58 @@ static void vdraw_text(double x, double y, const char* s, int64_t color){
         }
     }
 }
+// ---- terminal presentation: cleared alt-screen, full terminal, flicker-free ----
+// present() switches to a cleared alternate screen sized to the REAL terminal,
+// fills every cell with a half-block "pixel" (fg = upper half, bg = lower half)
+// and re-emits only the cells that changed since the last frame, built into one
+// buffer and written with a single fwrite — no clear-per-frame, no flicker, no
+// scroll. Upscaling is exact nearest-neighbour so pixels stay crisp and square;
+// downscaling is an area-average box filter. Truecolor is used when the terminal
+// advertises it (COLORTERM / *-truecolor), otherwise colors are quantized to the
+// xterm 256-color palette so the frame still looks right on older terminals.
+static int valt_on = 0;
+static int vgrid_w = 0, vgrid_h = 0;
+static uint64_t *vshadow = NULL; // last-presented cells, packed (fg<<32)|bg
+static char *vob = NULL; static size_t vob_len = 0, vob_cap = 0;
+static void vob_reset(void){ vob_len = 0; }
+static void vob_put(const char* s, size_t n){ if(vob_len+n>vob_cap){ vob_cap=(vob_len+n)*2+64; vob=(char*)realloc(vob,vob_cap); } memcpy(vob+vob_len,s,n); vob_len+=n; }
+static void vob_str(const char* s){ vob_put(s,strlen(s)); }
+static void vob_fmt3(const char* f, int a, int b, int c){ char t[48]; vob_put(t,(size_t)snprintf(t,sizeof t,f,a,b,c)); }
+static int vtruecolor(void){
+    static int mode = -1;
+    if(mode<0){
+        const char* ct = getenv("COLORTERM"); const char* tm = getenv("TERM");
+        mode = (ct && (strstr(ct,"truecolor")||strstr(ct,"24bit")||strcmp(ct,"yes")==0))
+             || (tm && (strstr(tm,"truecolor")||strstr(tm,"direct"))) ? 1 : 0;
+    }
+    return mode;
+}
+static int vquant256(int r, int g, int b){
+    // nearest xterm-256 entry: 6x6x6 cube vs 24-step gray ramp
+    int qr=(r*5+127)/255, qg=(g*5+127)/255, qb=(b*5+127)/255;
+    int cr=qr*51, cg=qg*51, cb=qb*51;
+    int gray=(r+g+b+2)/3, qy=(gray-8+5)/10; if(qy<0)qy=0; if(qy>23)qy=23;
+    int gv=8+qy*10;
+    long dc=(long)(r-cr)*(r-cr)+(long)(g-cg)*(g-cg)+(long)(b-cb)*(b-cb);
+    long dg=(long)(r-gv)*(r-gv)+(long)(g-gv)*(g-gv)+(long)(b-gv)*(b-gv);
+    return dg<dc ? 232+qy : 16+qr*36+qg*6+qb;
+}
+static void vsample(int px, int py, int pw, int ph, int* r, int* g, int* b){
+    // exact box filter from the logical canvas to the terminal pixel grid;
+    // zero-width ranges collapse to a single source pixel (crisp nearest-neighbour)
+    int x0=(int)((int64_t)px*VOUT_W/pw), x1=(int)(((int64_t)(px+1)*VOUT_W-1)/pw);
+    int y0=(int)((int64_t)py*VOUT_H/ph), y1=(int)(((int64_t)(py+1)*VOUT_H-1)/ph);
+    if(x1<x0)x1=x0; if(x1>VOUT_W-1)x1=VOUT_W-1;
+    if(y1<y0)y1=y0; if(y1>VOUT_H-1)y1=VOUT_H-1;
+    long sr=0,sg=0,sb=0; int n=0;
+    for(int sy=y0;sy<=y1;sy++) for(int sx=x0;sx<=x1;sx++){
+        int32_t v=vdown[sy*VOUT_W+sx]; sr+=(v>>16)&255; sg+=(v>>8)&255; sb+=v&255; n++;
+    }
+    *r=(int)((sr+n/2)/n); *g=(int)((sg+n/2)/n); *b=(int)((sb+n/2)/n);
+}
+static void vterm_cleanup(void){
+    if(valt_on){ valt_on=0; fputs("\033[?25h\033[?1049l",stdout); fflush(stdout); }
+}
 static void vpresent(void){
     // supersampling resolve: average VAAxVAA blocks + subtle vignette
     vfb_alloc();
@@ -275,30 +327,52 @@ static void vpresent(void){
             vdown[y*VOUT_W+x]=(r<<16)|(g<<8)|b;
         }
     }
-    // terminal: downsample to 64x18 half-block cells, whatever the canvas size
-    fputs("\033[H", stdout);
-    for(int cy=0;cy<18;cy++){
-        for(int cx=0;cx<64;cx++){
-            int x0=(int)((double)cx*VOUT_W/64), x1=(int)((double)(cx+1)*VOUT_W/64)-1;
-            if(x1<x0)x1=x0; if(x1>VOUT_W-1)x1=VOUT_W-1;
-            int y0=(int)((double)cy*VOUT_H/18), y1=(int)((double)(cy+1)*VOUT_H/18)-1;
-            if(y1<y0)y1=y0; if(y1>VOUT_H-1)y1=VOUT_H-1;
-            int yh=y0+(y1-y0+1)/2; if(yh>y1)yh=y1; // first row of the lower half
-            int ur=0,ug=0,ub=0,lr=0,lg=0,lb=0,nu=0,nl=0;
-            for(int sy=y0;sy<yh;sy++) for(int sx=x0;sx<=x1;sx++){
-                int32_t v=vdown[sy*VOUT_W+sx];
-                ur+=(v>>16)&255; ug+=(v>>8)&255; ub+=v&255; nu++;
-            }
-            for(int sy=yh;sy<=y1;sy++) for(int sx=x0;sx<=x1;sx++){
-                int32_t v=vdown[sy*VOUT_W+sx];
-                lr+=(v>>16)&255; lg+=(v>>8)&255; lb+=v&255; nl++;
-            }
-            if(nu==0){ ur=lr; ug=lg; ub=lb; nu=nl?nl:1; }
-            if(nl==0){ lr=ur; lg=ug; lb=ub; nl=nu; }
-            printf("\033[38;2;%d;%d;%dm\033[48;2;%d;%d;%dm\342\226\200", (ur+nu/2)/nu, (ug+nu/2)/nu, (ub+nu/2)/nu, (lr+nl/2)/nl, (lg+nl/2)/nl, (lb+nl/2)/nl);
-        }
-        fputs("\033[0m\n", stdout);
+    // terminal: cleared alternate screen, every cell of the REAL terminal,
+    // half-block pixels (fg = upper, bg = lower), diff-updated per frame
+    int cols=(int)vscreen_w(); if(cols<1)cols=80; if(cols>512)cols=512;
+    int rows=(int)vscreen_h(); if(rows<1)rows=24; if(rows>256)rows=256;
+    if(!valt_on){
+        valt_on=1;
+        fputs("\033[?1049h\033[?25l\033[2J",stdout); // clean slate, hide cursor
+        atexit(vterm_cleanup);                        // always restored on exit
     }
+    if(cols!=vgrid_w||rows!=vgrid_h){ // terminal resized: rebuild + full redraw
+        vgrid_w=cols; vgrid_h=rows;
+        free(vshadow); vshadow=(uint64_t*)malloc((size_t)cols*rows*sizeof(uint64_t));
+        for(int i=0;i<cols*rows;i++) vshadow[i]=~(uint64_t)0;
+    }
+    vob_reset();
+    int tc=vtruecolor();
+    int lfg=-1, lbg=-1, lastx=-2, lasty=-1;
+    for(int cy=0;cy<rows;cy++){
+        for(int cx=0;cx<cols;cx++){
+            int ur,ug,ub,lr,lg,lb;
+            vsample(cx,cy*2,cols,rows*2,&ur,&ug,&ub);
+            vsample(cx,cy*2+1,cols,rows*2,&lr,&lg,&lb);
+            uint32_t fg, bg;
+            if(tc){ fg=((uint32_t)ur<<16)|((uint32_t)ug<<8)|(uint32_t)ub; bg=((uint32_t)lr<<16)|((uint32_t)lg<<8)|(uint32_t)lb; }
+            else { fg=(uint32_t)vquant256(ur,ug,ub); bg=(uint32_t)vquant256(lr,lg,lb); }
+            uint64_t cell=((uint64_t)fg<<32)|(uint64_t)bg;
+            if(cell==vshadow[cy*cols+cx]) continue; // unchanged: skip — no flicker
+            vshadow[cy*cols+cx]=cell;
+            if(cx!=lastx+1||cy!=lasty) vob_fmt3("\033[%d;%dH",cy+1,cx+1,0);
+            lastx=cx; lasty=cy;
+            if((int)fg!=lfg){
+                if(tc) vob_fmt3("\033[38;2;%d;%d;%dm",(int)((fg>>16)&255),(int)((fg>>8)&255),(int)(fg&255));
+                else vob_fmt3("\033[38;5;%dm",(int)fg,0,0);
+                lfg=(int)fg;
+            }
+            if((int)bg!=lbg){
+                if(tc) vob_fmt3("\033[48;2;%d;%d;%dm",(int)((bg>>16)&255),(int)((bg>>8)&255),(int)(bg&255));
+                else vob_fmt3("\033[48;5;%dm",(int)bg,0,0);
+                lbg=(int)bg;
+            }
+            vob_str("\342\226\200");
+        }
+    }
+    vob_str("\033[0m");
+    fwrite(vob,1,vob_len,stdout); // one write per frame: no tearing
+    fflush(stdout);
 }
 static double vmouse_x(void){ return -1.0; }
 static double vmouse_dx(void){ return 0.0; }

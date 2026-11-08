@@ -3,6 +3,44 @@
 Per-version history, newest first. The version number lives in Cargo.toml
 (single source of truth, exposed by `vulcan --version`).
 
+## 1.14.0 — frame-perfect terminals: full-screen, flicker-free present()
+
+**`present()` now owns the whole terminal.** Previously every frame was
+downsampled to a fixed 64x18 half-block grid, drawn over whatever was
+already on screen with a trailing newline per row (which scrolls), and
+redrawn in full every frame. The new presentation engine:
+
+- **Clears the terminal, then shows the full game.** The first `present()`
+  enters a dedicated alternate screen (`ESC[?1049h`), clears it and hides
+  the cursor; an `atexit` handler (C), `process.on("exit")` (JS) or
+  `atexit.register` (Python) restores the primary screen and cursor on
+  exit, so shell scrollback is never touched.
+- **Any terminal, any size.** The frame maps to the terminal's real
+  dimensions — `screen_width()` x `screen_height()` cells, re-checked
+  every frame (resize → clean full redraw on the next frame). Half-block
+  cells give two pixel rows per terminal row. Grid clamped at 512x256.
+- **Perfect pixels.** Canvas → terminal mapping is an exact box filter:
+  zero-width ranges collapse to a single source pixel, so upscaling is
+  crisp nearest-neighbour (square pixels) and downscaling is an area
+  average. Truecolor (`ESC[38;2;…`) when the terminal advertises it via
+  `COLORTERM`/`TERM`, otherwise colors are quantized to the nearest
+  xterm-256 entry (cube vs gray-ramp, distance-chosen) — same picture on
+  older terminals.
+- **Frame perfect.** A shadow buffer remembers the last presented cell
+  colors; only changed cells are re-emitted, with run-length cursor
+  positioning and color codes only on change. The frame is built into one
+  buffer and written with a single `fwrite`/`write` + flush — no
+  clear-redraw flicker, no tearing, and no `\n` ever (the old per-row
+  newline scrolled the screen every frame).
+- **All backends, byte-identical.** C (`src/codegen.rs`), JS
+  (`src/codegen_js.rs`, Node terminal path — the IDE/worker path is
+  unchanged) and Python (`src/codegen_py.rs`) emit the same escape stream;
+  verified byte-equal on a 3-frame test game. The self-hosted compiler's
+  `VPRELUDE` was regenerated from the new C prelude
+  (`scripts/gen-self-prelude.py`), its `C_PREFIXES` collision list gained
+  the new runtime symbols, and `scripts/self-test.sh` + `vulcan selftest`
+  (32 cases) + the stage1→stage3 bootstrap fixpoint all pass.
+
 ## 1.13.1 — examples cleaned: demos out, AAA bar in
 
 **All game examples removed** (`arena`, `frontier`, `liberty`, `obby`,

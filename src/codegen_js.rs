@@ -269,35 +269,81 @@ function __present() {
         postMessage({ __vulcan_frame: frame.buffer, w: __FB_W, h: __FB_H, lw: __OUT_W, lh: __OUT_H }, [frame.buffer]);
         return;
     }
-    // terminal: downsample to 64x18 half-block cells (same output as the C backend)
+    // terminal: cleared alternate screen, every cell of the REAL terminal,
+    // half-block pixels (fg = upper, bg = lower), diff-updated in one write
+    // per frame — same output as the C backend
     const down = __downsample();
-    let out = "\x1b[H";
-    for (let cy = 0; cy < 18; cy++) {
-        let row = "";
-        for (let cx = 0; cx < 64; cx++) {
-            const x0 = Math.min(__OUT_W - 1, Math.trunc(cx * __OUT_W / 64));
-            const x1 = Math.max(x0, Math.min(__OUT_W - 1, Math.trunc((cx + 1) * __OUT_W / 64) - 1));
-            const y0 = Math.min(__OUT_H - 1, Math.trunc(cy * __OUT_H / 18));
-            const y1 = Math.max(y0, Math.min(__OUT_H - 1, Math.trunc((cy + 1) * __OUT_H / 18) - 1));
-            const yh = y0 + Math.trunc((y1 - y0 + 1) / 2); // first row of the lower half
-            let ur = 0, ug = 0, ub = 0, lr = 0, lg = 0, lb = 0, nu = 0, nl = 0;
-            for (let sy = y0; sy < yh; sy++) for (let sx = x0; sx <= x1; sx++) {
-                const v = down[sy * __OUT_W + sx];
-                ur += (v >> 16) & 255; ug += (v >> 8) & 255; ub += v & 255; nu++;
-            }
-            for (let sy = yh; sy <= y1; sy++) for (let sx = x0; sx <= x1; sx++) {
-                const v = down[sy * __OUT_W + sx];
-                lr += (v >> 16) & 255; lg += (v >> 8) & 255; lb += v & 255; nl++;
-            }
-            if (nu === 0) { ur = lr; ug = lg; ub = lb; nu = nl ? nl : 1; }
-            if (nl === 0) { lr = ur; lg = ug; lb = ub; nl = nu; }
-            const urr = Math.trunc((ur + nu / 2) / nu), urg = Math.trunc((ug + nu / 2) / nu), urb = Math.trunc((ub + nu / 2) / nu);
-            const lrr = Math.trunc((lr + nl / 2) / nl), lrg = Math.trunc((lg + nl / 2) / nl), lrb = Math.trunc((lb + nl / 2) / nl);
-            row += "\x1b[38;2;" + urr + ";" + urg + ";" + urb + "m\x1b[48;2;" + lrr + ";" + lrg + ";" + lrb + "m\u2580";
+    const cols = Math.min(512, Math.max(1, Math.trunc(__screen_w())));
+    const rows = Math.min(256, Math.max(1, Math.trunc(__screen_h())));
+    if (!__present_alt) {
+        __present_alt = true;
+        __out("\x1b[?1049h\x1b[?25l\x1b[2J"); // clean slate, hide cursor
+        if (typeof process !== "undefined" && process.on) {
+            process.on("exit", () => { if (__present_alt) process.stdout.write("\x1b[?25h\x1b[?1049l"); }); // always restored
         }
-        out += row + "\x1b[0m\n";
     }
-    process.stdout.write(out);
+    if (cols !== __grid_w || rows !== __grid_h) { // terminal resized: full redraw
+        __grid_w = cols; __grid_h = rows;
+        __shadow = new Array(cols * rows).fill(-1);
+    }
+    const tc = __truecolor();
+    let out = "";
+    let lfg = -1, lbg = -1, lastx = -2, lasty = -1;
+    for (let cy = 0; cy < rows; cy++) {
+        for (let cx = 0; cx < cols; cx++) {
+            const u = __sample(down, cx, cy * 2, cols, rows * 2);
+            const l = __sample(down, cx, cy * 2 + 1, cols, rows * 2);
+            const fg = tc ? (((u >> 16) & 255) << 16 | ((u >> 8) & 255) << 8 | (u & 255)) : __quant256(u);
+            const bg = tc ? (((l >> 16) & 255) << 16 | ((l >> 8) & 255) << 8 | (l & 255)) : __quant256(l);
+            const cell = (fg * 4294967296) + bg; // fg<<32|bg without 32-bit overflow
+            if (cell === __shadow[cy * cols + cx]) continue; // unchanged: skip — no flicker
+            __shadow[cy * cols + cx] = cell;
+            if (cx !== lastx + 1 || cy !== lasty) out += "\x1b[" + (cy + 1) + ";" + (cx + 1) + "H";
+            lastx = cx; lasty = cy;
+            if (fg !== lfg) { out += tc ? "\x1b[38;2;" + ((fg >> 16) & 255) + ";" + ((fg >> 8) & 255) + ";" + (fg & 255) + "m" : "\x1b[38;5;" + fg + "m"; lfg = fg; }
+            if (bg !== lbg) { out += tc ? "\x1b[48;2;" + ((bg >> 16) & 255) + ";" + ((bg >> 8) & 255) + ";" + (bg & 255) + "m" : "\x1b[48;5;" + bg + "m"; lbg = bg; }
+            out += "\u2580";
+        }
+    }
+    process.stdout.write(out + "\x1b[0m");
+}
+// ---- terminal presentation helpers (shared with __present) ----
+let __present_alt = false, __grid_w = 0, __grid_h = 0, __shadow = null;
+function __truecolor() {
+    if (__tc_mode === -1) {
+        const ct = (typeof process !== "undefined" && process.env) ? process.env.COLORTERM : "";
+        const tm = (typeof process !== "undefined" && process.env) ? process.env.TERM : "";
+        __tc_mode = ((ct && (ct.indexOf("truecolor") >= 0 || ct.indexOf("24bit") >= 0 || ct === "yes")) ||
+                     (tm && (tm.indexOf("truecolor") >= 0 || tm.indexOf("direct") >= 0))) ? 1 : 0;
+    }
+    return __tc_mode;
+}
+let __tc_mode = -1;
+function __quant256(c) {
+    // nearest xterm-256 entry: 6x6x6 cube vs 24-step gray ramp
+    const r = (c >> 16) & 255, g = (c >> 8) & 255, b = c & 255;
+    const qr = Math.trunc((r * 5 + 127) / 255), qg = Math.trunc((g * 5 + 127) / 255), qb = Math.trunc((b * 5 + 127) / 255);
+    const cr = qr * 51, cg = qg * 51, cb = qb * 51;
+    const gray = Math.trunc((r + g + b + 2) / 3);
+    let qy = Math.trunc((gray - 8 + 5) / 10); if (qy < 0) qy = 0; if (qy > 23) qy = 23;
+    const gv = 8 + qy * 10;
+    const dc = (r - cr) * (r - cr) + (g - cg) * (g - cg) + (b - cb) * (b - cb);
+    const dg = (r - gv) * (r - gv) + (g - gv) * (g - gv) + (b - gv) * (b - gv);
+    return dg < dc ? 232 + qy : 16 + qr * 36 + qg * 6 + qb;
+}
+function __sample(down, px, py, pw, ph) {
+    // exact box filter from the logical canvas to the terminal pixel grid;
+    // zero-width ranges collapse to a single source pixel (crisp nearest-neighbour)
+    let x0 = Math.trunc(px * __OUT_W / pw), x1 = Math.trunc(((px + 1) * __OUT_W - 1) / pw);
+    let y0 = Math.trunc(py * __OUT_H / ph), y1 = Math.trunc(((py + 1) * __OUT_H - 1) / ph);
+    if (x1 < x0) x1 = x0; if (x1 > __OUT_W - 1) x1 = __OUT_W - 1;
+    if (y1 < y0) y1 = y0; if (y1 > __OUT_H - 1) y1 = __OUT_H - 1;
+    let sr = 0, sg = 0, sb = 0, n = 0;
+    for (let sy = y0; sy <= y1; sy++) for (let sx = x0; sx <= x1; sx++) {
+        const v = down[sy * __OUT_W + sx];
+        sr += (v >> 16) & 255; sg += (v >> 8) & 255; sb += v & 255; n++;
+    }
+    return (Math.trunc((sr + n / 2) / n) << 16) | (Math.trunc((sg + n / 2) / n) << 8) | Math.trunc((sb + n / 2) / n);
 }
 // ---- IDE input (mouse + keys) via SharedArrayBuffer, set by the IDE worker ----
 function __input_state() {
