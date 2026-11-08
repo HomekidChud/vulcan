@@ -69,7 +69,10 @@ pub fn project(c: Camera, p: Vec3) -> Projected {
     if cz < 0.5 { vis = 0 }
     let z = cz
     if z < 0.5 { z = 0.5 }
-    let fl = 160.0
+    // focal length scales with the canvas: 160 at the default 144px height
+    // (identical to the old fixed value), and a ~48 degree vertical FOV at
+    // any other size — so games that canvas_resize() keep a sane view.
+    let fl = canvas_height() as f64 * 10.0 / 9.0
     return Projected {
         sx: canvas_width() as f64 / 2.0 + d.dot(r) * fl / z,
         sy: canvas_height() as f64 / 2.0 - d.dot(u) * fl / z,

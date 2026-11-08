@@ -1,0 +1,198 @@
+// examples/cubefield.vulcan — a test 3D game, pure Vulcan software renderer.
+//
+// run:    vulcan run examples/cubefield.vulcan
+// web:    vulcan package examples/cubefield.vulcan --platform web
+// apk:    vulcan package examples/cubefield.vulcan --platform android
+//
+// WASD / joystick to walk, arrows or drag to look, Q quits, SPACE or tap
+// restarts. Collect the spinning cubes before the clock runs out; every
+// cube banks +3s. Runs on the C, JS and Python backends — the same
+// software 3D pipeline (depth-buffered triangles) renders the canvas,
+// and the 1.14 terminal presentation shows it at the terminal's native
+// pixel grid.
+
+import render3d
+
+const CUBES = 7
+const HALF = 12.0        // ground extent: -12..12 (6x6 quads of 4 units)
+const HEAD = 1.6         // eye height
+
+struct Cube { x: f64, z: f64, y: f64, spin: f64 }
+
+fn cube_at(x: f64, z: f64) -> Cube {
+    return Cube { x: x, z: z, y: 0.9, spin: 0.0 }
+}
+
+fn reset_cubes() -> [Cube] {
+    let cubes: [Cube] = []
+    let i = 0
+    while i < CUBES {
+        cubes.push(cube_at((rand_int(0, 20) - 10) as f64, (rand_int(2, 22)) as f64))
+        i = i + 1
+    }
+    return cubes
+}
+
+fn main() -> void {
+    term_raw()
+    defer { term_normal() }
+
+    // native terminal pixels: 1 canvas pixel = 1 terminal half-block pixel
+    let cols = screen_width()
+    let rows = screen_height()
+    if cols < 16 { cols = 16 }
+    if rows < 10 { rows = 10 }
+    canvas_resize(cols, rows * 2)
+
+    let cam = Camera { x: 0.0, y: HEAD, z: -9.0, yaw: 0.0, pitch: -0.05 }
+    let score = 0
+    let time_left = 45.0
+    let alive = true
+    let running = true
+    let esc = 0
+    let cubes = reset_cubes()
+    let last = ms_now()
+
+    loop {
+        if !running { break }
+        let now = ms_now()
+        let dt = (now - last) as f64 / 1000.0
+        last = now
+        if dt > 0.1 { dt = 0.1 }   // tab-away safety
+
+        // ---- input: arrows/look via escape codes, WASD via key_down ----
+        while key_ready() != 0 {
+            let k = read_key()
+            if k == 27 { esc = 1 }
+            elif k == 91 && esc == 1 { esc = 2 }
+            elif k >= 65 && k <= 68 && esc == 2 {
+                esc = 0
+                if k == 65 { cam.pitch = cam.pitch + 0.12 }    // up
+                if k == 66 { cam.pitch = cam.pitch - 0.12 }    // down
+                if k == 67 { cam.yaw = cam.yaw + 0.12 }        // right
+                if k == 68 { cam.yaw = cam.yaw - 0.12 }        // left
+            }
+            else {
+                esc = 0
+                if k == 113 { running = false }                 // q
+                if k == 32 && !alive {                          // space
+                    cam = Camera { x: 0.0, y: HEAD, z: -9.0, yaw: 0.0, pitch: -0.05 }
+                    score = 0
+                    time_left = 45.0
+                    alive = true
+                    cubes = reset_cubes()
+                    last = ms_now()
+                }
+            }
+        }
+        // mouse / touch drag look (web + IDE bundles)
+        let mdx = mouse_dx()
+        let mdy = mouse_dy()
+        if mdx != 0.0 || mdy != 0.0 {
+            cam.yaw = cam.yaw + mdx * 0.006
+            cam.pitch = cam.pitch - mdy * 0.006
+        }
+        // touch steering (mobile bundles): left half joystick already maps
+        // to WASD; any touch also looks toward the finger
+        if is_touch() && touch_count() > 0 {
+            let tx = touch_x(0)
+            if tx > canvas_width() as f64 / 2.0 {
+                cam.yaw = cam.yaw + 0.03
+            } else {
+                cam.yaw = cam.yaw - 0.03
+            }
+        }
+
+        // ---- movement (held keys: w/a/s/d) ----
+        if alive {
+            let f = cam_forward(cam)
+            let r = cam_right(cam)
+            let sp = 5.0 * dt
+            if key_down(119) { cam.x = cam.x + f.x * sp; cam.z = cam.z + f.z * sp }
+            if key_down(115) { cam.x = cam.x - f.x * sp; cam.z = cam.z - f.z * sp }
+            if key_down(97)  { cam.x = cam.x - r.x * sp; cam.z = cam.z - r.z * sp }
+            if key_down(100) { cam.x = cam.x + r.x * sp; cam.z = cam.z + r.z * sp }
+            if cam.x < -HALF { cam.x = -HALF }
+            if cam.x > HALF { cam.x = HALF }
+            if cam.z < -HALF { cam.z = -HALF }
+            if cam.z > HALF { cam.z = HALF }
+        }
+
+        // clamp look
+        if cam.pitch > 1.2 { cam.pitch = 1.2 }
+        if cam.pitch < -1.2 { cam.pitch = -1.2 }
+
+        // ---- game state ----
+        if alive {
+            time_left = time_left - dt
+            if time_left <= 0.0 {
+                time_left = 0.0
+                alive = false
+            }
+            let i = 0
+            while i < cubes.len() {
+                cubes[i].spin = cubes[i].spin + dt * 1.4
+                let dx = cubes[i].x - cam.x
+                let dz = cubes[i].z - cam.z
+                if dx * dx + dz * dz < 1.6 {
+                    score = score + 1
+                    time_left = time_left + 3.0
+                    cubes[i] = cube_at((rand_int(0, 20) - 10) as f64, (rand_int(-22, -4)) as f64)
+                }
+                i = i + 1
+            }
+        }
+
+        // ---- draw: sky + ground + cubes + HUD ----
+        clear(0x101828)
+        // ground: 6x6 quads, shaded by depth
+        let gz = -HALF
+        while gz < HALF {
+            let gx = -HALF
+            while gx < HALF {
+                let a = Vec3 { x: gx, y: 0.0, z: gz }
+                let b = Vec3 { x: gx + 4.0, y: 0.0, z: gz }
+                let c = Vec3 { x: gx + 4.0, y: 0.0, z: gz + 4.0 }
+                let d = Vec3 { x: gx, y: 0.0, z: gz + 4.0 }
+                let chk = 0x20502E
+                if ((gx / 4.0) as i64 + (gz / 4.0) as i64) % 2 == 0 { chk = 0x1A3A22 }
+                let d0 = cam.x - (gx + 2.0)
+                let d1 = cam.z - (gz + 2.0)
+                let dist = sqrt(d0 * d0 + d1 * d1)
+                draw_quad(cam, a, b, c, d, color_shade(chk, 1.2 - dist * 0.02))
+                gx = gx + 4.0
+            }
+            gz = gz + 4.0
+        }
+        // cubes: two visible faces of a spinning box
+        let i = 0
+        while i < cubes.len() {
+            let cb = cubes[i]
+            let s = sin(cb.spin)
+            let c = cos(cb.spin)
+            let h = 0.55
+            let base = Vec3 { x: cb.x, y: cb.y, z: cb.z }
+            // face A: rotated square facing +X, face B: facing +Z
+            let a1 = Vec3 { x: cb.x + c * h, y: cb.y - h, z: cb.z + s * h }
+            let a2 = Vec3 { x: cb.x + c * h, y: cb.y + h, z: cb.z + s * h }
+            let a3 = Vec3 { x: cb.x - s * h, y: cb.y + h, z: cb.z + c * h }
+            let a4 = Vec3 { x: cb.x - s * h, y: cb.y - h, z: cb.z + c * h }
+            draw_quad(cam, a1, a2, a3, a4, color_shade(0xD9A036, 0.75 + c * 0.25))
+            let b1 = Vec3 { x: cb.x - s * h, y: cb.y - h, z: cb.z + c * h }
+            let b2 = Vec3 { x: cb.x - s * h, y: cb.y + h, z: cb.z + c * h }
+            let b3 = Vec3 { x: cb.x - c * h, y: cb.y + h, z: cb.z - s * h }
+            let b4 = Vec3 { x: cb.x - c * h, y: cb.y - h, z: cb.z - s * h }
+            draw_quad(cam, b1, b2, b3, b4, color_shade(0xE06030, 0.75 + s * 0.25))
+            i = i + 1
+        }
+        // HUD (short text fits tiny phone terminals)
+        let hud = f"T {time_left as i64} C {score}"
+        draw_text(2.0, 2.0, hud, 0xD0D8E0)
+        if !alive {
+            draw_text(2.0, 10.0, "OVER", 0xFF6060)
+            draw_text(2.0, 18.0, "SPACE OR TAP", 0xD0D8E0)
+        }
+        present()
+        sleep_ms(15)
+    }
+}
