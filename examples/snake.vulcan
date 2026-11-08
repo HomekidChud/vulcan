@@ -1,0 +1,116 @@
+// examples/snake.vulcan — a playable snake, pure Vulcan, ~130 lines.
+//
+// run:      vulcan run examples/snake.vulcan
+// js/py:    vulcan run --target js examples/snake.vulcan
+// keys:     WASD or arrow keys to steer, SPACE restarts, Q quits
+//
+// Shows off the 1.14 frame-perfect terminal presentation: present() clears
+// into an alternate screen sized to your real terminal, and only re-emits
+// the cells that changed — flicker-free at any size, truecolor when the
+// terminal has it, 256-color otherwise.
+
+const CELL = 8.0        // pixel size of one grid cell
+const GW = 32           // grid width  (256 / 8)
+const GH = 18           // grid height (144 / 8)
+
+fn on_body(body: [i64], x: i64, y: i64) -> bool {
+    for i in 0 .. body.len() {
+        if body[i] == y * GW + x { return true }
+    }
+    return false
+}
+
+fn main() -> void {
+    term_raw()
+    defer { term_normal() }
+
+    let dx = 1
+    let dy = 0
+    let nx = 0
+    let ny = 0
+    let fx = 20
+    let fy = 9
+    let score = 0
+    let best = 0
+    let speed = 120
+    let alive = true
+    let esc = 0          // arrow-escape sequence state: 0 none, 1 saw ESC, 2 saw [
+    let body = [5 * GW + 9, 4 * GW + 9, 3 * GW + 9]
+    let hx = 5
+    let hy = 9
+    let last = ms_now()
+    let running = true
+
+    loop {
+        if !running { break }
+        // ---- input: drain every pending key this frame ----
+        while key_ready() != 0 {
+            let k = read_key()
+            if k == 27 { esc = 1 }
+            elif k == 91 && esc == 1 { esc = 2 }
+            elif k >= 65 && k <= 68 && esc == 2 {   // arrow key
+                esc = 0
+                if k == 65 && dy == 0 { dx = 0; dy = -1 }   // up
+                if k == 66 && dy == 0 { dx = 0; dy = 1 }    // down
+                if k == 67 && dx == 0 { dx = 1; dy = 0 }    // right
+                if k == 68 && dx == 0 { dx = -1; dy = 0 }   // left
+            }
+            else {
+                esc = 0
+                if k == 119 && dy == 0 { dx = 0; dy = -1 }  // w
+                if k == 115 && dy == 0 { dx = 0; dy = 1 }   // s
+                if k == 100 && dx == 0 { dx = 1; dy = 0 }   // d
+                if k == 97  && dx == 0 { dx = -1; dy = 0 }  // a
+                if k == 113 { running = false }              // q quits
+                if k == 32 && !alive {                       // space restarts
+                    body = [5 * GW + 9, 4 * GW + 9, 3 * GW + 9]
+                    hx = 5; hy = 9; dx = 1; dy = 0
+                    score = 0; speed = 120; alive = true; last = ms_now()
+                }
+            }
+        }
+
+        // ---- step the simulation on its own clock ----
+        if alive && ms_now() - last >= speed {
+            last = ms_now()
+            nx = hx + dx
+            ny = hy + dy
+            if nx < 0 || nx >= GW || ny < 0 || ny >= GH || on_body(body, nx, ny) {
+                alive = false
+                if score > best { best = score }
+            } else {
+                hx = nx
+                hy = ny
+                body.push(hy * GW + hx)
+                if hx == fx && hy == fy {
+                    score += 1
+                    if speed > 60 { speed -= 4 }
+                    loop {   // new food, never on the snake
+                        fx = rand_int(0, GW - 1)
+                        fy = rand_int(0, GH - 1)
+                        if !on_body(body, fx, fy) { break }
+                    }
+                } else {
+                    body.shift()   // didn't eat: drop the tail
+                }
+            }
+        }
+
+        // ---- draw ----
+        clear(0x101820)
+        for i in 0 .. body.len() {
+            let c = body[i]
+            let seg = 0x20A060
+            if i == body.len() - 1 { seg = 0x40E0A0 }   // brighter head
+            draw_rect((c % GW) * CELL + 1.0, (c / GW) * CELL + 1.0, CELL - 2.0, CELL - 2.0, seg)
+        }
+        draw_rect(fx * CELL + 1.0, fy * CELL + 1.0, CELL - 2.0, CELL - 2.0, 0xE05050)
+        draw_text(4.0, 4.0, f"SCORE {score}  BEST {best}", 0xD0D8E0)
+        if !alive {
+            draw_text(72.0, 64.0, "GAME OVER", 0xFF6060)
+            draw_text(40.0, 80.0, "SPACE TO RESTART", 0xD0D8E0)
+        }
+        present()
+        sleep_ms(10)
+    }
+}
