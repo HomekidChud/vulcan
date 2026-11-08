@@ -99,7 +99,9 @@ fn find_android_jar() -> Option<String> {
     let candidates = [
         format!("{prefix}/share/java/android.jar"),
         format!("{prefix}/usr/share/java/android.jar"),
+        format!("{prefix}/share/aapt/android.jar"),
         "/usr/share/java/android.jar".into(),
+        "/usr/share/aapt/android.jar".into(),
         format!("{}/android-sdk/platforms/android.jar", std::env::var("HOME").unwrap_or_default()),
         "android.jar".into(),
     ];
@@ -119,7 +121,7 @@ fn apk_build(dir: &str, name: &str) -> Result<(), String> {
     let aapt = find_tool(&["aapt", "aapt2"]).ok_or_else(|| "aapt not found — install it: pkg install aapt".to_string())?;
     let is_aapt2 = aapt.file_name().map(|f| f == "aapt2").unwrap_or(false);
     let aj = find_android_jar().ok_or_else(|| {
-        "android.jar not found — install the platform jar: pkg install aapt (ships android.jar in $PREFIX/share/java), or set ANDROID_JAR=/path/android.jar".to_string()
+        "android.jar not found — the ecj package ships it at $PREFIX/share/java/android.jar (pkg install ecj), aapt also provides one at $PREFIX/share/aapt/android.jar; or set ANDROID_JAR=/path/android.jar".to_string()
     })?;
     let ecj = find_tool(&["ecj", "javac"]).ok_or_else(|| "ecj not found — install it: pkg install ecj".to_string())?;
     let dexer = find_tool(&["d8", "dx"]).ok_or_else(|| "d8 not found — install it: pkg install d8".to_string())?;
