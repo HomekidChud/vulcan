@@ -148,6 +148,165 @@ function __key_ready() {
     return __stdin_eof ? 0 : 1;
 }
 function __sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+// ---- networking: TCP sockets, synchronously, over a worker bridge ----
+// Node sockets are async, but net_* must behave like the C/Python backends
+// (blocking calls, -1 on error, "" when no data). So all socket state lives
+// on a worker thread; every net_* call posts a command and blocks the main
+// thread with Atomics.wait until the worker writes the result into a
+// SharedArrayBuffer. Lazily created on first use — programs that never touch
+// net_* (including the web bundle) pay nothing and never need worker_threads.
+let __netrt = null;
+function __net() {
+    if (__netrt) return __netrt;
+    let wt = null;
+    try { wt = require("worker_threads"); } catch (e) { wt = null; }
+    if (!wt || !wt.Worker) {
+        throw new Error("vulcan: net_* builtins need Node.js worker_threads (not available in this environment)");
+    }
+    const SAB = new SharedArrayBuffer(16 + (1 << 20));
+    const H = new Int32Array(SAB, 0, 4); // [0]=done ticket [1]=len [2]=status [3]=int result
+    const B = new Uint8Array(SAB, 16);
+    const w = new wt.Worker("(" + __netWorkerFn.toString() + ")()", { eval: true });
+    w.unref(); // an open server socket must not keep the process alive after main returns
+    w.postMessage({ sab: SAB });
+    __netrt = { w, H, B, ticket: 0 };
+    return __netrt;
+}
+function __netWorkerFn() {
+    const parentPort = require("worker_threads").parentPort;
+    const net = require("net");
+    let H = null, B = null;
+    let next = 1;
+    const socks = new Map(); // handle -> {type, sock, pending:[], buf:[], alive}
+    function reply(m, status, strVal, intVal) {
+        if (!H) return;
+        const bytes = Buffer.from(strVal == null ? "" : String(strVal), "utf8");
+        B.set(bytes, 0);
+        Atomics.store(H, 1, bytes.length);
+        Atomics.store(H, 2, status);
+        Atomics.store(H, 3, intVal | 0);
+        Atomics.store(H, 0, m.ticket);
+        Atomics.notify(H, 0);
+    }
+    function registerConn(sock) {
+        const h = next++;
+        const e = { type: "conn", sock: sock, pending: [], buf: [], alive: true };
+        sock.on("data", (d) => e.buf.push(d));
+        sock.on("close", () => { e.alive = false; });
+        sock.on("error", () => { e.alive = false; try { sock.destroy(); } catch (x) {} });
+        socks.set(h, e);
+        return h;
+    }
+    parentPort.on("message", (m) => {
+        if (m.sab) { H = new Int32Array(m.sab, 0, 4); B = new Uint8Array(m.sab, 16); return; }
+        try {
+            switch (m.op) {
+                case "listen": {
+                    const h = next++;
+                    let done = false;
+                    const s = net.createServer((c) => {
+                        c.setNoDelay(true);
+                        socks.get(h).pending.push(registerConn(c));
+                    });
+                    socks.set(h, { type: "srv", sock: s, pending: [], buf: [], alive: true });
+                    s.on("error", () => { if (!done) { done = true; reply(m, -1, "", -1); } });
+                    s.listen(m.port | 0, "0.0.0.0", () => { if (!done) { done = true; reply(m, 0, "", h); } });
+                    return;
+                }
+                case "port": {
+                    const e = socks.get(m.h);
+                    if (!e) { reply(m, -1, "", -1); return; }
+                    const a = e.sock.address();
+                    reply(m, a ? 0 : -1, "", a ? a.port : -1);
+                    return;
+                }
+                case "accept": {
+                    const e = socks.get(m.h);
+                    if (!e || e.type !== "srv") { reply(m, -1, "", -1); return; }
+                    const ph = e.pending.shift();
+                    reply(m, 0, "", ph === undefined ? -1 : ph);
+                    return;
+                }
+                case "connect": {
+                    let done = false;
+                    const sock = net.createConnection({ host: m.host, port: m.port | 0 });
+                    sock.setTimeout(5000, () => { sock.destroy(); if (!done) { done = true; reply(m, -1, "", -1); } });
+                    sock.on("connect", () => { sock.setTimeout(0); if (!done) { done = true; reply(m, 0, "", registerConn(sock)); } });
+                    sock.on("error", () => { if (!done) { done = true; reply(m, -1, "", -1); } });
+                    return;
+                }
+                case "send": {
+                    const e = socks.get(m.h);
+                    if (!e || e.type !== "conn" || !e.alive) { reply(m, -1, "", -1); return; }
+                    e.sock.write(m.data, () => {});
+                    reply(m, 0, "", Buffer.byteLength(m.data, "utf8"));
+                    return;
+                }
+                case "recv": {
+                    const e = socks.get(m.h);
+                    if (!e || e.type !== "conn") { reply(m, 0, "", 0); return; }
+                    const s = e.buf.join("");
+                    e.buf = [];
+                    reply(m, 0, s, s.length);
+                    return;
+                }
+                case "ready": {
+                    const e = socks.get(m.h);
+                    if (!e) { reply(m, 0, "", 0); return; }
+                    const r = (e.type === "srv") ? e.pending.length > 0 : e.buf.length > 0;
+                    reply(m, 0, "", r ? 1 : 0);
+                    return;
+                }
+                case "alive": {
+                    const e = socks.get(m.h);
+                    reply(m, 0, "", (e && e.type === "conn" && e.alive) ? 1 : 0);
+                    return;
+                }
+                case "peer": {
+                    const e = socks.get(m.h);
+                    if (!e || e.type !== "conn") { reply(m, 0, "", 0); return; }
+                    reply(m, 0, (e.sock.remoteAddress || "") + ":" + (e.sock.remotePort || 0), 0);
+                    return;
+                }
+                case "close": {
+                    const e = socks.get(m.h);
+                    if (!e) { reply(m, 0, "", 0); return; }
+                    socks.delete(m.h);
+                    try { e.sock.destroy(); } catch (x) {}
+                    reply(m, 0, "", 1);
+                    return;
+                }
+            }
+            reply(m, -1, "", -1); // unknown op
+        } catch (e) {
+            reply(m, -1, "", -1);
+        }
+    });
+}
+function __netcmd(cmd) {
+    const rt = __net();
+    const t = ++rt.ticket;
+    cmd.ticket = t;
+    rt.w.postMessage(cmd);
+    Atomics.wait(rt.H, 0, t - 1, 30000); // 30s hard cap so a dead worker can't hang forever
+    if (Atomics.load(rt.H, 0) !== t) return { str: "", ival: -1 };
+    const status = Atomics.load(rt.H, 2);
+    const len = Atomics.load(rt.H, 1);
+    const ival = Atomics.load(rt.H, 3);
+    if (status < 0) return { str: "", ival: -1 };
+    return { str: Buffer.from(rt.B.buffer, 16, len).toString("utf8"), ival: ival };
+}
+function __net_listen(port) { return __netcmd({ op: "listen", port: port }).ival; }
+function __net_port(h) { return __netcmd({ op: "port", h: h }).ival; }
+function __net_accept(h) { return __netcmd({ op: "accept", h: h }).ival; }
+function __net_connect(host, port) { return __netcmd({ op: "connect", host: host, port: port }).ival; }
+function __net_send(h, data) { return __netcmd({ op: "send", h: h, data: data }).ival; }
+function __net_recv(h) { return __netcmd({ op: "recv", h: h }).str; }
+function __net_ready(h) { return __netcmd({ op: "ready", h: h }).ival === 1; }
+function __net_alive(h) { return __netcmd({ op: "alive", h: h }).ival === 1; }
+function __net_peer(h) { return __netcmd({ op: "peer", h: h }).str; }
+function __net_close(h) { return __netcmd({ op: "close", h: h }).ival === 1; }
+function __chr(c) { return String.fromCharCode(c & 0xffff); }
 function __ms_now() { return Date.now(); }
 function __clock() { return performance.now() / 1000; }
 function __rand() { return Math.floor(Math.random() * 2147483647); }
@@ -537,23 +696,29 @@ pub fn generate_js(program: &[Item]) -> String {
         }
     }
     let _ = writeln!(out, "\n// ---- program ----");
+    // The user program lives inside an IIFE: a vulcan fn named `process`,
+    // `console`, `require` etc. must never shadow the Node globals the
+    // prelude depends on (function declarations hoist, so aliases alone
+    // would not save us).
+    out.push_str(";(function(){\n");
     out.push_str(&g.body);
     out.push_str("\n// ---- main ----\n");
     let main_ret = g.fns.get("main").map(|(_, r)| r.clone()).unwrap_or(Ty::Void);
     out.push_str("async function __vulcan_boot() {\n");
     if main_ret == Ty::I64 {
         out.push_str("  const __r = await main();\n");
-        out.push_str("  if (typeof __r === \"number\" && typeof process !== \"undefined\") process.exit(__r);\n");
+        out.push_str("  if (typeof __r === \"number\" && typeof globalThis.process !== \"undefined\") globalThis.process.exit(__r);\n");
     } else {
         out.push_str("  await main();\n");
     }
     out.push_str("}\n");
     out.push_str("if (typeof __VULCAN_NO_BOOT === \"undefined\") __vulcan_boot().catch(function (e) {\n");
     out.push_str("  if (!(e && e.__vulcan_exit)) {\n");
-    out.push_str("    if (typeof console !== \"undefined\") console.error(e && e.stack || e);\n");
-    out.push_str("    if (typeof process !== \"undefined\") process.exit(1);\n");
+    out.push_str("    if (typeof globalThis.console !== \"undefined\") globalThis.console.error(e && e.stack || e);\n");
+    out.push_str("    if (typeof globalThis.process !== \"undefined\") globalThis.process.exit(1);\n");
     out.push_str("  }\n");
     out.push_str("});\n");
+    out.push_str("})();\n");
     out
 }
 
@@ -1829,6 +1994,77 @@ impl JsGen {
                 let (c, t) = self.gen_expr(&args[0]);
                 if t != Ty::Str { panic!("vulcan: file_exists needs a string path"); }
                 (format!("__fs.existsSync({c})"), Ty::Bool)
+            }
+            // ---- networking: TCP sockets (handles are i64; -1 = error) ----
+            "net_listen" => {
+                if args.len() != 1 { panic!("vulcan: net_listen(port) takes 1 arg"); }
+                let (c, t) = self.gen_expr(&args[0]);
+                let c = self.cast(&c, &t, &Ty::I64);
+                (format!("__net_listen({c})"), Ty::I64)
+            }
+            "net_port" => {
+                if args.len() != 1 { panic!("vulcan: net_port(sock) takes 1 arg"); }
+                let (c, t) = self.gen_expr(&args[0]);
+                let c = self.cast(&c, &t, &Ty::I64);
+                (format!("__net_port({c})"), Ty::I64)
+            }
+            "net_accept" => {
+                if args.len() != 1 { panic!("vulcan: net_accept(sock) takes 1 arg"); }
+                let (c, t) = self.gen_expr(&args[0]);
+                let c = self.cast(&c, &t, &Ty::I64);
+                (format!("__net_accept({c})"), Ty::I64)
+            }
+            "net_connect" => {
+                if args.len() != 2 { panic!("vulcan: net_connect(host, port) takes 2 args"); }
+                let (h, ht) = self.gen_expr(&args[0]);
+                if ht != Ty::Str { panic!("vulcan: net_connect needs a string host"); }
+                let (p, pt) = self.gen_expr(&args[1]);
+                let p = self.cast(&p, &pt, &Ty::I64);
+                (format!("__net_connect({h}, {p})"), Ty::I64)
+            }
+            "net_send" => {
+                if args.len() != 2 { panic!("vulcan: net_send(conn, data) takes 2 args"); }
+                let (h, ht) = self.gen_expr(&args[0]);
+                let h = self.cast(&h, &ht, &Ty::I64);
+                let (d, dt) = self.gen_expr(&args[1]);
+                if dt != Ty::Str { panic!("vulcan: net_send needs string data"); }
+                (format!("__net_send({h}, {d})"), Ty::I64)
+            }
+            "net_recv" => {
+                if args.len() != 1 { panic!("vulcan: net_recv(conn) takes 1 arg"); }
+                let (c, t) = self.gen_expr(&args[0]);
+                let c = self.cast(&c, &t, &Ty::I64);
+                (format!("__net_recv({c})"), Ty::Str)
+            }
+            "net_ready" => {
+                if args.len() != 1 { panic!("vulcan: net_ready(sock) takes 1 arg"); }
+                let (c, t) = self.gen_expr(&args[0]);
+                let c = self.cast(&c, &t, &Ty::I64);
+                (format!("__net_ready({c})"), Ty::Bool)
+            }
+            "net_alive" => {
+                if args.len() != 1 { panic!("vulcan: net_alive(conn) takes 1 arg"); }
+                let (c, t) = self.gen_expr(&args[0]);
+                let c = self.cast(&c, &t, &Ty::I64);
+                (format!("__net_alive({c})"), Ty::Bool)
+            }
+            "net_peer" => {
+                if args.len() != 1 { panic!("vulcan: net_peer(conn) takes 1 arg"); }
+                let (c, t) = self.gen_expr(&args[0]);
+                let c = self.cast(&c, &t, &Ty::I64);
+                (format!("__net_peer({c})"), Ty::Str)
+            }
+            "net_close" => {
+                if args.len() != 1 { panic!("vulcan: net_close(sock) takes 1 arg"); }
+                let (c, t) = self.gen_expr(&args[0]);
+                let c = self.cast(&c, &t, &Ty::I64);
+                (format!("__net_close({c})"), Ty::Bool)
+            }
+            "chr" => {
+                if args.len() != 1 { panic!("vulcan: chr(code) takes 1 arg"); }
+                let (c, t) = self.gen_expr(&args[0]);
+                let c = self.cast(&c, &t, &Ty::I64);
+                (format!("__chr({c})"), Ty::Str)
             }
             "arg_count" => (format!("(process.argv.length - 2)"), Ty::I64),
             "arg" => {

@@ -1,6 +1,58 @@
 // Embedded self-test suite: compiles and runs sample programs, verifying output.
 use std::process::Command;
 
+// HTTP client selftest main — appended after lib/http.vulcan
+const HTTP_TEST_MAIN: &str = r#"
+fn wait_ready(h: i64) -> bool {
+    for i in 0 .. 500 {
+        if net_ready(h) { return true }
+        sleep_ms(2)
+    }
+    return false
+}
+
+fn recv_until(h: i64, marker: string) -> string {
+    let data = ""
+    let idle = 0
+    while data.find(marker) < 0 {
+        if net_ready(h) {
+            data = data + net_recv(h)
+            idle = 0
+        } else {
+            idle += 1
+            if idle > 500 { break }
+            sleep_ms(2)
+        }
+    }
+    return data
+}
+
+fn main() -> void {
+    // a real HTTP/1.1 exchange over a TCP socket, parsed by lib/http.vulcan:
+    // this program is both the client and the (one-request) server
+    let srv = net_listen(0)
+    let port = net_port(srv)
+    let c = net_connect("127.0.0.1", port)
+    print("conn:", c >= 0)
+    print("pending:", wait_ready(srv))
+    let s = net_accept(srv)
+    print("accepted:", s >= 0)
+    net_send(c, "GET /hello HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+    let req = recv_until(s, "\r\n\r\n")
+    let lines = req.split("\r\n")
+    print("method line:", lines[0])
+    net_send(s, "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 11\r\n\r\nhello world")
+    let resp = recv_until(c, "hello world")
+    print("status:", http_status(resp))
+    print("type:", http_header(resp, "content-type"))
+    print("len:", http_header(resp, "Content-Length"))
+    print("body:", http_body(resp))
+    print("close:", net_close(c), net_close(s), net_close(srv))
+}
+"#;
+
+const HTTP_TEST_EXPECTED: &str = "conn: true\npending: true\naccepted: true\nmethod line: GET /hello HTTP/1.1\nstatus: 200\ntype: text/plain\nlen: 11\nbody: hello world\nclose: true true true\n";
+
 // String-builder selftest main — appended after lib/strbuf.vulcan
 const STRBUF_TEST_MAIN: &str = r#"
 fn main() -> void {
@@ -1020,6 +1072,46 @@ fn main() -> void {
 "#,
         expected: "map: 2 4 6 8 10 12\nfilter: 2 4 6\nreduce: 21\nany: true all: true\nfor_each: 1 2 3 4 5 6\nstrings: ADA,GRACE,LINUS\nfmt: <1><2><3><4><5><6>\nchained: 3 6\n",
     },
+    Case {
+        name: "networking: TCP sockets (all backends)",
+        src: r#"
+fn wait_ready(h: i64) -> bool {
+    for i in 0 .. 500 {
+        if net_ready(h) { return true }
+        sleep_ms(2)
+    }
+    return false
+}
+
+fn main() -> void {
+    // a full TCP round trip in one process: listen on an ephemeral port,
+    // connect to it, accept, exchange data both ways, close everything
+    let srv = net_listen(0)
+    print("listen:", srv >= 0)
+    let port = net_port(srv)
+    print("port:", port > 0)
+    let c = net_connect("127.0.0.1", port)
+    print("connect:", c >= 0)
+    print("pending:", wait_ready(srv))
+    let s = net_accept(srv)
+    print("accept:", s >= 0)
+    print("peer:", net_peer(s) != "")
+    print("alive:", net_alive(c), net_alive(s))
+    print("send:", net_send(s, "hello client"))
+    print("recv:", recv_all(c))
+    print("send2:", net_send(c, "hi server"))
+    print("recv2:", recv_all(s))
+    print("close:", net_close(c), net_close(s), net_close(srv))
+    print("dead:", net_alive(c))
+}
+
+fn recv_all(h: i64) -> string {
+    if wait_ready(h) == false { return "" }
+    return net_recv(h)
+}
+"#,
+        expected: "listen: true\nport: true\nconnect: true\npending: true\naccept: true\npeer: true\nalive: true true\nsend: 12\nrecv: hello client\nsend2: 9\nrecv2: hi server\nclose: true true true\ndead: false\n",
+    },
 ];
 
 // ---- `vulcan doc` — print the public API of a file (or every lib/*.vulcan) ----
@@ -1126,6 +1218,9 @@ pub fn selftest() {
     // the string-builder case: lib source + test main
     let strbuf_src = include_str!("../lib/strbuf.vulcan").to_string() + STRBUF_TEST_MAIN;
     failures += run_case("string replace/join + strbuf (all backends)", &strbuf_src, STRBUF_TEST_EXPECTED, &dir);
+    // the http client case: lib source + test main (a real socket exchange)
+    let http_src = include_str!("../lib/http.vulcan").to_string() + HTTP_TEST_MAIN;
+    failures += run_case("http client over net sockets (all backends)", &http_src, HTTP_TEST_EXPECTED, &dir);
     for case in CASES {
         failures += run_case(case.name, case.src, case.expected, &dir);
     }
@@ -1133,7 +1228,7 @@ pub fn selftest() {
         eprintln!("{failures} selftest case(s) failed");
         std::process::exit(1);
     }
-    println!("vulcan selftest: {} cases passed", CASES.len() + 4);
+    println!("vulcan selftest: {} cases passed", CASES.len() + 5);
 }
 
 fn run_case(name: &str, src: &str, expected: &str, dir: &std::path::Path) -> usize {

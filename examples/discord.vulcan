@@ -1,0 +1,349 @@
+// examples/discord.vulcan — a Discord-style chat server + client in pure Vulcan.
+//
+// Built on the net_* TCP socket builtins: no threads, no runtime — one
+// single-threaded event loop per process, exactly like the rest of the
+// language. Run two terminals:
+//
+//   vulcan run examples/discord.vulcan server            # port 7777
+//   vulcan run examples/discord.vulcan server 0          # ephemeral port (printed)
+//   vulcan run examples/discord.vulcan client 127.0.0.1 7777 alice
+//
+// The server hosts channels with join/part notifications, nick changes,
+// direct messages, per-channel history and presence; the client is a raw-mode
+// terminal line editor that renders incoming messages live while you type.
+
+struct User {
+    nick: string,
+    chan: i64,     // index into Server.chans
+    conn: i64,     // net handle
+    buf: string,   // partial line buffer
+}
+
+struct Server {
+    users: [User],
+    hist: [string],   // flat "chan|nick|text" log, capped
+    chans: [string],
+    srv: i64,
+}
+
+// ---------- helpers ----------
+
+fn chan_index(chans: [string], name: string) -> i64 {
+    let n = name
+    if n.starts_with("#") == false { n = "#" + n }
+    for i in 0 .. chans.len() {
+        if chans[i] == n { return i }
+    }
+    return -1
+}
+
+fn norm_chan(name: string) -> string {
+    if name.starts_with("#") { return name }
+    return "#" + name
+}
+
+fn find_by_conn(users: [User], conn: i64) -> i64 {
+    for i in 0 .. users.len() {
+        if users[i].conn == conn { return i }
+    }
+    return -1
+}
+
+fn find_by_nick(users: [User], nick: string) -> i64 {
+    for i in 0 .. users.len() {
+        if users[i].nick == nick { return i }
+    }
+    return -1
+}
+
+fn send_line(conn: i64, line: string) -> void {
+    net_send(conn, line + "\n")
+}
+
+fn sys(conn: i64, text: string) -> void {
+    send_line(conn, "SYS|" + text)
+}
+
+fn err(conn: i64, text: string) -> void {
+    send_line(conn, "ERR|" + text)
+}
+
+fn push_hist(st: &mut Server, line: string) -> void {
+    st.hist.push(line)
+    if st.hist.len() > 120 { st.hist.shift() }
+}
+
+fn broadcast(st: &mut Server, chan: i64, nick: string, text: string) -> void {
+    let line = "MSG|" + st.chans[chan] + "|" + nick + "|" + text
+    push_hist(st, st.chans[chan] + "|" + nick + "|" + text)
+    for i in 0 .. st.users.len() {
+        if st.users[i].chan == chan { send_line(st.users[i].conn, line) }
+    }
+    print("server: [" + st.chans[chan] + "] " + nick + ": " + text)
+}
+
+fn sys_to_chan(st: &mut Server, chan: i64, text: string) -> void {
+    for i in 0 .. st.users.len() {
+        if st.users[i].chan == chan { sys(st.users[i].conn, text) }
+    }
+}
+
+// ---------- command handling ----------
+
+fn handle_line(st: &mut Server, i: i64, line: string) -> void {
+    let conn = st.users[i].conn
+    let nick = st.users[i].nick
+    let chan = st.users[i].chan
+    if line == "" { return }
+    if line.starts_with("/nick ") {
+        let n = line.substring(6, line.len()).trim()
+        if n == "" { err(conn, "usage: /nick <name>"); return }
+        let old = st.users[i].nick
+        st.users[i].nick = n
+        sys(conn, "you are now known as " + n)
+        sys_to_chan(st, chan, old + " is now known as " + n)
+        print("server: " + old + " -> " + n)
+        return
+    }
+    if line.starts_with("/join ") {
+        let name = line.substring(6, line.len()).trim()
+        let c = chan_index(st.chans, name)
+        if c < 0 { err(conn, "no such channel: " + norm_chan(name)); return }
+        if c == chan { err(conn, "already in " + st.chans[chan]); return }
+        sys_to_chan(st, chan, nick + " left " + st.chans[chan])
+        st.users[i].chan = c
+        sys(conn, "joined " + st.chans[c] + " (say hi)")
+        sys_to_chan(st, c, nick + " joined " + st.chans[c])
+        print("server: " + nick + " -> " + st.chans[c])
+        return
+    }
+    if line.starts_with("/msg ") {
+        let rest = line.substring(5, line.len())
+        let sp = rest.find(" ")
+        if sp < 0 { err(conn, "usage: /msg <nick> <text>"); return }
+        let target = rest.substring(0, sp).trim()
+        let text = rest.substring(sp + 1, rest.len()).trim()
+        let t = find_by_nick(st.users, target)
+        if t < 0 { err(conn, "no such user: " + target); return }
+        send_line(st.users[t].conn, "DM|" + nick + "|" + text)
+        sys(conn, "dm to " + target + ": " + text)
+        print("server: dm " + nick + " -> " + target)
+        return
+    }
+    if line == "/who" {
+        let names: [string] = []
+        for j in 0 .. st.users.len() {
+            if st.users[j].chan == chan { names.push(st.users[j].nick) }
+        }
+        sys(conn, "in " + st.chans[chan] + ": " + names.join(", "))
+        return
+    }
+    if line == "/channels" {
+        sys(conn, "channels: " + st.chans.join(" "))
+        return
+    }
+    if line == "/history" {
+        let shown = 0
+        for j in 0 .. st.hist.len() {
+            let h = st.hist[j]
+            if h.starts_with(st.chans[chan] + "|") {
+                let rest = h.substring(st.chans[chan].len() + 1, h.len())
+                let p = rest.find("|")
+                if p >= 0 {
+                    send_line(conn, "MSG|" + st.chans[chan] + "|" + rest.substring(0, p) + "|" + rest.substring(p + 1, rest.len()))
+                    shown += 1
+                }
+            }
+        }
+        sys(conn, "-- end of history (" + f"{shown}" + " messages) --")
+        return
+    }
+    if line == "/help" {
+        sys(conn, "commands: /nick <name>  /join <#chan>  /msg <nick> <text>")
+        sys(conn, "          /who  /channels  /history  /help  /quit")
+        return
+    }
+    if line == "/quit" {
+        sys(conn, "bye")
+        net_close(conn)
+        let ch = st.users[i].chan
+        st.users.remove(i)
+        sys_to_chan(st, ch, nick + " left " + st.chans[ch])
+        print("server: " + nick + " disconnected")
+        return
+    }
+    if line.starts_with("/") {
+        err(conn, "unknown command: " + line + " (try /help)")
+        return
+    }
+    // plain chat message -> broadcast to the sender's channel
+    broadcast(st, chan, nick, line)
+}
+
+// ---------- server ----------
+
+fn run_server() -> void {
+    let port = 7777
+    if arg_count() >= 2 { port = to_int(arg(1)) }
+    let srv = net_listen(port)
+    if srv < 0 { print("server: cannot listen on port ", port); exit(1) }
+    let real_port = net_port(srv)
+    let us: [User] = []
+    let hist: [string] = []
+    let st = Server {
+        users: us,
+        hist: hist,
+        chans: ["#general", "#random", "#dev"],
+        srv: srv,
+    }
+    print("server: listening on port " + f"{real_port}")
+    print("server: channels: " + st.chans.join(" "))
+
+    while true {
+        // new connections
+        if net_ready(st.srv) {
+            let c = net_accept(st.srv)
+            if c >= 0 {
+                st.users.push(User { nick: "guest" + f"{c}", chan: 0, conn: c, buf: "" })
+                sys(c, "welcome to Vulcan Discord!")
+                sys(c, "you are in #general — set a name with /nick <name>")
+                sys(c, "commands: /help")
+                print("server: connection from " + net_peer(c))
+            }
+        }
+        // existing users, back to front so removals don't shift pending work
+        let i = st.users.len() - 1
+        while i >= 0 {
+            let conn = st.users[i].conn
+            if net_ready(conn) {
+                st.users[i].buf = st.users[i].buf + net_recv(conn)
+                while true {
+                    let nl = st.users[i].buf.find("\n")
+                    if nl < 0 { break }
+                    let line = st.users[i].buf.substring(0, nl).trim()
+                    st.users[i].buf = st.users[i].buf.substring(nl + 1, st.users[i].buf.len())
+                    if find_by_conn(st.users, conn) < 0 { break }  // /quit removed us
+                    handle_line(st, find_by_conn(st.users, conn), line)
+                }
+            }
+            if find_by_conn(st.users, conn) < 0 {
+                i -= 1
+                continue
+            }
+            if net_alive(conn) == false {
+                let nick = st.users[i].nick
+                let ch = st.users[i].chan
+                net_close(conn)
+                st.users.remove(i)
+                sys_to_chan(st, ch, nick + " left " + st.chans[ch])
+                print("server: " + nick + " dropped")
+            }
+            i -= 1
+        }
+        sleep_ms(20)
+    }
+}
+
+// ---------- client ----------
+
+fn handle_server_line(line: string) -> void {
+    if line.starts_with("MSG|") {
+        let rest = line.substring(4, line.len())
+        let p1 = rest.find("|")
+        if p1 < 0 { return }
+        let p2 = rest.find("|")
+        // parse chan|nick|text manually: first | then next |
+        let chan = rest.substring(0, p1)
+        let after = rest.substring(p1 + 1, rest.len())
+        let p3 = after.find("|")
+        if p3 < 0 { return }
+        print("[" + chan + "] " + after.substring(0, p3) + ": " + after.substring(p3 + 1, after.len()))
+        return
+    }
+    if line.starts_with("DM|") {
+        let rest = line.substring(3, line.len())
+        let p = rest.find("|")
+        if p < 0 { return }
+        print("[dm " + rest.substring(0, p) + "] " + rest.substring(p + 1, rest.len()))
+        return
+    }
+    if line.starts_with("SYS|") {
+        print("* " + line.substring(4, line.len()))
+        return
+    }
+    if line.starts_with("ERR|") {
+        print("! " + line.substring(4, line.len()))
+        return
+    }
+}
+
+fn run_client() -> void {
+    let host = "127.0.0.1"
+    if arg_count() >= 2 { host = arg(1) }
+    let port = 7777
+    if arg_count() >= 3 { port = to_int(arg(2)) }
+    let conn = net_connect(host, port)
+    if conn < 0 { print("client: cannot connect to " + host + ":" + f"{port}"); exit(1) }
+    print("client: connected to " + host + ":" + f"{port}")
+    if arg_count() >= 4 {
+        send_line(conn, "/nick " + arg(3))
+    }
+    term_raw()
+    defer { term_normal() }
+    let buf = ""
+    let inbox = ""
+    put("> ")
+    while true {
+        if net_ready(conn) {
+            inbox = inbox + net_recv(conn)
+            while true {
+                let nl = inbox.find("\n")
+                if nl < 0 { break }
+                let line = inbox.substring(0, nl)
+                inbox = inbox.substring(nl + 1, inbox.len())
+                handle_server_line(line)
+            }
+            put("> ")
+        }
+        if key_ready() != 0 {
+            let k = read_key()
+            if k == 10 || k == 13 {
+                print("")
+                if buf != "" { send_line(conn, buf) }
+                buf = ""
+                put("> ")
+            } elif k == 127 || k == 8 {
+                if buf.len() > 0 {
+                    buf = buf.substring(0, buf.len() - 1)
+                    put("\b \b")
+                }
+            } elif k == 3 || k == 4 {
+                send_line(conn, "/quit")
+                print("")
+                net_close(conn)
+                exit(0)
+            } elif k >= 32 && k < 127 {
+                buf = buf + chr(k)
+                put(chr(k))
+            }
+        }
+        if net_alive(conn) == false {
+            print("")
+            print("* disconnected from server")
+            exit(0)
+        }
+        sleep_ms(25)
+    }
+}
+
+fn main() -> void {
+    if arg_count() < 1 {
+        print("usage: discord server [port]   — start the chat server")
+        print("       discord client [host] [port] [nick] — join it")
+        exit(1)
+    }
+    if arg(0) == "server" { run_server(); return }
+    if arg(0) == "client" { run_client(); return }
+    print("unknown mode: " + arg(0))
+    exit(1)
+}

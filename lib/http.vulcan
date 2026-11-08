@@ -1,0 +1,57 @@
+// lib/http.vulcan — a tiny HTTP/1.1 client written in pure Vulcan.
+// Built directly on the net_* socket builtins: no runtime, no dependencies,
+// works identically on the C, JS and Python backends.
+
+fn http_get(host: string, port: i64, path: string) -> string {
+    // one blocking GET; returns the full response (headers + body) or ""
+    let c = net_connect(host, port)
+    if c < 0 { return "" }
+    let req = "GET " + path + " HTTP/1.1\r\nHost: " + host + "\r\nUser-Agent: vulcan-http/1.16\r\nAccept: */*\r\nConnection: close\r\n\r\n"
+    net_send(c, req)
+    let resp = ""
+    let idle = 0
+    while true {
+        if net_ready(c) {
+            resp = resp + net_recv(c)
+            idle = 0
+        } else {
+            if net_alive(c) == false { break }
+            idle += 1
+            if idle > 2000 { break }  // 4s cap
+            sleep_ms(2)
+        }
+    }
+    net_close(c)
+    return resp
+}
+
+fn http_status(resp: string) -> i64 {
+    // "HTTP/1.1 200 OK" -> 200 (0 if unparseable)
+    let sp = resp.find(" ")
+    if sp < 0 { return 0 }
+    let rest = resp.substring(sp + 1, resp.len())
+    let sp2 = rest.find(" ")
+    if sp2 < 0 { return to_int(rest) }
+    return to_int(rest.substring(0, sp2))
+}
+
+fn http_body(resp: string) -> string {
+    // everything after the first \r\n\r\n
+    let i = resp.find("\r\n\r\n")
+    if i < 0 { return "" }
+    return resp.substring(i + 4, resp.len())
+}
+
+fn http_header(resp: string, name: string) -> string {
+    // case-insensitive lookup of a response header; "" if absent
+    let lines = resp.split("\r\n")
+    for l in lines {
+        let c = l.find(":")
+        if c > 0 {
+            if l.substring(0, c).upper() == name.upper() {
+                return l.substring(c + 1, l.len()).trim()
+            }
+        }
+    }
+    return ""
+}

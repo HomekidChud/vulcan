@@ -3,6 +3,73 @@
 Per-version history, newest first. The version number lives in Cargo.toml
 (single source of truth, exposed by `vulcan --version`).
 
+## 1.16.0 — the networked language: TCP sockets, HTTP, Discord-style chat
+
+**Vulcan learns to talk to the world.** A TCP socket layer with identical
+semantics on all three backends, a pure-Vulcan HTTP client, and a
+Discord-style chat app that exercises the entire stack — server, clients,
+raw-mode line editing, channels, DMs and presence.
+
+### Networking: `net_*` builtins on every backend
+
+```vulcan
+let sock = net_listen(0)                 // 0 = ephemeral port
+print("listening on port ", net_port(sock))
+let conn  = net_connect("127.0.0.1", net_port(sock))
+net_send(conn, "hello\n")
+while net_ready(conn) == false { sleep_ms(2) }
+print(net_recv(conn))
+```
+
+- `net_listen(port)` (0 = ephemeral), `net_port(sock)`, `net_accept(sock)`
+  (non-blocking, `-1` if none), `net_connect(host, port)` (5s timeout),
+  `net_send(conn, data)`, `net_recv(conn)` (non-blocking), `net_ready(sock)`,
+  `net_alive(conn)`, `net_peer(conn)`, `net_close(h)`.
+- Text-oriented (NUL truncates a message), handle-table design so `-1`/`0`
+  never collide with real OS resources.
+- C: POSIX sockets (`_WIN32` guarded with winsock); JS: a `worker_threads`
+  socket worker behind a `SharedArrayBuffer` + `Atomics.wait` protocol;
+  Python: `socket` + `select`. All byte-identical in output.
+- `chr(code)` joins `read_key`/`key_ready` for building line editors.
+- Two new selftest cases (35 total): TCP sockets and HTTP-over-sockets on
+  all backends.
+
+### lib/http.vulcan — HTTP/1.1 client in pure Vulcan
+
+```vulcan
+let r = http_get("example.com", 80, "/")
+print(http_status(r))     // 200
+print(http_body(r))
+print(http_header(r, "content-type"))
+```
+
+### examples/discord.vulcan — Discord-style chat
+
+`discord server [port]` starts a multi-client chat server with #general,
+#random and #dev; `discord client [host] [port] [nick]` joins it with a
+raw-mode line editor (backspace, Ctrl-C/Ctrl-D to quit). Commands:
+`/nick /join /msg /who /channels /history /help /quit`. Presence and part
+notices, DMs, per-channel history (capped at 120 lines) with `/history`
+replay. `scripts/e2e-discord.sh` runs a scripted alice/bob conversation and
+asserts both server and client behaviour on all three backends.
+
+### Runtime hardening: user names can't shadow host runtimes
+
+A vulcan `fn sys(...)` used to silently disable `key_ready()` on the
+Python backend (the generated module-level function shadowed Python's
+`sys` module, and the prelude swallowed the resulting `AttributeError`).
+The Python prelude now imports its modules under private aliases, and the
+JS backend wraps the user program in an IIFE so its declarations can never
+shadow Node globals (`process`, `console`, `require`, ...). User code may
+freely name functions `sys`, `os`, `time`, `select`, `process`, etc. on
+every backend.
+
+### Long-running servers flush stdout
+
+The C runtime now sets line-buffered stdout and the Python backend
+reconfigures `sys.stdout` for line buffering — servers piped to a log file
+no longer hold output in a 4 KiB buffer.
+
 ## 1.15.0 — a real language ecosystem: closures, iterators, packages, installer
 
 **Vulcan grows from a compiler into an ecosystem.** Like Rust (rustup + cargo)

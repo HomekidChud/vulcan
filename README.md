@@ -35,15 +35,15 @@ static musl binary that runs on Termux, and the installer wires PATH through
 
 ## What's new
 
-The current release is **1.15** (see `vulcan --version`): **a real language
-ecosystem**. Closures and iterator methods (`map`/`filter`/`reduce`/`any`/
-`all`/`for_each`, with captures and chaining) on all three backends; a
-rustup-style installer (`vulcanup.sh`) and `vulcan self-update`; a package
-registry — `vulcan search` / `add` / `remove` / `update` / `publish` — backed
-by a GitHub index; and tagged releases with prebuilt static binaries
-(x86_64, aarch64/Termux, macOS). The compiler still lives in
-`self/vulc.vulcan` and `vulcan bootstrap` still proves the fixpoint. The full
-per-version history lives in [CHANGELOG.md](CHANGELOG.md).
+The current release is **1.16** (see `vulcan --version`): **the networked
+language**. TCP sockets (`net_listen`/`net_connect`/`net_send`/`net_recv`
+and friends) with identical semantics on all three backends, a pure-Vulcan
+HTTP/1.1 client (`lib/http.vulcan`), a Discord-style chat app that proves
+the whole stack (`examples/discord.vulcan` + `scripts/e2e-discord.sh`), and
+name-shadowing hardening so a user `fn sys()` can never break the Python or
+JS runtimes. The compiler still lives in `self/vulc.vulcan` and
+`vulcan bootstrap` still proves the fixpoint. The full per-version history
+lives in [CHANGELOG.md](CHANGELOG.md).
 
 ## Self-hosting
 
@@ -147,6 +147,23 @@ vulcan run examples/todo.vulcan add "buy milk"       # args after the file are f
 
 Requires `clang` or `gcc` on your PATH for the default C backend (clang is preferred for faster loops). The `js` and `py` targets need `node` / `python3` installed.
 
+## Networking
+
+```bash
+vulcan run examples/discord.vulcan server          # start the chat server (ephemeral port)
+vulcan run examples/discord.vulcan client 127.0.0.1 <port> alice   # join it
+```
+
+TCP sockets with the same semantics on every backend — `net_listen`,
+`net_connect`, `net_send`, `net_recv`, `net_accept`, `net_ready`,
+`net_alive`, `net_peer`, `net_close` — plus `chr` for line editors and a
+pure-Vulcan HTTP/1.1 client in `lib/http.vulcan`
+(`http_get` / `http_status` / `http_body` / `http_header`). The Discord-style
+chat app exercises the entire stack: multi-client servers, raw-mode line
+editing, channel history, DMs and presence — and
+`scripts/e2e-discord.sh` runs the whole conversation as a test on all three
+backends. Details in [docs/net.md](docs/net.md).
+
 ## Making games
 
 The full game stack is built in — timing (`ms_now`, `sleep_ms`), non-blocking keyboard input (`key_ready`, `read_key`, `term_raw`), drawing (`print_at`, `clear_screen`, `set_color`, `cursor_visible`), screen size (`screen_width`, `screen_height`), and randomness (`rand_int`). The canonical game loop:
@@ -248,6 +265,8 @@ The physics engine (`import physics`) follows the copy-in/copy-out discipline th
 - `examples/tour.vulcan` — a tour of every feature (runs identically on all backends)
 - `examples/impl_demo.vulcan` — struct methods (`impl`) across all three backends
 - `examples/todo.vulcan` — a CLI todo app: subcommands, file persistence, struct lists with impl methods
+- `examples/discord.vulcan` — a Discord-style chat: TCP server, raw-mode client line editor, channels, DMs, presence
+- `lib/http.vulcan` — a pure-Vulcan HTTP/1.1 client (`http_get` and friends) built on the socket layer
 - `examples/ffi_demo.vulcan` — calling C libraries (`extern "c"` + `link`)
 - `lib/engine.vulcan` — the Vulcan Engine (entities, terrain, player controller, HUD)
 - `lib/render3d.vulcan`, `lib/physics.vulcan` — 3D math and 2D rigid-body physics

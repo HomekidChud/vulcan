@@ -105,6 +105,7 @@ static void vbool_insert(VecBool* v, int64_t i, int8_t x){ if(i<0||i>v->len){ fp
 static void vstr_remove(VecStr* v, int64_t i){ if(i<0||i>=v->len){ fprintf(stderr,"vulcan: index out of bounds\n"); exit(1);} memmove(v->data+i, v->data+i+1, (size_t)(v->len-i-1)*sizeof(char*)); v->len--; }
 static void vstr_insert(VecStr* v, int64_t i, char* x){ if(i<0||i>v->len){ fprintf(stderr,"vulcan: index out of bounds\n"); exit(1);} if(v->len==v->cap){ v->cap*=2; v->data=realloc(v->data,v->cap*sizeof(char*)); } memmove(v->data+i+1, v->data+i, (size_t)(v->len-i)*sizeof(char*)); v->data[i]=x; v->len++; }
 static int64_t vchat(const char* s, int64_t i){ size_t n=strlen(s); if(i<0||(size_t)i>=n) return -1; return (int64_t)(unsigned char)s[i]; }
+static char* vchr(int64_t c){ char* r=(char*)malloc(2); r[0]=(char)(c&0xff); r[1]=0; return r; }
 // ---- files (whole-file read/write) and CLI args ----
 static char* vfile_read(const char* path){ FILE* f=fopen(path,"rb"); if(!f) return NULL; fseek(f,0,SEEK_END); long n=ftell(f); fseek(f,0,SEEK_SET); char* b=malloc((size_t)n+1); size_t r=fread(b,1,(size_t)n,f); b[r]=0; fclose(f); return b; }
 static void vfile_write(const char* path, const char* contents){ FILE* f=fopen(path,"wb"); if(!f) return; fputs(contents,f); fclose(f); }
@@ -127,6 +128,120 @@ static int64_t vmax_i64(int64_t a, int64_t b){ return a>b?a:b; }
 static double vmin_f64(double a, double b){ return a<b?a:b; }
 static double vmax_f64(double a, double b){ return a>b?a:b; }
 static void vsleep(int64_t ms){ if(ms>0){ struct timespec t; t.tv_sec=ms/1000; t.tv_nsec=(ms%1000)*1000000L; nanosleep(&t,NULL); } }
+// ---- networking: TCP sockets (handles are OS sockets; -1 = error) ----
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+typedef SOCKET vnet_sock_t;
+#define VNET_BAD INVALID_SOCKET
+#define VNET_WOULDBLOCK (WSAGetLastError()==WSAEWOULDBLOCK)
+static void vnet_init(void){ static int d=0; if(!d){ WSADATA w; WSAStartup(MAKEWORD(2,2),&w); d=1; } }
+static int vnet_closesock(vnet_sock_t s){ return closesocket(s)==0; }
+static int vnet_set_nb(vnet_sock_t s){ u_long m=1; return ioctlsocket(s,FIONBIO,&m)==0; }
+static int vnet_poll(vnet_sock_t s, short ev, int ms){ WSAPOLLFD p; p.fd=s; p.events=ev; return WSAPoll(&p,1,ms); }
+static short vnet_pollin_ev(void){ return POLLRDNORM; }
+static short vnet_pollout_ev(void){ return POLLWRNORM; }
+#else
+#include <errno.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <netdb.h>
+#include <fcntl.h>
+#include <poll.h>
+typedef int vnet_sock_t;
+#define VNET_BAD (-1)
+#define VNET_WOULDBLOCK (errno==EAGAIN||errno==EWOULDBLOCK)
+static void vnet_init(void){}
+static int vnet_closesock(vnet_sock_t s){ return close(s)==0; }
+static int vnet_set_nb(vnet_sock_t s){ return fcntl(s,F_SETFL,fcntl(s,F_GETFL,0)|O_NONBLOCK)==0; }
+static int vnet_poll(vnet_sock_t s, short ev, int ms){ struct pollfd p; p.fd=s; p.events=ev; return poll(&p,1,ms); }
+static short vnet_pollin_ev(void){ return POLLIN; }
+static short vnet_pollout_ev(void){ return POLLOUT; }
+#endif
+static int64_t vnet_listen(int64_t port){
+    vnet_init();
+    vnet_sock_t s = socket(AF_INET, SOCK_STREAM, 0);
+    if(s==VNET_BAD) return -1;
+    int one=1;
+    setsockopt(s, SOL_SOCKET, SO_REUSEADDR, (const char*)&one, sizeof(one));
+    struct sockaddr_in a; memset(&a,0,sizeof(a));
+    a.sin_family=AF_INET; a.sin_addr.s_addr=htonl(INADDR_ANY); a.sin_port=htons((unsigned short)port);
+    if(bind(s,(struct sockaddr*)&a,sizeof(a))!=0 || listen(s,64)!=0){ vnet_closesock(s); return -1; }
+    vnet_set_nb(s);  // accept() is non-blocking
+    return (int64_t)(intptr_t)s;
+}
+static int64_t vnet_port(int64_t h){
+    if(h<0) return -1;
+    struct sockaddr_in a; socklen_t n=sizeof(a);
+    if(getsockname((vnet_sock_t)(intptr_t)h,(struct sockaddr*)&a,&n)!=0) return -1;
+    return (int64_t)ntohs(a.sin_port);
+}
+static int64_t vnet_accept(int64_t h){
+    if(h<0) return -1;
+    vnet_sock_t c = accept((vnet_sock_t)(intptr_t)h,NULL,NULL);
+    if(c==VNET_BAD) return -1;
+    vnet_set_nb(c);
+    return (int64_t)(intptr_t)c;
+}
+static int64_t vnet_connect(const char* host, int64_t port){
+    if(!host||!host[0]) return -1;
+    vnet_init();
+    struct addrinfo hint, *res=NULL; memset(&hint,0,sizeof(hint));
+    hint.ai_family=AF_INET; hint.ai_socktype=SOCK_STREAM;
+    if(getaddrinfo(host,NULL,&hint,&res)!=0||!res) return -1;
+    struct sockaddr_in a; memcpy(&a,res->ai_addr,sizeof(a)>res->ai_addrlen?res->ai_addrlen:sizeof(a));
+    a.sin_port=htons((unsigned short)port);
+    vnet_sock_t s=socket(AF_INET,SOCK_STREAM,0);
+    if(s==VNET_BAD){ freeaddrinfo(res); return -1; }
+    vnet_set_nb(s);
+    if(connect(s,(struct sockaddr*)&a,sizeof(a))==0){ freeaddrinfo(res); return (int64_t)(intptr_t)s; }
+    if(!(VNET_WOULDBLOCK || errno==EINPROGRESS)){ vnet_closesock(s); freeaddrinfo(res); return -1; }
+    if(vnet_poll(s,vnet_pollout_ev(),5000)<=0){ vnet_closesock(s); freeaddrinfo(res); return -1; }
+    int err=0; socklen_t el=sizeof(err);
+    getsockopt(s,SOL_SOCKET,SO_ERROR,(char*)&err,&el);
+    freeaddrinfo(res);
+    if(err!=0){ vnet_closesock(s); return -1; }
+    return (int64_t)(intptr_t)s;
+}
+static int64_t vnet_send(int64_t h, const char* data){
+    if(h<0||!data) return -1;
+    int64_t n=(int64_t)send((vnet_sock_t)(intptr_t)h,data,strlen(data),0);
+    return n<0 ? -1 : n;
+}
+static char* vnet_recv(int64_t h){
+    if(h<0) return (char*)"";
+    char buf[65536];
+    int64_t n=(int64_t)recv((vnet_sock_t)(intptr_t)h,buf,sizeof(buf)-1,0);
+    if(n<=0) return (char*)"";
+    buf[n]=0;
+    return strdup(buf);
+}
+static int64_t vnet_ready(int64_t h){
+    if(h<0) return 0;
+    return vnet_poll((vnet_sock_t)(intptr_t)h,vnet_pollin_ev(),0)>0 ? 1 : 0;
+}
+static int64_t vnet_alive(int64_t h){
+    if(h<0) return 0;
+    struct sockaddr_in pa; socklen_t pn=sizeof(pa);
+    if(getpeername((vnet_sock_t)(intptr_t)h,(struct sockaddr*)&pa,&pn)!=0) return 0;  // closed / not a connection
+    if(!vnet_ready(h)) return 1;  // nothing pending: assume alive
+    char c; int n=(int)recv((vnet_sock_t)(intptr_t)h,&c,1,MSG_PEEK);
+    if(n>0) return 1;              // real data waiting
+    return VNET_WOULDBLOCK ? 1 : 0; // EOF or hard error -> dead
+}
+static char* vnet_peer(int64_t h){
+    if(h<0) return (char*)"";
+    struct sockaddr_in a; socklen_t n=sizeof(a);
+    if(getpeername((vnet_sock_t)(intptr_t)h,(struct sockaddr*)&a,&n)!=0) return (char*)"";
+    char* r=(char*)malloc(96);
+    snprintf(r,96,"%s:%u",inet_ntoa(a.sin_addr),(unsigned)ntohs(a.sin_port));
+    return r;
+}
+static int64_t vnet_close(int64_t h){
+    if(h<0) return 0;
+    return vnet_closesock((vnet_sock_t)(intptr_t)h);
+}
 // ---- game stdlib ----
 static int64_t vms_now(void){ struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t); return (int64_t)t.tv_sec*1000 + t.tv_nsec/1000000; }
 static int64_t vrand_int(int64_t lo, int64_t hi){ static unsigned vseed = 0; if(!vseed) vseed = (unsigned)vms_now() ^ (unsigned)getpid(); vseed = vseed*1103515245u + 12345u; return lo + (int64_t)(vseed>>16) % (hi - lo + 1); }
@@ -828,7 +943,7 @@ const PRELUDE_PREFIXES: &[&str] = &[
     "vi64_", "vf64_", "vbool_", "vstr_", "vs_", "vk_", "vto_", "vulcan_",
     "vmin_", "vmax_", "vclock", "vrand", "vsleep", "input_line", "term_raw",
     "term_normal", "key_ready", "read_key", "clear_screen",
-    "vms_now", "vrand_int", "vprint_at", "vset_color", "vscreen_w", "vscreen_h", "vcursor_visible", "vchat",
+    "vms_now", "vrand_int", "vprint_at", "vset_color", "vscreen_w", "vscreen_h", "vcursor_visible", "vchat", "vnet_",
 ];
 
 fn method_c_name(sname: &str, mname: &str) -> String {
@@ -943,7 +1058,7 @@ impl Codegen {
                 self.line("return;");
             }
             self.line("}");
-            let _ = writeln!(self.body, "\nint main(int __vargc, char** __vargv) {{ __vulcan_argc = __vargc; __vulcan_argv = __vargv; {} }}", cast_ret);
+            let _ = writeln!(self.body, "\nint main(int __vargc, char** __vargv) {{ __vulcan_argc = __vargc; __vulcan_argv = __vargv; setvbuf(stdout,0,_IOLBF,0); {} }}", cast_ret);
         } else {
             let _ = writeln!(self.body, "\nstatic {} {}({}) {{", self.ctype(&f.ret), safe_c_name(&f.name), params);
             self.emit_stmts(&f.body);
@@ -2410,6 +2525,77 @@ impl Codegen {
                 let (c, t) = self.gen_expr(&args[0]);
                 if t != Ty::Str { panic!("vulcan: file_exists needs a string path"); }
                 (format!("vfile_exists({c})"), Ty::Bool)
+            }
+            // ---- networking: TCP sockets (handles are i64; -1 = error) ----
+            "net_listen" => {
+                if args.len() != 1 { panic!("vulcan: net_listen(port) takes 1 arg"); }
+                let (c, t) = self.gen_expr(&args[0]);
+                let c = self.cast(&c, &t, &Ty::I64);
+                (format!("vnet_listen({c})"), Ty::I64)
+            }
+            "net_port" => {
+                if args.len() != 1 { panic!("vulcan: net_port(sock) takes 1 arg"); }
+                let (c, t) = self.gen_expr(&args[0]);
+                let c = self.cast(&c, &t, &Ty::I64);
+                (format!("vnet_port({c})"), Ty::I64)
+            }
+            "net_accept" => {
+                if args.len() != 1 { panic!("vulcan: net_accept(sock) takes 1 arg"); }
+                let (c, t) = self.gen_expr(&args[0]);
+                let c = self.cast(&c, &t, &Ty::I64);
+                (format!("vnet_accept({c})"), Ty::I64)
+            }
+            "net_connect" => {
+                if args.len() != 2 { panic!("vulcan: net_connect(host, port) takes 2 args"); }
+                let (h, ht) = self.gen_expr(&args[0]);
+                if ht != Ty::Str { panic!("vulcan: net_connect needs a string host"); }
+                let (p, pt) = self.gen_expr(&args[1]);
+                let p = self.cast(&p, &pt, &Ty::I64);
+                (format!("vnet_connect({h}, {p})"), Ty::I64)
+            }
+            "net_send" => {
+                if args.len() != 2 { panic!("vulcan: net_send(conn, data) takes 2 args"); }
+                let (h, ht) = self.gen_expr(&args[0]);
+                let h = self.cast(&h, &ht, &Ty::I64);
+                let (d, dt) = self.gen_expr(&args[1]);
+                if dt != Ty::Str { panic!("vulcan: net_send needs string data"); }
+                (format!("vnet_send({h}, {d})"), Ty::I64)
+            }
+            "net_recv" => {
+                if args.len() != 1 { panic!("vulcan: net_recv(conn) takes 1 arg"); }
+                let (c, t) = self.gen_expr(&args[0]);
+                let c = self.cast(&c, &t, &Ty::I64);
+                (format!("vnet_recv({c})"), Ty::Str)
+            }
+            "net_ready" => {
+                if args.len() != 1 { panic!("vulcan: net_ready(sock) takes 1 arg"); }
+                let (c, t) = self.gen_expr(&args[0]);
+                let c = self.cast(&c, &t, &Ty::I64);
+                (format!("vnet_ready({c})"), Ty::Bool)
+            }
+            "net_alive" => {
+                if args.len() != 1 { panic!("vulcan: net_alive(conn) takes 1 arg"); }
+                let (c, t) = self.gen_expr(&args[0]);
+                let c = self.cast(&c, &t, &Ty::I64);
+                (format!("vnet_alive({c})"), Ty::Bool)
+            }
+            "net_peer" => {
+                if args.len() != 1 { panic!("vulcan: net_peer(conn) takes 1 arg"); }
+                let (c, t) = self.gen_expr(&args[0]);
+                let c = self.cast(&c, &t, &Ty::I64);
+                (format!("vnet_peer({c})"), Ty::Str)
+            }
+            "net_close" => {
+                if args.len() != 1 { panic!("vulcan: net_close(sock) takes 1 arg"); }
+                let (c, t) = self.gen_expr(&args[0]);
+                let c = self.cast(&c, &t, &Ty::I64);
+                (format!("vnet_close({c})"), Ty::Bool)
+            }
+            "chr" => {
+                if args.len() != 1 { panic!("vulcan: chr(code) takes 1 arg"); }
+                let (c, t) = self.gen_expr(&args[0]);
+                let c = self.cast(&c, &t, &Ty::I64);
+                (format!("vchr({c})"), Ty::Str)
             }
             "arg_count" => ("varg_count()".into(), Ty::I64),
             "arg" => {
