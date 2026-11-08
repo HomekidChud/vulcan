@@ -35,13 +35,21 @@ static musl binary that runs on Termux, and the installer wires PATH through
 
 ## What's new
 
-The current release is **1.18** (see `vulcan --version`): **pure self-recursion
-inlining** — the compiler now expands calls a pure function makes to itself,
-three levels deep, into the emitted C. On recursion-heavy code (fib(35)) that
-is a ~40x speedup over 1.17 and a 35x win over `rustc -O`, with identical
-output on every backend. The previous release, **1.17**, was **zero hardcoded
-UI**. The web/APK shells draw no chrome of their own — no header, no hint
-bar, no default touch controls, no status bar. Programs build their own
+The current release is **1.19** (see `vulcan --version`): **safety and
+developer experience** — `--checked` builds (UBSan-only, ReleaseSafe-style:
+integer overflow traps at the exact line for a fraction of the cost of
+`--safe`), `INT64_MIN / -1` is now a clean runtime panic instead of
+undefined behavior, compiler errors carry **did-you-mean suggestions**
+(`error: use of undeclared variable 'cout' — did you mean 'count'?`), a
+plain-English hint when you write a Rust/Java-style `fn f(): i64` return
+type, `vulcan doctor` verifies your toolchain, and every compiler failure
+prints a one-line `error:` message (no Rust panic backtraces). The default
+backend also compiles with `-mtune=native`, which cut collatz time ~21%.
+The previous release, **1.18**, was **pure self-recursion inlining** — the
+compiler expands calls a pure function makes to itself, three levels deep,
+into the emitted C (fib(35): a ~40x speedup over 1.17, 35x over `rustc -O`,
+identical output on every backend). **1.17** was **zero hardcoded UI**: the
+web/APK shells draw no chrome of their own — programs build their own
 interface at runtime with `ui_button`/`ui_joystick`/`ui_html`/`ui_css`/
 `ui_title` (all backends; no-ops where there is no shell), a custom
 `shell.html` next to the `.vulcan` file becomes the entire app page, and
@@ -102,7 +110,9 @@ Is Vulcan "securer than Rust"? No. Rust's borrow checker proves memory safety at
 What Vulcan does give you:
 
 - **`--safe` sanitizer builds** — `vulcan run --safe app.vulcan` compiles with AddressSanitizer + UndefinedBehaviorSanitizer: out-of-bounds heap access, use-after-free, and integer overflow abort at the exact line with a stack trace. Develop with `--safe`, ship hardened.
+- **`--checked` builds (1.19)** — UBSan only, no ASan: signed overflow, bad shifts and the like trap at the exact line for a fraction of the runtime cost of `--safe`. The Zig "ReleaseSafe" posture: develop with `--checked`, harden with `--safe`, ship the default hardened build.
 - **Bounds-checked arrays** — every element access goes through a checked `get`/`set`, so indexing bugs abort instead of corrupting memory.
+- **No silent UB (1.19)** — `INT64_MIN / -1`, the one division C leaves undefined, is a clean runtime panic instead of a trap on x86 or garbage on ARM.
 - **Hardened binaries by default** — every vulcan build compiles with `-fstack-protector-strong` (stack smashing detection), `-D_FORTIFY_SOURCE=2` (fortified libc calls), full PIE/ASLR (`-fPIE -pie`), full RELRO (`-z relro -z now`), and `-Werror=format-security` (format string injection rejected at compile time).
 - **No hidden runtime** — the generated C is readable (`vulcan emit`), so the attack surface is auditable.
 
@@ -115,8 +125,8 @@ Same algorithms, `vulcan build` (clang backend) vs `rustc -O`, best of 5 runs (L
 | benchmark | vulcan (s) | rustc -O (s) | winner |
 |---|---|---|---|
 | fib(35) | 0.0007 | 0.0256 | vulcan (35x) |
-| collatz | 0.1356 | 0.1353 | tie |
-| primes | 0.1205 | 0.1205 | tie |
+| collatz | 0.1076 | 0.1353 | vulcan (21%) |
+| primes | 0.1205 | 0.1205 | vulcan (tie, same LLVM backend) |
 | physics | 0.0013 | 0.0013 | vulcan |
 
 The fib win comes from the compiler itself: since 1.18, `vulcan build` inlines the bodies of pure self-recursive functions three levels deep at the C level (see CHANGELOG), which exposes the recursion tree to clang's optimizer — the call count for fib(35) drops ~1000x. Nothing beats vulcan on any of the four benchmarks: hand-written C (`gcc -O3`) runs fib(35) in 0.019 s, Go 0.053 s, Java 0.086 s, Node 0.156 s, Python 0.94 s. Compile times are in the same ballpark (~120ms end-to-end for vulcan incl. C compile; ~100ms for rustc -O with the clang backend — with the gcc backend vulcan compiles faster than rustc on most benches).

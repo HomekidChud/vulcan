@@ -82,9 +82,17 @@ static int64_t vi64_last(VecI64* v){ return v->len>0 ? v->data[v->len-1] : 0; }
 static double vf64_last(VecF64* v){ return v->len>0 ? v->data[v->len-1] : 0; }
 
 static void vrt_panic(const char* msg){ fprintf(stderr, "vulcan: %s\n", msg); exit(1); }
-static int64_t vdiv_i64(int64_t a, int64_t b){ if(b==0) vrt_panic("division by zero"); return a/b; }
+static int64_t vdiv_i64(int64_t a, int64_t b){
+    if(b==0) vrt_panic("division by zero");
+    if(b==-1 && a==INT64_MIN) vrt_panic("integer overflow in division (INT64_MIN / -1)");
+    return a/b;
+}
 static double vdiv_f64(double a, double b){ if(b==0.0) vrt_panic("division by zero"); return a/b; }
-static int64_t vmod_i64(int64_t a, int64_t b){ if(b==0) vrt_panic("modulo by zero"); return a%b; }
+static int64_t vmod_i64(int64_t a, int64_t b){
+    if(b==0) vrt_panic("modulo by zero");
+    if(b==-1 && a==INT64_MIN) vrt_panic("integer overflow in modulo (INT64_MIN % -1)");
+    return a%b;
+}
 static char* vstr_concat(const char* a, const char* b){
     size_t la = strlen(a), lb = strlen(b);
     char* s = malloc(la+lb+1); memcpy(s, a, la); memcpy(s+la, b, lb+1); return s;
@@ -1061,6 +1069,34 @@ fn compute_pure_fns(fns: &HashMap<String, FnDecl>) -> std::collections::HashSet<
 }
 
 impl Codegen {
+    // candidate names for did-you-mean suggestions on unknown identifiers
+    fn var_candidates(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.locals.iter().flat_map(|f| f.keys().cloned()).collect();
+        names.extend(self.consts.keys().cloned());
+        names
+    }
+
+    fn fn_candidates(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.fns.keys().cloned().collect();
+        names.extend(self.impls.keys().map(|(s, m)| format!("{s}.{m}")));
+        // builtins a user can call by name — suggestions for `prnt` -> `print`
+        const BUILTINS: &[&str] = &[
+            "abs", "arg", "arg_count", "atan2", "canvas_height", "canvas_resize", "canvas_width",
+            "char_at", "chr", "clamp", "clear", "clear_screen", "clock", "cursor_visible",
+            "draw_circle", "draw_line", "draw_rect", "draw_text", "draw_tri", "exit",
+            "file_exists", "file_read", "file_write", "input", "is_touch", "key_down",
+            "key_ready", "lerp", "min", "max", "mouse_down", "mouse_dx", "mouse_dy",
+            "mouse_x", "mouse_y", "ms_now", "net_accept", "net_alive", "net_close",
+            "net_connect", "net_listen", "net_peer", "net_port", "net_ready", "net_recv",
+            "net_send", "present", "print", "print_at", "rand", "rand_int", "read_key",
+            "screen_height", "screen_width", "set_color", "sleep_ms", "sqrt", "term_normal",
+            "term_raw", "to_float", "to_int", "touch_count", "touch_custom", "touch_x",
+            "ui_button", "ui_clear", "ui_html", "ui_joystick",
+        ];
+        names.extend(BUILTINS.iter().map(|s| s.to_string()));
+        names
+    }
+
     fn fresh(&mut self, name: &str) -> String {
         self.counter += 1;
         format!("v{}_{}", self.counter, name)
@@ -1436,7 +1472,12 @@ impl Codegen {
                 let op = if *delta > 0 { "++" } else { "--" };
                 match target {
                     Expr::Ident(name) => {
-                        let (_, cvar) = self.lookup(name).unwrap_or_else(|| panic!("vulcan: use of undeclared `{name}`"));
+                        let (_, cvar) = self.lookup(name).unwrap_or_else(|| {
+                            let hint = crate::diag::did_you_mean(name, &self.var_candidates())
+                                .map(|s| format!(" — did you mean `{s}`?"))
+                                .unwrap_or_default();
+                            panic!("vulcan: use of undeclared `{name}`{hint}")
+                        });
                         self.line(&format!("{cvar}{op};"));
                     }
                     Expr::Field(recv, fname) => {
@@ -2088,7 +2129,10 @@ impl Codegen {
                 } else if let Some((ty, cname)) = self.consts.get(name) {
                     (cname.clone(), ty.clone())
                 } else {
-                    panic!("vulcan: use of undeclared variable `{name}`");
+                    let hint = crate::diag::did_you_mean(name, &self.var_candidates())
+                        .map(|s| format!(" — did you mean `{s}`?"))
+                        .unwrap_or_default();
+                    panic!("vulcan: use of undeclared variable `{name}`{hint}");
                 }
             }
             Expr::BinOp(l, op, r) => {
@@ -2980,7 +3024,12 @@ impl Codegen {
                 (tmp, Ty::Str)
             }
             _ => {
-                let (ptys, ret) = self.fns.get(callee).unwrap_or_else(|| panic!("vulcan: call to unknown function `{callee}`")).clone();
+                let (ptys, ret) = self.fns.get(callee).unwrap_or_else(|| {
+                    let hint = crate::diag::did_you_mean(callee, &self.fn_candidates())
+                        .map(|s| format!(" — did you mean `{s}`?"))
+                        .unwrap_or_default();
+                    panic!("vulcan: call to unknown function `{callee}`{hint}")
+                }).clone();
                 if args.len() != ptys.len() {
                     panic!("vulcan: {callee} expects {} args, got {}", ptys.len(), args.len());
                 }

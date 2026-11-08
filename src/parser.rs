@@ -378,6 +378,9 @@ impl Parser {
         } else {
             Ty::Void
         };
+        if self.peek() == &Tok::Colon {
+            self.err("vulcan uses `->` (or infers) for return types — write `fn f(x: i64) -> i64 {`, not `fn f(x: i64): i64 {`".to_string());
+        }
         self.expect(Tok::LBrace, "{ to open fn body");
         let body = self.parse_block();
         FnDecl { line, name, params, ret, body }

@@ -3,6 +3,39 @@
 Per-version history, newest first. The version number lives in Cargo.toml
 (single source of truth, exposed by `vulcan --version`).
 
+## 1.19.0 — safety, ergonomics, and a new docs set
+
+- **`--checked` builds.** `vulcan run/build/bench/test --checked` compiles
+  with UndefinedBehaviorSanitizer only (no ASan): signed integer overflow,
+  bad shifts and the like abort at the exact source line for a fraction of
+  the runtime cost of `--safe`. The Zig "ReleaseSafe" posture: develop with
+  `--checked`, harden with `--safe`, ship the default hardened build.
+- **`INT64_MIN / -1` is defined.** The one division C leaves undefined now
+  compiles to a runtime check that panics cleanly
+  (`vulcan: integer overflow in division (INT64_MIN / -1)`) instead of a
+  SIGFPE on x86 or garbage on ARM. The JS and Python backends were already
+  safe.
+- **Did-you-mean suggestions.** Unknown-variable and unknown-function
+  errors now rank in-scope candidates by edit distance:
+  `error: use of undeclared variable 'cout' — did you mean 'count'?`
+  (fn errors include the ~70 builtin names, so `print`-family typos get
+  suggested too). Writing a Rust/Java-style return type
+  (`fn f(x: i64): i64 {`) gets a plain-English hint pointing at `->`.
+- **`vulcan doctor`.** Verifies the toolchain (clang or gcc, make) and
+  shows exactly what each command will use — no more guessing which
+  compiler is picking up the build.
+- **No raw Rust panics.** A panic hook turns every internal compiler
+  failure into a one-line `vulcan: ...` error (fuzz-tested with 80+
+  malformed programs — zero leaked backtraces).
+- **`-mtune=native` on the default C backend.** Schedules for the host CPU
+  without introducing new instructions (`-march=native` was tested and
+  rejected: it made physics 4x slower on this bench machine). collatz
+  0.1356 s -> 0.1076 s — a 21% win over `rustc -O` (0.1353 s).
+- **New documentation set:** a 13-chapter book (`docs/book/`), a
+  by-example cookbook (`docs/by-example.md`), a reference and a README for
+  `docs/` — every example verified to compile and run with the compiler in
+  this repo.
+
 ## 1.18.0 — pure self-recursion inlining (fib(35): 29 ms -> 0.7 ms)
 
 - **The C backend now inlines self-recursive calls.** When a function calls
