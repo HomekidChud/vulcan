@@ -1,0 +1,618 @@
+// =====================================================================
+// APEX RUSH — 3D arcade circuit racer (showcase candidate)
+// ---------------------------------------------------------------------
+// A procedurally generated circuit, drift-tuned arcade car physics,
+// five AI rivals, three laps, live standings, minimap, countdown,
+// boost, and a full results board. Written in pure Vulcan against
+// the built-in 3D renderer.
+//
+// CONTROLS
+//   W / S ......... throttle / brake
+//   A / D ......... steer
+//   SPACE ......... handbrake (drift)
+//   SHIFT ......... boost (limited tank)
+//   R ............. restart race
+// =====================================================================
+
+import engine
+
+const SEGMENTS: i64 = 48
+const TRACK_W: f64 = 10.0
+const LAPS: i64 = 3
+const RIVALS: i64 = 5
+const MAX_SPEED: f64 = 46.0
+const BOOST_SPEED: f64 = 62.0
+
+const ST_COUNTDOWN: i64 = 0
+const ST_RACING: i64 = 1
+const ST_FINISHED: i64 = 2
+
+struct Car {
+    pos: Vec3,
+    heading: f64,
+    speed: f64,
+    slip: f64,           // lateral drift amount
+    nearest: i64,        // nearest track segment index
+    last_nearest: i64,    // segment index last frame (lap detection)
+    lap: i64,
+    boost: f64,          // boost tank 0..100
+    boosting: bool,
+    finished: bool,
+    finish_time: f64,
+    color: i64,
+    name: string,
+    ai: bool,
+}
+
+// ---------------------------------------------------------------------
+// circuit generation: a closed loop of waypoints with organic noise
+// ---------------------------------------------------------------------
+fn smooth_track(track: [Vec3], passes: i64) -> [Vec3] {
+    let t = track
+    let p = 0
+    while p < passes {
+        let i = 0
+        while i < t.len() {
+            let a = t[(i - 1 + t.len()) % t.len()]
+            let b = t[i]
+            let c = t[(i + 1) % t.len()]
+            t[i] = Vec3 { x: (a.x + c.x + b.x * 2.0) * 0.25, y: 0.0, z: (a.z + c.z + b.z * 2.0) * 0.25 }
+            i += 1
+        }
+        p += 1
+    }
+    return t
+}
+
+fn make_track() -> [Vec3] {
+    let track: [Vec3] = []
+    let i = 0
+    while i < SEGMENTS {
+        let ang = (i as f64) / (SEGMENTS as f64) * 6.28318
+        let wob = 14.0 * sin(ang * 3.0) + 9.0 * sin(ang * 5.0 + 1.7) + 5.0 * sin(ang * 8.0 + 4.2)
+        let r = 62.0 + wob
+        track.push(Vec3 { x: cos(ang) * r, y: 0.0, z: sin(ang) * r })
+        i += 1
+    }
+    return smooth_track(track, 3)
+}
+
+// distance from a point to segment a-b (2D on the XZ plane)
+fn point_seg_dist(p: Vec3, a: Vec3, b: Vec3) -> f64 {
+    let dx = b.x - a.x
+    let dz = b.z - a.z
+    let len_sq = dx * dx + dz * dz
+    if len_sq < 0.0001 {
+        return sqrt((p.x - a.x) * (p.x - a.x) + (p.z - a.z) * (p.z - a.z))
+    }
+    let t = ((p.x - a.x) * dx + (p.z - a.z) * dz) / len_sq
+    if t < 0.0 {
+        return sqrt((p.x - a.x) * (p.x - a.x) + (p.z - a.z) * (p.z - a.z))
+    }
+    if t > 1.0 {
+        return sqrt((p.x - b.x) * (p.x - b.x) + (p.z - b.z) * (p.z - b.z))
+    }
+    let cx = a.x + t * dx
+    let cz = a.z + t * dz
+    return sqrt((p.x - cx) * (p.x - cx) + (p.z - cz) * (p.z - cz))
+}
+
+fn car_progress(c: Car) -> f64 {
+    return (c.lap as f64) * (SEGMENTS as f64) + (c.nearest as f64)
+}
+
+// ---------------------------------------------------------------------
+// physics step for one car (player uses inputs; AI computes its own)
+// ---------------------------------------------------------------------
+fn car_step(c: Car, throttle: f64, brake: f64, steer: f64, handbrake: bool, boost_on: bool, track: [Vec3], dt: f64) -> Car {
+    let target_max = MAX_SPEED
+    if boost_on && c.boost > 0.0 {
+        c.boost -= 26.0 * dt
+        target_max = BOOST_SPEED
+        c.boosting = true
+    } else {
+        c.boosting = false
+        c.boost += 4.0 * dt
+        if c.boost > 100.0 { c.boost = 100.0 }
+    }
+    if c.boost < 0.0 { c.boost = 0.0 }
+
+    // longitudinal
+    c.speed += throttle * 30.0 * dt
+    if brake > 0.0 {
+        c.speed -= brake * 44.0 * dt
+    }
+    let drag = 0.35 + 0.9 * (1.0 - throttle)
+    c.speed -= drag * dt * 3.0
+    if handbrake {
+        c.speed -= 26.0 * dt
+    }
+    if c.speed > target_max { c.speed = target_max }
+    if c.speed < -9.0 { c.speed = -9.0 }
+
+    // steering: more effective at low-mid speed, grippy unless drifting
+    let speed_factor = c.speed.abs() / (c.speed.abs() + 16.0)
+    let steer_authority = 2.6 * speed_factor
+    if handbrake { steer_authority = steer_authority + 1.5 }
+    c.heading += steer * steer_authority * dt
+
+    // drift: lateral velocity develops when steering at speed
+    let slip_gain = steer * speed_factor * 0.55
+    if handbrake { slip_gain = steer * speed_factor * 2.4 }
+    c.slip += slip_gain * dt
+    c.slip *= 0.94
+    if c.slip > 1.6 { c.slip = 1.6 }
+    if c.slip < -1.6 { c.slip = -1.6 }
+
+    // velocity = heading direction plus lateral slip
+    let fx = sin(c.heading)
+    let fz = cos(c.heading)
+    let lx = -fz
+    let lz = fx
+    c.pos.x += (fx * c.speed + lx * c.slip * 7.0) * dt
+    c.pos.z += (fz * c.speed + lz * c.slip * 7.0) * dt
+
+    // track edge collision: find nearest segment, push back inside
+    let best_d = 99999.0
+    let best_i = 0
+    let i = 0
+    while i < track.len() {
+        let a = track[i]
+        let b = track[(i + 1) % track.len()]
+        let d = point_seg_dist(c.pos, a, b)
+        if d < best_d {
+            best_d = d
+            best_i = i
+        }
+        i += 1
+    }
+    c.nearest = best_i
+    let limit = TRACK_W * 0.5 - 1.2
+    if best_d > limit {
+        let a = track[best_i]
+        let b = track[(best_i + 1) % track.len()]
+        let mx = (a.x + b.x) * 0.5
+        let mz = (a.z + b.z) * 0.5
+        let dx = c.pos.x - mx
+        let dz = c.pos.z - mz
+        let dl = sqrt(dx * dx + dz * dz)
+        if dl > 0.01 {
+            c.pos.x -= dx / dl * (best_d - limit)
+            c.pos.z -= dz / dl * (best_d - limit)
+        }
+        c.speed *= 0.965   // scraping the barrier
+        c.slip *= 0.9
+    }
+    return c
+}
+
+// ---------------------------------------------------------------------
+// AI driver: look ahead along the racing line, steer + manage speed
+// ---------------------------------------------------------------------
+fn ai_drive(c: Car, track: [Vec3], difficulty: f64) -> Car {
+    let look = (c.nearest + 6) % track.len()
+    let far = (c.nearest + 14) % track.len()
+    let tx = track[look].x - c.pos.x
+    let tz = track[look].z - c.pos.z
+    let want = atan2(tx, tz)
+    let mut_diff = want - c.heading
+    while mut_diff > 3.14159 { mut_diff -= 6.28318 }
+    while mut_diff < -3.14159 { mut_diff += 6.28318 }
+    let steer = clamp(mut_diff, -1.0, 1.0)
+
+    // curvature ahead: if the line bends hard, lift off
+    let bend = (atan2(track[far].x - c.pos.x, track[far].z - c.pos.z) - want).abs()
+    let throttle = 1.0
+    let brake = 0.0
+    if bend > 1.1 && c.speed > 26.0 {
+        throttle = 0.15
+        brake = 0.5
+    }
+    let boost = c.boost > 55.0 && bend < 0.4 && mut_diff.abs() < 0.2
+
+    // trailing AI pushes a touch harder (rubber-banding)
+    let push = 1.0 + difficulty * 0.05
+    return car_step(c, throttle * push, brake, steer, false, boost, track, 1.0 / 60.0)
+}
+
+fn car_name(i: i64) -> string {
+    let names: [string] = ["BLAZE", "VOLT", "ONYX", "SABLE", "RUNE", "PYRA"]
+    return names[i % names.len()]
+}
+
+fn car_color(i: i64) -> i64 {
+    let colors: [i64] = [0x66BB6A, 0xE53935, 0x1E88E5, 0xFDD835, 0x8E24AA, 0xFB8C00]
+    return colors[i % colors.len()]
+}
+
+// ---------------------------------------------------------------------
+// rendering
+// ---------------------------------------------------------------------
+fn render_race(track: [Vec3], cars: [Car], you: i64, countdown: f64, race_time: f64) {
+    let p = cars[you]
+
+    // chase camera on a boom behind the car
+    let boom = 9.0 + p.speed * 0.12
+    let cam = cam_third_person(p.pos, p.heading, boom, 0.42)
+
+    // sky + sun-tinted atmosphere (clear() also resets the depth buffer)
+    let sky = sky_colors(30.0)
+    clear(sky[0])
+    draw_sky_gradient(sky[0], sky[1], 96)
+
+    // grass: a fan of triangles anchored just ahead of the camera, swept
+    // across the whole forward horizon (draw_quad drops any quad with a
+    // corner behind the camera, so a fan is used for the open ground)
+    let fx = sin(cam.yaw)
+    let fz = cos(cam.yaw)
+    let center = Vec3 { x: cam.x + fx * 1.2, y: -0.05, z: cam.z + fz * 1.2 }
+    let pc = project(cam, center)
+    let fan_rings: [f64] = [150.0, 600.0, 1600.0]
+    let r = 0
+    while r < fan_rings.len() {
+        let rad = fan_rings[r]
+        let a0 = cam.yaw - 1.31
+        let a1 = cam.yaw + 1.31
+        let steps = 12
+        let s = 0
+        while s < steps {
+            let ta = a0 + (a1 - a0) * (s as f64) / (steps as f64)
+            let tb = a0 + (a1 - a0) * ((s + 1) as f64) / (steps as f64)
+            let pa = project(cam, Vec3 { x: center.x + sin(ta) * rad, y: -0.05, z: center.z + cos(ta) * rad })
+            let pb = project(cam, Vec3 { x: center.x + sin(tb) * rad, y: -0.05, z: center.z + cos(tb) * rad })
+            if pa.visible == 1 && pb.visible == 1 && pc.visible == 1 {
+                let col = 0x1B5E20
+                if r == 1 { col = 0x173F17 }
+                draw_tri(pc.sx, pc.sy, pc.depth, pa.sx, pa.sy, pa.depth, pb.sx, pb.sy, pb.depth, col)
+            }
+            s += 1
+        }
+        r += 1
+    }
+
+    // asphalt: quads along the loop
+    let i = 0
+    while i < track.len() {
+        let a = track[i]
+        let b = track[(i + 1) % track.len()]
+        let dx = b.x - a.x
+        let dz = b.z - a.z
+        let dl = sqrt(dx * dx + dz * dz)
+        let nx = -dz / dl * (TRACK_W * 0.5)
+        let nz = dx / dl * (TRACK_W * 0.5)
+        let shade = 0x2B2F33
+        if i % 2 == 0 { shade = 0x30343A }
+        draw_quad(cam,
+            Vec3 { x: a.x + nx, y: 0.02, z: a.z + nz },
+            Vec3 { x: b.x + nx, y: 0.02, z: b.z + nz },
+            Vec3 { x: b.x - nx, y: 0.02, z: b.z - nz },
+            Vec3 { x: a.x - nx, y: 0.02, z: a.z - nz }, shade)
+        // kerbs on alternating sides
+        if i % 4 == 0 {
+            draw_quad(cam,
+                Vec3 { x: a.x + nx * 1.15, y: 0.06, z: a.z + nz * 1.15 },
+                Vec3 { x: b.x + nx * 1.15, y: 0.06, z: b.z + nz * 1.15 },
+                Vec3 { x: b.x + nx, y: 0.06, z: b.z + nz },
+                Vec3 { x: a.x + nx, y: 0.06, z: a.z + nz }, 0xE53935)
+        } else {
+            if i % 4 == 2 {
+                draw_quad(cam,
+                    Vec3 { x: a.x - nx, y: 0.06, z: a.z - nz },
+                    Vec3 { x: b.x - nx, y: 0.06, z: b.z - nz },
+                    Vec3 { x: b.x - nx * 1.15, y: 0.06, z: b.z - nz * 1.15 },
+                    Vec3 { x: a.x - nx * 1.15, y: 0.06, z: a.z - nz * 1.15 }, 0xFDD835)
+            }
+        }
+        // start / finish line
+        if i == 0 {
+            draw_quad(cam,
+                Vec3 { x: a.x + nx, y: 0.09, z: a.z + nz },
+                Vec3 { x: b.x + nx, y: 0.09, z: b.z + nz },
+                Vec3 { x: b.x - nx, y: 0.09, z: b.z - nz },
+                Vec3 { x: a.x - nx, y: 0.09, z: a.z - nz }, 0xFAFAFA)
+        }
+        i += 1
+    }
+
+    // cars (dark chassis + painted shell + boost flame)
+    let chassis = mesh_box(1.1, 0.35, 2.2, 0x111418)
+    let flame = mesh_box(0.5, 0.35, 0.9, 0xFF9800)
+    let i = 0
+    while i < cars.len() {
+        let c = cars[i]
+        let paint = mesh_box(1.0, 0.5, 2.1, c.color)
+        let pos = Vec3 { x: c.pos.x, y: 0.6, z: c.pos.z }
+        mesh_draw(chassis, cam, pos, c.heading)
+        mesh_draw(paint, cam, Vec3 { x: pos.x, y: 1.0, z: pos.z }, c.heading)
+        if c.boosting {
+            mesh_draw(flame, cam,
+                Vec3 { x: pos.x - sin(c.heading) * 1.6, y: 0.6, z: pos.z - cos(c.heading) * 1.6 }, c.heading)
+        }
+        i += 1
+    }
+
+    // ---- HUD ----
+    let kmh = (p.speed * 3.6) as i64
+    draw_text(6, 4, "APX", 0x66BB6A)
+    let spd_col = 0xFAFAFA
+    if p.boosting { spd_col = 0xFF9800 }
+    draw_text(6, 14, f"{kmh} km/h", spd_col)
+    draw_rect(6, 24, 50, 3, 0x263238)
+    if p.speed > 0.0 {
+        draw_rect(6, 24, 50 * (p.speed / BOOST_SPEED), 3, 0x66BB6A)
+    }
+    draw_rect(6, 30, 50, 3, 0x263238)
+    if p.boost > 0.0 {
+        let bst_col = 0x42A5F5
+        if p.boosting { bst_col = 0xFF9800 }
+        draw_rect(6, 30, 50 * (p.boost / 100.0), 3, bst_col)
+    }
+
+    // live position + lap + timer
+    let rank = 1
+    let j = 0
+    while j < cars.len() {
+        if j != you && car_progress(cars[j]) > car_progress(p) { rank += 1 }
+        j += 1
+    }
+    draw_text(214, 4, f"LAP {p.lap + 1}/{LAPS}", 0xFAFAFA)
+    let pos_col = 0xFAFAFA
+    if rank == 1 { pos_col = 0xFDD835 }
+    draw_text(214, 14, f"P{rank}/{cars.len()}", pos_col)
+    draw_text(214, 24, f"{(race_time * 10.0) as i64 / 10.0}s", 0x9E9E9E)
+
+    // minimap: track outline + car dots
+    let mx0 = 148.0
+    let my0 = 188.0
+    let mscale = 34.0 / 150.0
+    let mi = 0
+    while mi < track.len() {
+        let a = track[mi]
+        let b = track[(mi + 1) % track.len()]
+        draw_line(mx0 + a.x * mscale, my0 + a.z * mscale, mx0 + b.x * mscale, my0 + b.z * mscale, 0x546E7A)
+        mi += 1
+    }
+    let ci = 0
+    while ci < cars.len() {
+        let c = cars[ci]
+        if ci != you {
+            draw_circle(mx0 + c.pos.x * mscale, my0 + c.pos.z * mscale, 1.5, c.color)
+        }
+        ci += 1
+    }
+    draw_circle(mx0 + p.pos.x * mscale, my0 + p.pos.z * mscale, 2.2, 0xFFFFFF)
+
+    // countdown overlay
+    if countdown > 0.0 {
+        let label = "GO!"
+        if countdown > 3.0 { label = "3" }
+        if countdown > 2.0 && countdown <= 3.0 { label = "2" }
+        if countdown > 1.0 && countdown <= 2.0 { label = "1" }
+        let w = (label.len() as f64) * 5.0
+        draw_text(192.0 - w * 0.5, 96.0, label, 0xFDD835)
+    }
+}
+
+// ---------------------------------------------------------------------
+// results board: standings by finish time, then progress
+// ---------------------------------------------------------------------
+fn render_results(cars: [Car], you: i64) {
+    draw_rect(112, 56, 160, 104, 0x101418)
+    draw_rect(112, 56, 160, 2, 0x66BB6A)
+    draw_text(160.0 - 33.0, 62.0, "RACE COMPLETE", 0x66BB6A)
+
+    let listed: [i64] = []
+    let i = 0
+    while i < cars.len() {
+        listed.push(0)
+        i += 1
+    }
+    let shown = 0
+    while shown < cars.len() {
+        // pick the best car not yet listed
+        let best = -1
+        let j = 0
+        while j < cars.len() {
+            if listed[j] == 1 {
+                j += 1
+                continue
+            }
+            if best == -1 {
+                best = j
+                j += 1
+                continue
+            }
+            let a = cars[j]
+            let b = cars[best]
+            let a_better = false
+            if a.finished && b.finished {
+                a_better = a.finish_time < b.finish_time
+            } else {
+                if a.finished { a_better = true }
+                if !a.finished && !b.finished { a_better = car_progress(a) > car_progress(b) }
+            }
+            if a_better { best = j }
+            j += 1
+        }
+        if best == -1 { break }
+        listed[best] = 1
+        let c = cars[best]
+        let col = c.color
+        if best == you { col = 0x66BB6A }
+        let tag = ""
+        if best == you { tag = " < YOU" }
+        let tstr = "--"
+        if c.finished { tstr = f"{(c.finish_time * 10.0) as i64 / 10.0}s" }
+        draw_text(124, 76.0 + (shown as f64) * 12.0, f"{shown + 1}. {c.name}{tag}", col)
+        draw_text(236, 76.0 + (shown as f64) * 12.0, tstr, 0x9E9E9E)
+        shown += 1
+    }
+    draw_text(160.0 - 46.0, 148.0, "press R to race again", 0x9E9E9E)
+}
+
+// ---------------------------------------------------------------------
+// main
+// ---------------------------------------------------------------------
+fn main() {
+    canvas_resize(384, 216)
+
+    let track = make_track()
+
+    let cars: [Car] = []
+    let i = 0
+    while i < RIVALS + 1 {
+        let start = track[0]
+        let next = track[1]
+        let dx = next.x - start.x
+        let dz = next.z - start.z
+        let dl = sqrt(dx * dx + dz * dz)
+        let nx = -dz / dl * 2.6
+        let nz = dx / dl * 2.6
+        let row = (i % 2) as f64 * 2.2 - 1.1
+        cars.push(Car {
+            pos: Vec3 {
+                x: start.x + nx * row - dx / dl * (i as f64) * 5.0,
+                y: 0.0,
+                z: start.z + nz * row - dz / dl * (i as f64) * 5.0,
+            },
+            heading: atan2(dx, dz),
+            speed: 0.0,
+            slip: 0.0,
+            nearest: 0,
+            last_nearest: 0,
+            lap: 0,
+            boost: 100.0,
+            boosting: false,
+            finished: false,
+            finish_time: 0.0,
+            color: car_color(i),
+            name: car_name(i),
+            ai: i > 0,
+        })
+        i += 1
+    }
+    let you = 0
+
+    let state = ST_COUNTDOWN
+    let countdown = 3.6
+    let race_time = 0.0
+
+    loop {
+        let dt = 1.0 / 60.0
+
+        // ---- state machine ----
+        if state == ST_COUNTDOWN {
+            countdown -= dt
+            if countdown <= 0.0 {
+                state = ST_RACING
+            }
+        }
+        if state == ST_RACING {
+            race_time += dt
+        }
+
+        // ---- restart ----
+        if key_ready() > 0 {
+            let k = read_key()
+            if k == 114 {   // R
+                let i = 0
+                while i < cars.len() {
+                    let c = cars[i]
+                    let start = track[0]
+                    let next = track[1]
+                    let dx = next.x - start.x
+                    let dz = next.z - start.z
+                    let dl = sqrt(dx * dx + dz * dz)
+                    let nx = -dz / dl * 2.6
+                    let nz = dx / dl * 2.6
+                    let row = (i % 2) as f64 * 2.2 - 1.1
+                    c.pos = Vec3 {
+                        x: start.x + nx * row - dx / dl * (i as f64) * 5.0,
+                        y: 0.0,
+                        z: start.z + nz * row - dz / dl * (i as f64) * 5.0,
+                    }
+                    c.heading = atan2(dx, dz)
+                    c.speed = 0.0
+                    c.slip = 0.0
+                    c.nearest = 0
+                    c.last_nearest = 0
+                    c.lap = 0
+                    c.boost = 100.0
+                    c.boosting = false
+                    c.finished = false
+                    c.finish_time = 0.0
+                    cars[i] = c
+                    i += 1
+                }
+                state = ST_COUNTDOWN
+                countdown = 3.6
+                race_time = 0.0
+            }
+        }
+
+        // ---- drive ----
+        let ci = 0
+        while ci < cars.len() {
+            let c = cars[ci]
+            if state == ST_COUNTDOWN || c.finished {
+                c.speed *= 0.9
+                cars[ci] = c
+                ci += 1
+                continue
+            }
+            if c.ai {
+                let difficulty = (ci as f64) * 0.4 + 0.4
+                cars[ci] = ai_drive(c, track, difficulty)
+            } else {
+                let throttle = 0.0
+                let brake = 0.0
+                let steer = 0.0
+                if key_down(119) { throttle = 1.0 }
+                if key_down(115) { brake = 1.0 }
+                if key_down(97) { steer = -1.0 }
+                if key_down(100) { steer = 1.0 }
+                let hb = key_down(32)
+                let boost = key_down(65505)   // left shift
+                cars[ci] = car_step(c, throttle, brake, steer, hb, boost, track, dt)
+            }
+            ci += 1
+        }
+
+        // ---- lap / progress tracking ----
+        let pi = 0
+        while pi < cars.len() {
+            let c = cars[pi]
+            let prev = c.last_nearest
+            c.last_nearest = c.nearest
+            // crossed the line forward?
+            if prev >= SEGMENTS - 6 && c.nearest < 6 {
+                c.lap += 1
+                if c.lap >= LAPS && !c.finished {
+                    c.finished = true
+                    c.finish_time = race_time
+                }
+            }
+            // rolled back across the line? un-count the lap
+            if prev < 6 && c.nearest >= SEGMENTS - 6 {
+                c.lap -= 1
+                if c.lap < 0 { c.lap = 0 }
+            }
+            cars[pi] = c
+            pi += 1
+        }
+
+        // ---- draw ----
+        let cd = -1.0
+        if state == ST_COUNTDOWN { cd = countdown }
+        render_race(track, cars, you, cd, race_time)
+
+        if cars[you].finished && state == ST_RACING {
+            state = ST_FINISHED
+        }
+        if state == ST_FINISHED {
+            render_results(cars, you)
+        }
+
+        present()
+    }
+}

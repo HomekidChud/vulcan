@@ -1,0 +1,731 @@
+// =====================================================================
+// EMBERFALL — first-person dungeon crawler RPG (showcase candidate)
+// ---------------------------------------------------------------------
+// Three procedurally generated depths of the Underkeep: rooms, corridors,
+// slimes, bats, brutes and a boss. Torch-lit rendering with distance
+// falloff, melee combat, XP and levels, potions, gold, a live minimap
+// of explored territory, and a message log. Written in pure Vulcan
+// against the built-in 3D renderer.
+//
+// CONTROLS
+//   W / S ......... move forward / back
+//   A / D ......... strafe left / right
+//   ARROWS ........ turn (left / right)
+//   SPACE ......... sword swing
+//   R ............. restart run
+// =====================================================================
+
+import engine
+
+const GRID: i64 = 24
+const ST_PLAY: i64 = 0
+const ST_DEAD: i64 = 1
+const ST_WIN: i64 = 2
+
+const KIND_SLIME: i64 = 0
+const KIND_BAT: i64 = 1
+const KIND_BRUTE: i64 = 2
+const KIND_BOSS: i64 = 3
+
+struct Enemy {
+    kind: i64,
+    pos: Vec3,
+    hp: f64,
+    max_hp: f64,
+    dmg: f64,
+    speed: f64,
+    cd: f64,
+    alive: bool,
+}
+
+struct Pickup {
+    kind: i64,      // 0 potion, 1 gold, 2 stairs
+    pos: Vec3,
+    alive: bool,
+}
+
+struct LogEntry {
+    text: string,
+    t: f64,
+}
+
+// push a message onto the rolling log (keeps the last 4)
+fn log_push(entries: [LogEntry], m: string) -> [LogEntry] {
+    entries.push(LogEntry { text: m, t: 4.0 })
+    if entries.len() > 4 {
+        entries.shift()
+    }
+    return entries
+}
+
+// ---------------------------------------------------------------------
+// dungeon generation: rooms carved into solid rock, chained by corridors
+// ---------------------------------------------------------------------
+fn carve_room(map: [i64], cx: i64, cz: i64, w: i64, h: i64) -> [i64] {
+    let x = cx - w / 2
+    while x <= cx + w / 2 {
+        let z = cz - h / 2
+        while z <= cz + h / 2 {
+            if x > 0 && x < GRID - 1 && z > 0 && z < GRID - 1 {
+                map[z * GRID + x] = 1
+            }
+            z += 1
+        }
+        x += 1
+    }
+    return map
+}
+
+fn carve_corridor(map: [i64], ax: i64, az: i64, bx: i64, bz: i64) -> [i64] {
+    let x = ax
+    while x != bx {
+        map[az * GRID + x] = 1
+        map[(az + 1) * GRID + x] = 1
+        if bx > x { x += 1 } else { x -= 1 }
+    }
+    let z = az
+    while z != bz {
+        map[z * GRID + bx] = 1
+        map[z * GRID + bx + 1] = 1
+        if bz > z { z += 1 } else { z -= 1 }
+    }
+    map[bz * GRID + bx] = 1
+    return map
+}
+
+fn cell_walkable(map: [i64], cx: i64, cz: i64) -> bool {
+    if cx < 1 { return false }
+    if cx > GRID - 2 { return false }
+    if cz < 1 { return false }
+    if cz > GRID - 2 { return false }
+    return map[cz * GRID + cx] == 1
+}
+
+// random walkable cell at least `away` cells from (px, pz)
+fn rand_floor(map: [i64], px: f64, pz: f64, away: f64) -> Vec3 {
+    let tries = 0
+    while tries < 400 {
+        let cx = rand_int(1, GRID - 2)
+        let cz = rand_int(1, GRID - 2)
+        if cell_walkable(map, cx, cz) {
+            let wx = cx as f64 + 0.5
+            let wz = cz as f64 + 0.5
+            let dx = wx - px
+            let dz = wz - pz
+            if sqrt(dx * dx + dz * dz) >= away {
+                return Vec3 { x: wx, y: 0.0, z: wz }
+            }
+        }
+        tries += 1
+    }
+    return Vec3 { x: px + 1.0, y: 0.0, z: pz }
+}
+
+// circle-vs-grid collision test (radius r around x,z)
+fn spot_free(map: [i64], x: f64, z: f64, r: f64) -> bool {
+    let x0 = (x - r) as i64
+    let x1 = (x + r) as i64
+    let z0 = (z - r) as i64
+    let z1 = (z + r) as i64
+    if !cell_walkable(map, x0, z0) { return false }
+    if !cell_walkable(map, x1, z0) { return false }
+    if !cell_walkable(map, x0, z1) { return false }
+    if !cell_walkable(map, x1, z1) { return false }
+    return true
+}
+
+// ---------------------------------------------------------------------
+// torch-lit color: distance falloff into darkness, with a flicker
+// ---------------------------------------------------------------------
+fn torch_color(col: i64, dist: f64, flicker: f64) -> i64 {
+    let t = dist / (15.0 * flicker)
+    if t > 0.94 { t = 0.94 }
+    if t < 0.0 { t = 0.0 }
+    return color_lerp(col, 0x07050C, t)
+}
+
+// ---------------------------------------------------------------------
+// main
+// ---------------------------------------------------------------------
+fn main() {
+    canvas_resize(384, 216)
+
+    // ---- player state ----
+    let px = 2.5
+    let pz = 2.5
+    let yaw = 0.0
+    let pitch = 0.0
+    let hp = 100.0
+    let max_hp = 100.0
+    let level = 1
+    let xp = 0.0
+    let gold = 0
+    let kills = 0
+    let depth = 1
+    let state = ST_PLAY
+    let run_time = 0.0
+
+    // swing / combat timers
+    let swing_t = 0.0
+    let swing_cd = 0.0
+    let hurt_t = 0.0
+
+    // message log (last 4)
+    let entries: [LogEntry] = []
+
+    // ---- dungeon ----
+    let map: [i64] = []
+    let visited: [i64] = []
+    let init = 0
+    while init < GRID * GRID {
+        map.push(0)
+        visited.push(0)
+        init += 1
+    }
+
+    let enemies: [Enemy] = []
+    let pickups: [Pickup] = []
+
+    // generation happens in the main loop via the `gen` flag
+    let gen = 1
+
+    // ---- main loop ----
+    loop {
+        let dt = 1.0 / 60.0
+        let time = run_time
+
+        if state == ST_PLAY {
+            run_time += dt
+        }
+
+        // ---- input ----
+        if key_ready() > 0 {
+            let k = read_key()
+            if k == 114 {   // R — restart run
+                depth = 1
+                hp = 100.0
+                max_hp = 100.0
+                level = 1
+                xp = 0.0
+                gold = 0
+                kills = 0
+                run_time = 0.0
+                state = ST_PLAY
+                gen = 1
+            }
+        }
+        if gen == 1 {
+            // re-run the generator block above (same code path as initial gen)
+            let i = 0
+            while i < map.len() {
+                map[i] = 0
+                visited[i] = 0
+                i += 1
+            }
+            while enemies.len() > 0 { enemies.pop() }
+            while pickups.len() > 0 { pickups.pop() }
+
+            let room_x: [i64] = []
+            let room_z: [i64] = []
+            let rooms = 7 + depth
+            let r = 0
+            while r < rooms {
+                room_x.push(rand_int(4, GRID - 5))
+                room_z.push(rand_int(4, GRID - 5))
+                r += 1
+            }
+            let c = 0
+            while c < rooms {
+                map = carve_room(map, room_x[c], room_z[c], rand_int(3, 6), rand_int(3, 6))
+                if c > 0 {
+                    map = carve_corridor(map, room_x[c - 1], room_z[c - 1], room_x[c], room_z[c])
+                }
+                c += 1
+            }
+            px = room_x[0] as f64 + 0.5
+            pz = room_z[0] as f64 + 0.5
+            yaw = 0.0
+            pitch = 0.0
+            if depth < 3 {
+                pickups.push(Pickup {
+                    kind: 2,
+                    pos: Vec3 { x: room_x[rooms - 1] as f64 + 0.5, y: 0.0, z: room_z[rooms - 1] as f64 + 0.5 },
+                    alive: true,
+                })
+            }
+            let e_count = 6 + depth * 3
+            let e = 0
+            while e < e_count {
+                let kind = KIND_SLIME
+                let roll = rand_int(0, 100)
+                if depth >= 2 && roll < 35 { kind = KIND_BAT }
+                if depth >= 3 && roll >= 35 && roll < 55 { kind = KIND_BRUTE }
+                let spot = rand_floor(map, px, pz, 6.0)
+                let ehp = 14.0
+                let edmg = 6.0
+                let espd = 1.7
+                if kind == KIND_BAT { ehp = 9.0; edmg = 5.0; espd = 3.1 }
+                if kind == KIND_BRUTE { ehp = 34.0; edmg = 12.0; espd = 1.25 }
+                ehp = ehp + (depth - 1) * 4.0
+                enemies.push(Enemy { kind: kind, pos: spot, hp: ehp, max_hp: ehp, dmg: edmg, speed: espd, cd: 0.0, alive: true })
+                e += 1
+            }
+            if depth == 3 {
+                enemies.push(Enemy {
+                    kind: KIND_BOSS,
+                    pos: Vec3 { x: room_x[rooms - 1] as f64 + 0.5, y: 0.0, z: room_z[rooms - 1] as f64 + 1.5 },
+                    hp: 240.0, max_hp: 240.0, dmg: 16.0, speed: 1.5, cd: 0.0, alive: true,
+                })
+            }
+            let p = 0
+            while p < 4 + depth {
+                let kind = 1
+                if rand_int(0, 100) < 45 { kind = 0 }
+                pickups.push(Pickup { kind: kind, pos: rand_floor(map, px, pz, 3.0), alive: true })
+                p += 1
+            }
+            gen = 0
+            entries = log_push(entries, "DEPTH 1 — the Underkeep stirs")
+        }
+
+        if state == ST_PLAY {
+            // ---- movement (key repeat drives continuous motion) ----
+            let fwd_x = sin(yaw)
+            let fwd_z = cos(yaw)
+            let step = 2.6 * dt
+            if key_down(119) {   // W
+                let nx = px + fwd_x * step
+                if spot_free(map, nx, pz, 0.28) { px = nx }
+                let nz = pz + fwd_z * step
+                if spot_free(map, px, nz, 0.28) { pz = nz }
+            }
+            if key_down(115) {   // S
+                let nx = px - fwd_x * step
+                if spot_free(map, nx, pz, 0.28) { px = nx }
+                let nz = pz - fwd_z * step
+                if spot_free(map, px, nz, 0.28) { pz = nz }
+            }
+            if key_down(97) {    // A — strafe
+                let nx = px - fwd_z * step
+                if spot_free(map, nx, pz, 0.28) { px = nx }
+                let nz = pz + fwd_x * step
+                if spot_free(map, px, nz, 0.28) { pz = nz }
+            }
+            if key_down(100) {   // D — strafe
+                let nx = px + fwd_z * step
+                if spot_free(map, nx, pz, 0.28) { px = nx }
+                let nz = pz - fwd_x * step
+                if spot_free(map, px, nz, 0.28) { pz = nz }
+            }
+            if key_down(39) { yaw += 2.4 * dt }   // right arrow
+            if key_down(37) { yaw -= 2.4 * dt }   // left arrow
+
+            // ---- sword swing ----
+            swing_cd -= dt
+            swing_t -= dt
+            if key_down(32) && swing_cd <= 0.0 {   // SPACE
+                swing_cd = 0.38
+                swing_t = 0.12
+                let dmg = 9.0 + (level - 1) * 2.5
+                let i = 0
+                while i < enemies.len() {
+                    let e = enemies[i]
+                    if e.alive {
+                        let dx = e.pos.x - px
+                        let dz = e.pos.z - pz
+                        let d = sqrt(dx * dx + dz * dz)
+                        if d < 2.1 {
+                            let dot = (dx / d) * fwd_x + (dz / d) * fwd_z
+                            if dot > 0.35 {
+                                e.hp = e.hp - dmg
+                                if e.hp <= 0.0 {
+                                    e.alive = false
+                                    kills += 1
+                                    xp += 9.0 + (depth as f64) * 3.0
+                                    if e.kind == KIND_BOSS {
+                                        xp += 120.0
+                                        state = ST_WIN
+                                    }
+                                    let m = "slime dissolves"
+                                    if e.kind == KIND_BAT { m = "bat falls" }
+                                    if e.kind == KIND_BRUTE { m = "brute collapses" }
+                                    if e.kind == KIND_BOSS { m = "THE EMBER TYRANT FALLS" }
+                                    entries = log_push(entries, m)
+                                    // occasional potion drop
+                                    if rand_int(0, 100) < 18 {
+                                        pickups.push(Pickup { kind: 0, pos: e.pos, alive: true })
+                                    }
+                                }
+                                enemies[i] = e
+                            }
+                        }
+                    }
+                    i += 1
+                }
+            }
+
+            // ---- enemies ----
+            let i = 0
+            while i < enemies.len() {
+                let e = enemies[i]
+                if e.alive {
+                    e.cd -= dt
+                    let dx = px - e.pos.x
+                    let dz = pz - e.pos.z
+                    let d = sqrt(dx * dx + dz * dz)
+                    let aggro = 9.0
+                    if e.kind == KIND_BOSS { aggro = 15.0 }
+                    if d < aggro && d > 0.01 {
+                        let wob = 0.0
+                        if e.kind == KIND_BAT { wob = sin(time * 6.0 + i as f64) * 0.6 }
+                        let nx = e.pos.x + (dx / d) * e.speed * dt + (dz / d) * wob * dt
+                        let nz = e.pos.z + (dz / d) * e.speed * dt - (dx / d) * wob * dt
+                        if spot_free(map, nx, e.pos.z, 0.3) { e.pos.x = nx }
+                        if spot_free(map, e.pos.x, nz, 0.3) { e.pos.z = nz }
+                    }
+                    // attack
+                    if d < 1.35 && e.cd <= 0.0 {
+                        e.cd = 1.1
+                        hp = hp - e.dmg
+                        hurt_t = 0.25
+                        let m = f"hit for {e.dmg as i64}"
+                        if e.kind == KIND_BOSS { m = "TYRANT smashes you" }
+                        entries = log_push(entries, m)
+                    }
+                    enemies[i] = e
+                }
+                i += 1
+            }
+
+            // ---- pickups ----
+            let i = 0
+            while i < pickups.len() {
+                let p = pickups[i]
+                if p.alive {
+                    let dx = p.pos.x - px
+                    let dz = p.pos.z - pz
+                    if sqrt(dx * dx + dz * dz) < 0.75 {
+                        if p.kind == 0 {
+                            let heal = 35.0
+                            if hp + heal > max_hp { hp = max_hp } else { hp = hp + heal }
+                            entries = log_push(entries, "potion — warmth spreads")
+                        }
+                        if p.kind == 1 {
+                            gold += rand_int(5, 15)
+                            entries = log_push(entries, "gold coins")
+                        }
+                        if p.kind == 2 {
+                            depth += 1
+                            if depth > 3 {
+                                state = ST_WIN
+                            } else {
+                                gen = 1
+                            }
+                            entries = log_push(entries, f"descend to depth {depth}")
+                        }
+                        p.alive = false
+                        pickups[i] = p
+                    }
+                }
+                i += 1
+            }
+
+            // ---- xp / level ----
+            let need = 15.0 + ((level - 1) as f64) * 12.0
+            if xp >= need {
+                xp -= need
+                level += 1
+                max_hp += 14.0
+                hp = max_hp
+                entries = log_push(entries, f"LEVEL {level} — vigor restored")
+            }
+
+            // ---- death ----
+            if hp <= 0.0 {
+                state = ST_DEAD
+                entries = log_push(entries, "you have fallen")
+            }
+
+            // ---- explore minimap ----
+            let cx = px as i64
+            let cz = pz as i64
+            let ex = cx - 5
+            while ex <= cx + 5 {
+                let ez = cz - 5
+                while ez <= cz + 5 {
+                    if ex >= 0 && ex < GRID && ez >= 0 && ez < GRID {
+                        let ddx = (ex - cx) as f64
+                        let ddz = (ez - cz) as f64
+                        if ddx * ddx + ddz * ddz < 25.0 {
+                            visited[ez * GRID + ex] = 1
+                        }
+                    }
+                    ez += 1
+                }
+                ex += 1
+            }
+        }
+
+        hurt_t -= dt
+
+        // =================================================================
+        // render
+        // =================================================================
+        let flicker = 0.82 + 0.13 * sin(time * 11.0) + 0.05 * sin(time * 37.0)
+        let cam = cam_first_person(Vec3 { x: px, y: 0.0, z: pz }, yaw, pitch)
+        clear(0x07050C)
+
+        // floor + ceiling fans (dark stone)
+        let fx = sin(cam.yaw)
+        let fz = cos(cam.yaw)
+        let cx2 = cam.x + fx * 1.0
+        let cz2 = cam.z + fz * 1.0
+        let pfc = project(cam, Vec3 { x: cx2, y: 0.0, z: cz2 })
+        let pcc = project(cam, Vec3 { x: cx2, y: 2.6, z: cz2 })
+        let fan_rings: [f64] = [150.0]
+        let fr = 0
+        while fr < fan_rings.len() {
+            let rad = fan_rings[fr]
+            let a0 = cam.yaw - 1.35
+            let a1 = cam.yaw + 1.35
+            let steps = 14
+            let s = 0
+            while s < steps {
+                let ta = a0 + (a1 - a0) * (s as f64) / (steps as f64)
+                let tb = a0 + (a1 - a0) * ((s + 1) as f64) / (steps as f64)
+                let fa = project(cam, Vec3 { x: cx2 + sin(ta) * rad, y: 0.0, z: cz2 + cos(ta) * rad })
+                let fb = project(cam, Vec3 { x: cx2 + sin(tb) * rad, y: 0.0, z: cz2 + cos(tb) * rad })
+                let ca = project(cam, Vec3 { x: cx2 + sin(ta) * rad, y: 2.6, z: cz2 + cos(ta) * rad })
+                let cb = project(cam, Vec3 { x: cx2 + sin(tb) * rad, y: 2.6, z: cz2 + cos(tb) * rad })
+                if pfc.visible == 1 && fa.visible == 1 && fb.visible == 1 {
+                    let col = torch_color(0x23232B, rad * 0.02 + 2.0, flicker)
+                    draw_tri(pfc.sx, pfc.sy, pfc.depth, fa.sx, fa.sy, fa.depth, fb.sx, fb.sy, fb.depth, col)
+                }
+                if pcc.visible == 1 && ca.visible == 1 && cb.visible == 1 {
+                    let col = torch_color(0x16161D, rad * 0.02 + 2.0, flicker)
+                    draw_tri(pcc.sx, pcc.sy, pcc.depth, ca.sx, ca.sy, ca.depth, cb.sx, cb.sy, cb.depth, col)
+                }
+                s += 1
+            }
+            fr += 1
+        }
+
+        // walls: boxes for solid cells near a floor cell
+        let pcx = px as i64
+        let pcz = pz as i64
+        let wx = pcx - 7
+        while wx <= pcx + 7 {
+            let wz = pcz - 7
+            while wz <= pcz + 7 {
+                if wx >= 0 && wx < GRID && wz >= 0 && wz < GRID {
+                    if map[wz * GRID + wx] == 0 {
+                        // only draw if touching a floor cell
+                        let touch = false
+                        if cell_walkable(map, wx - 1, wz) { touch = true }
+                        if cell_walkable(map, wx + 1, wz) { touch = true }
+                        if cell_walkable(map, wx, wz - 1) { touch = true }
+                        if cell_walkable(map, wx, wz + 1) { touch = true }
+                        if touch {
+                            let wxm = wx as f64 + 0.5
+                            let wzm = wz as f64 + 0.5
+                            let dx = wxm - cam.x
+                            let dz = wzm - cam.z
+                            let d = sqrt(dx * dx + dz * dz)
+                            if d < 15.0 {
+                                let base = 0x4A4656
+                                if (wx + wz) % 3 == 0 { base = 0x413D4E }
+                                if (wx * 7 + wz) % 11 == 0 { base = 0x554F66 }
+                                let col = torch_color(base, d, flicker)
+                                let wall = mesh_box(0.5, 1.3, 0.5, col)
+                                mesh_draw(wall, cam, Vec3 { x: wxm, y: 1.3, z: wzm }, 0.0)
+                            }
+                        }
+                    }
+                }
+                wz += 1
+            }
+            wx += 1
+        }
+
+        // pickups: potion / gold / stairs
+        let i = 0
+        while i < pickups.len() {
+            let p = pickups[i]
+            if p.alive {
+                let dx = p.pos.x - cam.x
+                let dz = p.pos.z - cam.z
+                let d = sqrt(dx * dx + dz * dz)
+                if d < 14.0 {
+                    let bob = sin(time * 3.0 + i as f64) * 0.1
+                    if p.kind == 0 {
+                        let m = mesh_box(0.16, 0.22, 0.16, torch_color(0xC62828, d, flicker))
+                        mesh_draw(m, cam, Vec3 { x: p.pos.x, y: 0.35 + bob, z: p.pos.z }, 0.0)
+                    }
+                    if p.kind == 1 {
+                        let m = mesh_box(0.14, 0.14, 0.14, torch_color(0xFDD835, d, flicker))
+                        mesh_draw(m, cam, Vec3 { x: p.pos.x, y: 0.25 + bob, z: p.pos.z }, 0.0)
+                    }
+                    if p.kind == 2 {
+                        let m = mesh_box(0.45, 0.1, 0.45, torch_color(0x26C6DA, d, flicker))
+                        mesh_draw(m, cam, Vec3 { x: p.pos.x, y: 0.06, z: p.pos.z }, 0.0)
+                        let glow = mesh_box(0.5, 0.03, 0.5, 0x26C6DA)
+                        mesh_draw(glow, cam, Vec3 { x: p.pos.x, y: 0.9 + bob * 0.5, z: p.pos.z }, time)
+                    }
+                }
+            }
+            i += 1
+        }
+
+        // enemies
+        let i = 0
+        while i < enemies.len() {
+            let e = enemies[i]
+            if e.alive {
+                let dx = e.pos.x - cam.x
+                let dz = e.pos.z - cam.z
+                let d = sqrt(dx * dx + dz * dz)
+                if d < 14.0 {
+                    let bob = sin(time * 4.0 + i as f64) * 0.12
+                    let col = 0x4CAF50
+                    let h = 0.42
+                    if e.kind == KIND_BAT { col = 0x9575CD; h = 0.3 }
+                    if e.kind == KIND_BRUTE { col = 0x8D6E63; h = 0.62 }
+                    if e.kind == KIND_BOSS { col = 0xE53935; h = 1.05 }
+                    let m = mesh_box(h, h, h, torch_color(col, d, flicker))
+                    let ey = h + bob
+                    if e.kind == KIND_BAT { ey = 1.4 + bob }
+                    mesh_draw(m, cam, Vec3 { x: e.pos.x, y: ey, z: e.pos.z }, time + i as f64)
+                    // health bar
+                    let bar = project(cam, Vec3 { x: e.pos.x, y: ey + h + 0.35, z: e.pos.z })
+                    if bar.visible == 1 {
+                        let bw = 14.0
+                        if e.kind == KIND_BOSS { bw = 40.0 }
+                        draw_rect(bar.sx - bw / 2.0, bar.sy, bw, 2, 0x333333)
+                        draw_rect(bar.sx - bw / 2.0, bar.sy, bw * (e.hp / e.max_hp), 2, 0xE53935)
+                    }
+                }
+            }
+            i += 1
+        }
+
+        // sword swing flash: bright arc in front of the eye
+        if swing_t > 0.0 {
+            let a0 = yaw - 0.7
+            let a1 = yaw + 0.7
+            let steps = 5
+            let s = 0
+            while s < steps {
+                let ta = a0 + (a1 - a0) * (s as f64) / (steps as f64)
+                let tb = a0 + (a1 - a0) * ((s + 1) as f64) / (steps as f64)
+                let pa = project(cam, Vec3 { x: cam.x + sin(ta) * 0.9, y: 1.4, z: cam.z + cos(ta) * 0.9 })
+                let pb = project(cam, Vec3 { x: cam.x + sin(tb) * 0.9, y: 1.4, z: cam.z + cos(tb) * 0.9 })
+                let pc3 = project(cam, Vec3 { x: cam.x + sin((ta + tb) * 0.5) * 0.45, y: 1.5, z: cam.z + cos((ta + tb) * 0.5) * 0.45 })
+                if pa.visible == 1 && pb.visible == 1 && pc3.visible == 1 {
+                    draw_tri(pa.sx, pa.sy, pa.depth, pb.sx, pb.sy, pb.depth, pc3.sx, pc3.sy, pc3.depth, 0xE8EAF6)
+                }
+                s += 1
+            }
+        }
+
+        // ---- HUD ----
+        // vignette flash when hurt
+        if hurt_t > 0.0 {
+            draw_rect(0, 0, 384, 6, 0xB71C1C)
+            draw_rect(0, 210, 384, 6, 0xB71C1C)
+        }
+
+        // top bar
+        draw_text(6, 4, "EMBERFALL", 0xFFB74D)
+        draw_text(6, 14, f"depth {depth}", 0x9E9E9E)
+        draw_text(316, 4, f"gold {gold}", 0xFDD835)
+        draw_text(316, 14, f"kills {kills}", 0x9E9E9E)
+        draw_text(316, 24, f"{(run_time * 10.0) as i64 / 10.0}s", 0x616161)
+
+        // health + xp bars
+        draw_rect(6, 196, 90, 6, 0x261414)
+        if hp > 0.0 {
+            draw_rect(6, 196, 90 * (hp / max_hp), 6, 0xE53935)
+        }
+        draw_text(6, 186, f"hp {hp as i64}/{max_hp as i64}", 0xEF9A9A)
+        let need = 15.0 + ((level - 1) as f64) * 12.0
+        draw_rect(6, 205, 90, 3, 0x141426)
+        if xp > 0.0 {
+            draw_rect(6, 205, 90 * (xp / need), 3, 0x7E57C2)
+        }
+        draw_text(102, 196, f"lvl {level}", 0xB39DDB)
+
+        // message log
+        let i = 0
+        while i < entries.len() {
+            let col = 0xD7CCC8
+            if entries[i].t < 1.5 { col = 0x8D8D8D }
+            draw_text(160.0 - (entries[i].text.len() as f64) * 2.0, 158.0 + (i as f64) * 10.0, entries[i].text, col)
+            i += 1
+        }
+        // tick down message timers
+        let i = 0
+        while i < entries.len() {
+            let en = entries[i]
+            en.t = en.t - dt
+            entries[i] = en
+            i += 1
+        }
+
+        // minimap (bottom right): explored cells
+        let mx0 = 328.0
+        let my0 = 162.0
+        let mz = 0
+        while mz < GRID {
+            let mx = 0
+            while mx < GRID {
+                if visited[mz * GRID + mx] == 1 {
+                    draw_rect(mx0 + (mx as f64) * 2.0, my0 + (mz as f64) * 2.0, 2, 2, 0x37474F)
+                }
+                mx += 1
+            }
+            mz += 1
+        }
+        // stairs marker
+        let i = 0
+        while i < pickups.len() {
+            let p = pickups[i]
+            if p.alive && p.kind == 2 {
+                draw_rect(mx0 + (p.pos.x as f64) * 2.0, my0 + (p.pos.z as f64) * 2.0, 2, 2, 0x26C6DA)
+            }
+            i += 1
+        }
+        // enemy blips
+        let i = 0
+        while i < enemies.len() {
+            let e = enemies[i]
+            if e.alive {
+                let ddx = e.pos.x - px
+                let ddz = e.pos.z - pz
+                if ddx * ddx + ddz * ddz < 100.0 {
+                    draw_rect(mx0 + (e.pos.x as f64) * 2.0, my0 + (e.pos.z as f64) * 2.0, 2, 2, 0xE53935)
+                }
+            }
+            i += 1
+        }
+        draw_rect(mx0 + (px as f64) * 2.0, my0 + (pz as f64) * 2.0, 2, 2, 0x66BB6A)
+
+        // ---- end screens ----
+        if state == ST_DEAD {
+            draw_rect(96, 76, 192, 64, 0x1A0A0A)
+            draw_rect(96, 76, 192, 2, 0xE53935)
+            draw_text(160.0 - 30.0, 86.0, "YOU HAVE FALLEN", 0xEF5350)
+            draw_text(160.0 - 39.0, 100.0, f"depth {depth} — {kills} kills — {gold} gold", 0x9E9E9E)
+            draw_text(160.0 - 42.0, 118.0, "press R to brave the Underkeep again", 0x616161)
+        }
+        if state == ST_WIN {
+            draw_rect(96, 66, 192, 84, 0x0A1A0F)
+            draw_rect(96, 66, 192, 2, 0x66BB6A)
+            draw_text(160.0 - 45.0, 76.0, "THE EMBER TYRANT IS SLAIN", 0x66BB6A)
+            draw_text(160.0 - 51.0, 90.0, f"victory in {(run_time * 10.0) as i64 / 10.0}s — level {level}", 0x9E9E9E)
+            draw_text(160.0 - 39.0, 104.0, f"{kills} kills — {gold} gold collected", 0x9E9E9E)
+            draw_text(160.0 - 24.0, 126.0, "press R for a new run", 0x616161)
+        }
+
+        present()
+    }
+}

@@ -1,0 +1,700 @@
+// games/royale.vulcan — VULCAN ROYALE
+//
+// A battle-royale built entirely in Vulcan on the Vulcan Engine.
+// 16 combatants drop onto a procedural island. Loot chests upgrade your
+// weapon (pistol -> SMG -> rifle), the storm circle closes in phases and
+// drains anyone outside it, and the bots don't just hunt you — they hunt
+// EACH OTHER. Last one standing wins.
+//
+// Canvas: 384x216 (16:9), set at boot with canvas_resize.
+//
+// Controls:
+//   W A S D     move (camera relative)
+//   mouse drag   aim / turn camera
+//   F (hold)    fire
+//   E           open the nearest chest
+//   R           restart after the run ends
+//
+// Playable in the IDE, the web bundle (desktop + phone), and natively.
+
+import engine
+
+// ---------------------------------------------------------------------------
+// Tunables
+// ---------------------------------------------------------------------------
+
+const VIEW_W: i64 = 384
+const VIEW_H: i64 = 216
+
+const COMBATANTS: i64 = 16          // you + 15 bots
+const ISLAND_R: f64 = 46.0          // playable radius
+
+// storm phases: [wait_seconds, shrink_seconds, radius_fraction, dps]
+// the circle shrinks toward phase_fraction of its previous radius
+struct StormPhase { wait: f64, shrink: f64, frac: f64, dps: f64 }
+
+// ---------------------------------------------------------------------------
+// Weapons: three tiers, chests hand them out (better over time)
+// ---------------------------------------------------------------------------
+
+struct Gun {
+    name: string,
+    damage: f64,
+    cooldown: f64,
+    mag: i64,
+    reload: f64,
+    range: f64,
+    spread: f64,      // radians of aim jitter per shot
+    color: i64,
+}
+
+fn gun_pistol() -> Gun {
+    return Gun { name: "PISTOL", damage: 16.0, cooldown: 0.45, mag: 8, reload: 1.2, range: 42.0, spread: 0.02, color: 0xB0BEC5 }
+}
+fn gun_smg() -> Gun {
+    return Gun { name: "SMG", damage: 10.0, cooldown: 0.12, mag: 24, reload: 1.5, range: 36.0, spread: 0.045, color: 0xFFD54F }
+}
+fn gun_rifle() -> Gun {
+    return Gun { name: "RIFLE", damage: 27.0, cooldown: 0.24, mag: 10, reload: 1.8, range: 60.0, spread: 0.008, color: 0xEF5350 }
+}
+
+// ---------------------------------------------------------------------------
+// Terrain
+// ---------------------------------------------------------------------------
+
+// island ground color by height (sand ring, grass, rock cap) with sun shading
+fn royale_ground(h: f64, sun: f64) -> i64 {
+    if h < 0.0 { return 0x1D5E8A }                       // shallows
+    if h < 0.7 { return color_shade(0xC2A36B, sun) }      // beach
+    if h < 3.0 { return color_shade(0x3E7C3A, sun) }      // grass
+    if h < 5.0 { return color_shade(0x557755, sun) }      // high grass
+    return color_shade(0x6B6F73, sun)                     // rock
+}
+
+// draw the heightmap with distance fog
+fn draw_ground(s: Scene, sun: f64, fog_col: i64) -> void {
+    let n = s.terrain.len()
+    if n < 2 { return }
+    let cell = s.terrain_scale
+    let half = s.terrain_size / 2.0
+    for r in 0 .. n - 1 {
+        for c in 0 .. n - 1 {
+            let x0 = (c as f64) * cell - half
+            let z0 = (r as f64) * cell - half
+            let h00 = s.terrain[r][c]
+            let h10 = s.terrain[r][c + 1]
+            let h11 = s.terrain[r + 1][c + 1]
+            let h01 = s.terrain[r + 1][c]
+            let avg = (h00 + h10 + h11 + h01) / 4.0
+            let shade = 0.75 + 0.25 * ((r + c) % 2)
+            let col = royale_ground(avg, sun * shade)
+            let cx = x0 + cell / 2.0 - s.camera.x
+            let cz = z0 + cell / 2.0 - s.camera.z
+            col = fog_mix(col, sqrt(cx * cx + cz * cz), fog_col)
+            draw_quad(s.camera,
+                Vec3 { x: x0, y: h00, z: z0 },
+                Vec3 { x: x0 + cell, y: h10, z: z0 },
+                Vec3 { x: x0 + cell, y: h11, z: z0 + cell },
+                Vec3 { x: x0, y: h01, z: z0 + cell },
+                col)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Storm
+// ---------------------------------------------------------------------------
+
+struct Storm {
+    cx: f64, cz: f64,          // circle center
+    r: f64,                    // current radius
+    target_r: f64,             // radius we're shrinking to
+    phase: i64,                // which phase we're in
+    timer: f64,                // seconds left in wait/shrink
+    shrinking: bool,
+}
+
+fn storm_new(cx: f64, cz: f64, r: f64) -> Storm {
+    return Storm { cx: cx, cz: cz, r: r, target_r: r, phase: 0, timer: 0.0, shrinking: false }
+}
+
+// advance the storm through its phases; returns (storm, phase_just_changed)
+fn storm_step(st: Storm, phases: [StormPhase]) -> Storm {
+    if st.phase >= phases.len() { return st }
+    let p = phases[st.phase]
+    st.timer -= 1.0 / 60.0
+    if st.shrinking {
+        // lerp the radius toward the target over the shrink window
+        let t = 1.0 - clamp(st.timer / p.shrink, 0.0, 1.0)
+        st.r = st.target_r + (p.frac * st.target_r - st.target_r) * t
+        if st.timer <= 0.0 {
+            st.r = p.frac * st.target_r
+            st.target_r = st.r
+            st.shrinking = false
+            st.phase += 1
+            if st.phase < phases.len() {
+                st.timer = phases[st.phase].wait
+            }
+        }
+    } else {
+        if st.timer <= 0.0 {
+            st.shrinking = true
+            st.timer = p.shrink
+        }
+    }
+    return st
+}
+
+// true when a world position is outside the safe circle
+fn storm_outside(st: Storm, x: f64, z: f64) -> bool {
+    let dx = x - st.cx
+    let dz = z - st.cz
+    return dx * dx + dz * dz > st.r * st.r
+}
+
+// ---------------------------------------------------------------------------
+// Run state
+// ---------------------------------------------------------------------------
+
+const ST_PLAYING: i64 = 0
+const ST_GAMEOVER: i64 = 1
+const ST_VICTORY: i64 = 2
+
+// one combatant's identity for the kill feed / placement board
+fn fighter_name(i: i64) -> string {
+    let names: [string] = [
+        "REX", "JUNO", "KIRA", "DAX", "NOVA", "ASH", "VIPER", "ONYX",
+        "RUE", "TALON", "MIRA", "COBALT", "WREN", "SABLE", "FLINT", "ZED",
+    ]
+    return names[i % names.len()]
+}
+
+// bot weapon by tier index
+fn bot_gun(tier: i64) -> Gun {
+    if tier == 0 { return gun_pistol() }
+    if tier == 1 { return gun_smg() }
+    return gun_rifle()
+}
+
+// ---------------------------------------------------------------------------
+// Bot AI: every combatant picks the NEAREST enemy (you or another bot),
+// chases, strafes, shoots, and runs for the circle when caught outside it.
+// ---------------------------------------------------------------------------
+
+fn royale_ai(s: Scene, st: Storm, dt: f64) -> Scene {
+    let n = s.entities.len()
+    for i in 0 .. n {
+        let b = s.entities[i]
+        if !b.active || b.kind != ENTITY_KIND_BOT { continue }
+
+        // 1) the storm outranks a fight: sprint to the circle if outside
+        if storm_outside(st, b.pos.x, b.pos.z) {
+            let dx = st.cx - b.pos.x
+            let dz = st.cz - b.pos.z
+            let d = sqrt(dx * dx + dz * dz)
+            if d > 0.001 {
+                b.vel.x = dx / d * b.speed
+                b.vel.z = dz / d * b.speed
+            }
+            s.entities[i] = b
+            continue
+        }
+
+        // 2) find the nearest living enemy (player or bot)
+        let target_id = -1
+        let target_dist = 999999.0
+        for j in 0 .. n {
+            let t = s.entities[j]
+            if !t.active || t.id == b.id { continue }
+            if t.kind != ENTITY_KIND_PLAYER && t.kind != ENTITY_KIND_BOT { continue }
+            let diff = t.pos.sub(b.pos)
+            let d = diff.length()
+            if d < target_dist {
+                target_dist = d
+                target_id = t.id
+            }
+        }
+
+        // 3) act: wander, chase, or fight
+        if target_id < 0 || target_dist > 34.0 {
+            // nobody near: wander toward the circle center
+            if b.ai_timer <= 0.0 {
+                b.ai_timer = 1.5
+                let ang = (rand_int(0, 359) as f64) * 0.0174533
+                b.vel.x = cos(ang) * b.speed * 0.5
+                b.vel.z = sin(ang) * b.speed * 0.5
+            } else {
+                b.ai_timer -= dt
+            }
+        } else {
+            let ti = scene_find(s, target_id)
+            if ti >= 0 {
+                let t = s.entities[ti]
+                let diff = t.pos.sub(b.pos)
+                let flat = Vec3 { x: diff.x, y: 0.0, z: diff.z }
+                let d = flat.length()
+                let gun = bot_gun(b.ai_state)
+                if d > gun.range * 0.7 {
+                    // close in
+                    if d > 0.001 {
+                        b.vel.x = flat.x / d * b.speed
+                        b.vel.z = flat.z / d * b.speed
+                    }
+                } else {
+                    // strafe: circle the target while shooting
+                    let side = Vec3 { x: -flat.z, y: 0.0, z: flat.x }
+                    if side.length() > 0.001 {
+                        side = side.normalized()
+                    }
+                    b.vel.x = side.x * b.speed * 0.7
+                    b.vel.z = side.z * b.speed * 0.7
+                    // fire on cooldown
+                    b.ai_timer -= dt
+                    if b.ai_timer <= 0.0 {
+                        b.ai_timer = gun.cooldown * 2.5
+                        let aim = diff.normalized()
+                        // lead the target a little
+                        aim = Vec3 {
+                            x: aim.x + (rand_int(0, 100) as f64 - 50.0) / 50.0 * gun.spread * 10.0,
+                            y: aim.y,
+                            z: aim.z + (rand_int(0, 100) as f64 - 50.0) / 50.0 * gun.spread * 10.0,
+                        }
+                        let muzzle = b.pos.add(aim.scaled(b.radius + 0.4))
+                        muzzle.y = muzzle.y + 1.2
+                        s = scene_fire_projectile(s, b.id, muzzle, aim, 34.0, gun.damage * 0.7, 1.6)
+                    }
+                }
+            }
+        }
+        s.entities[i] = b
+    }
+    return s
+}
+
+// ---------------------------------------------------------------------------
+// Minimap with the storm circle drawn on top
+// ---------------------------------------------------------------------------
+
+fn royale_minimap(s: Scene, st: Storm, x0: i64, y0: i64, size: i64, range: f64, viewer: i64) -> void {
+    // panel
+    draw_rect(x0 as f64, y0 as f64, size as f64, size as f64, 0x101820)
+    let half = size as f64 / 2.0
+    // storm circle: map world -> minimap
+    let scale = size as f64 / (range * 2.0)
+    let mcx = x0 as f64 + half + (st.cx - s.entities[viewer].pos.x) * scale
+    let mcy = y0 as f64 + half + (st.cz - s.entities[viewer].pos.z) * scale
+    let mr = st.r * scale
+    // safe zone fill (dark tint outside the circle is implied by the panel;
+    // draw the circle edge as a ring of dots)
+    let a = 0.0
+    while a < 6.28318 {
+        let px = x0 as f64 + half + (st.cx + cos(a) * st.r - s.entities[viewer].pos.x) * scale
+        let py = y0 as f64 + half + (st.cz + sin(a) * st.r - s.entities[viewer].pos.z) * scale
+        if px >= x0 as f64 && px < x0 as f64 + size as f64 && py >= y0 as f64 && py < y0 as f64 + size as f64 {
+            draw_rect(px, py, 2.0, 2.0, 0x7E57C2)
+        }
+        a += 0.12
+    }
+    // entities
+    for i in 0 .. s.entities.len() {
+        let e = s.entities[i]
+        if !e.active { continue }
+        if e.kind != ENTITY_KIND_PLAYER && e.kind != ENTITY_KIND_BOT && e.kind != ENTITY_KIND_PICKUP { continue }
+        let mx = x0 as f64 + half + (e.pos.x - s.entities[viewer].pos.x) * scale
+        let my = y0 as f64 + half + (e.pos.z - s.entities[viewer].pos.z) * scale
+        if mx < x0 as f64 || mx >= x0 as f64 + size as f64 { continue }
+        if my < y0 as f64 || my >= y0 as f64 + size as f64 { continue }
+        if e.id == viewer {
+            draw_rect(mx - 1.0, my - 1.0, 3.0, 3.0, 0x66BB6A)
+        } else if e.kind == ENTITY_KIND_PICKUP {
+            draw_rect(mx, my, 2.0, 2.0, 0xFFD54F)
+        } else {
+            draw_rect(mx, my, 2.0, 2.0, 0xEF5350)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// World setup
+// ---------------------------------------------------------------------------
+
+fn royale_spawn_world() -> Scene {
+    let s = scene_new()
+    s.gravity = -22.0
+    s = terrain_sines(s, 44, 5.0)
+
+    // player
+    let ang = (rand_int(0, 359) as f64) * 0.0174533
+    let pr = rand_int(8, 26) as f64
+    s = scene_spawn(s, "you", ENTITY_KIND_PLAYER, Vec3 { x: cos(ang) * pr, y: 12.0, z: sin(ang) * pr })
+    s.entities[s.entities.len() - 1].speed = 7.5
+    s.entities[s.entities.len() - 1].radius = 0.6
+    s.entities[s.entities.len() - 1].hp = 100.0
+    s.entities[s.entities.len() - 1].max_hp = 100.0
+
+    // bots
+    let i = 0
+    while i < COMBATANTS - 1 {
+        let ba = (rand_int(0, 359) as f64) * 0.0174533
+        let br = rand_int(10, 42) as f64
+        let bx = cos(ba) * br
+        let bz = sin(ba) * br
+        s = scene_spawn(s, fighter_name(i + 1), ENTITY_KIND_BOT, Vec3 { x: bx, y: 12.0, z: bz })
+        let bi = s.entities.len() - 1
+        s.entities[bi].speed = 4.6 + rand_int(0, 14) as f64 / 10.0
+        s.entities[bi].radius = 0.6
+        s.entities[bi].hp = 100.0
+        s.entities[bi].max_hp = 100.0
+        s.entities[bi].ai_state = rand_int(0, 2)       // weapon tier
+        s.entities[bi].ai_timer = rand_int(0, 90) as f64 / 60.0
+        i += 1
+    }
+
+    // loot chests scattered across the island
+    let c = 0
+    while c < 22 {
+        let ca = (rand_int(0, 359) as f64) * 0.0174533
+        let cr = rand_int(6, 40) as f64
+        s = scene_spawn_pickup(s, "chest", Vec3 { x: cos(ca) * cr, y: 2.0, z: sin(ca) * cr })
+        c += 1
+    }
+    return s
+}
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
+
+fn main() -> void {
+    canvas_resize(VIEW_W, VIEW_H)
+    term_raw()
+    defer { term_normal() }
+    cursor_visible(0)
+
+    // storm phase table: wait, shrink, radius fraction, dps
+    let phases: [StormPhase] = [
+        StormPhase { wait: 25.0, shrink: 18.0, frac: 0.62, dps: 1.5 },
+        StormPhase { wait: 20.0, shrink: 15.0, frac: 0.55, dps: 3.0 },
+        StormPhase { wait: 16.0, shrink: 12.0, frac: 0.45, dps: 6.0 },
+        StormPhase { wait: 12.0, shrink: 10.0, frac: 0.30, dps: 10.0 },
+        StormPhase { wait: 10.0, shrink: 8.0,  frac: 0.10, dps: 15.0 },
+        StormPhase { wait: 8.0,  shrink: 6.0,  frac: 0.02, dps: 20.0 },
+    ]
+
+    let killfeed: [string] = []
+    let state = ST_PLAYING
+    let kills = 0
+    let placement = COMBATANTS
+    let msg_timer = 0.0
+    let msg_text = "DROP IN - LOOT UP - SURVIVE"
+    let storm_dps = 1.5
+
+    let s = royale_spawn_world()
+    let player = 1        // first spawned entity id
+    let yaw = 0.0
+    let pitch = -0.18
+    let weapon = gun_pistol()
+    let ammo = weapon.mag
+    let reloading = 0.0
+    let fire_cd = 0.0
+
+    // one rig per combatant, each with a distinct shirt color
+    let shirts: [i64] = [0xE53935, 0x43A047, 0x1E88E5, 0xFDD835, 0x8E24AA, 0xFB8C00, 0x00ACC1, 0x546E7A]
+    let bot_rigs: [Rig] = []
+    let bi = 0
+    while bi < COMBATANTS {
+        bot_rigs.push(rig_new(shirts[bi % shirts.len()], 0x37474F, 0xC5A882, 0x212121))
+        bi += 1
+    }
+    let you_rig = rig_new(0x66BB6A, 0x1B5E20, 0xE8C39E, 0x3E2723)
+    let chest_mesh = mesh_cube(0.5, 0x8D6E63)
+
+    let storm = storm_new(0.0, 0.0, ISLAND_R)
+    storm.timer = phases[0].wait
+
+    while true {
+        let dt = 1.0 / 60.0
+
+        // ---- look ----
+        let mdx = mouse_dx()
+        let mdy = mouse_dy()
+        yaw += mdx * 0.005
+        pitch -= mdy * 0.004
+        if pitch > 0.85 { pitch = 0.85 }
+        if pitch < -0.85 { pitch = -0.85 }
+
+        // ---- restart ----
+        if key_ready() > 0 {
+            let k = read_key()
+            if k == KEY_R && state != ST_PLAYING {
+                s = royale_spawn_world()
+                player = 1
+                state = ST_PLAYING
+                kills = 0
+                placement = COMBATANTS
+                weapon = gun_pistol()
+                ammo = weapon.mag
+                reloading = 0.0
+                msg_timer = 3.0
+                msg_text = "DROP IN - LOOT UP - SURVIVE"
+                storm = storm_new(0.0, 0.0, ISLAND_R)
+                storm.timer = phases[0].wait
+                while killfeed.len() > 0 { killfeed.pop() }
+            }
+        }
+
+        if state == ST_PLAYING {
+            // ---- camera: third person over the shoulder ----
+            let pi = scene_find(s, player)
+            if pi >= 0 {
+                let pp = s.entities[pi].pos
+                s.camera = cam_third_person(pp, yaw, 5.5, 0.35)
+            }
+
+            // ---- movement: camera relative ----
+            s = player_move_cam(s, player, dt)
+            // keep the player on the island
+            let pc = scene_find(s, player)
+            if pc >= 0 {
+                let pp = s.entities[pc]
+                let pr = sqrt(pp.pos.x * pp.pos.x + pp.pos.z * pp.pos.z)
+                if pr > ISLAND_R {
+                    let k2 = ISLAND_R / pr
+                    pp.pos.x *= k2
+                    pp.pos.z *= k2
+                    s.entities[pc] = pp
+                }
+            }
+
+            // ---- fire (hold F) ----
+            fire_cd -= dt
+            if reloading > 0.0 {
+                reloading -= dt
+                if reloading <= 0.0 {
+                    ammo = weapon.mag
+                }
+            }
+            if key_down(KEY_F) && fire_cd <= 0.0 && reloading <= 0.0 && ammo > 0 {
+                fire_cd = weapon.cooldown
+                ammo -= 1
+                let eye = s.camera
+                let dir = cam_forward(s.camera)
+                // spread
+                let jitter = rand_int(0, 100) as f64 / 100.0 - 0.5
+                dir.x += jitter * weapon.spread
+                dir = dir.normalized()
+                s = scene_shoot(s, player, Vec3 { x: eye.x, y: eye.y, z: eye.z }, dir, weapon.range, weapon.damage)
+                s = scene_spawn_particle(s,
+                    Vec3 { x: eye.x + dir.x, y: eye.y + dir.y, z: eye.z + dir.z },
+                    Vec3 { x: dir.x * 6.0, y: dir.y * 6.0 + 1.0, z: dir.z * 6.0 }, 0.15, 0xFFD54F)
+                if ammo == 0 {
+                    reloading = weapon.reload
+                }
+            }
+
+            // ---- bots think ----
+            s = royale_ai(s, storm, dt)
+
+            // ---- simulate ----
+            s = engine_tick(s, dt, dt)
+
+            // ---- storm ----
+            storm = storm_step(storm, phases)
+            storm_dps = phases[storm.phase].dps
+            if storm.phase >= phases.len() { storm_dps = 25.0 }
+            // storm damage: everyone outside the circle
+            let i = 0
+            while i < s.entities.len() {
+                let e = s.entities[i]
+                if !e.active { i += 1; continue }
+                if e.kind != ENTITY_KIND_PLAYER && e.kind != ENTITY_KIND_BOT { i += 1; continue }
+                if storm_outside(storm, e.pos.x, e.pos.z) {
+                    e.hp -= storm_dps * dt
+                    s.entities[i] = e
+                }
+                i += 1
+            }
+
+            // ---- deaths: record the feed, count your kills, end conditions ----
+            let i2 = 0
+            while i2 < s.entities.len() {
+                let e = s.entities[i2]
+                if e.active && e.hp <= 0.0 && e.kind != ENTITY_KIND_PROJECTILE {
+                    e.active = false
+                    s.entities[i2] = e
+                    // who gets the credit? nearest living combatant to the corpse
+                    let killer = "THE STORM"
+                    let kd = 999999.0
+                    let j = 0
+                    while j < s.entities.len() {
+                        let k = s.entities[j]
+                        if !k.active || k.id == e.id { j += 1; continue }
+                        if k.kind != ENTITY_KIND_PLAYER && k.kind != ENTITY_KIND_BOT { j += 1; continue }
+                        let d = k.pos.sub(e.pos).length()
+                        if d < kd && d < 30.0 {
+                            kd = d
+                            killer = k.name
+                        }
+                        j += 1
+                    }
+                    let line = killer + " ELIMINATED " + e.name
+                    killfeed.push(line)
+                    if killfeed.len() > 4 { killfeed.shift() }
+                    if e.kind == ENTITY_KIND_BOT && killer == "you" {
+                        kills += 1
+                    }
+                    s = scene_spawn_particle(s, e.pos, Vec3 { x: 0.0, y: 3.0, z: 0.0 }, 0.5, 0xEF5350)
+                }
+                i2 += 1
+            }
+            let alive = scene_count_alive(s, ENTITY_KIND_BOT) + 1
+            let pi2 = scene_find(s, player)
+            if pi2 >= 0 && s.entities[pi2].hp <= 0.0 {
+                placement = alive            // bots still standing below you
+                state = ST_GAMEOVER
+            } else if alive == 1 && pi2 >= 0 && s.entities[pi2].hp > 0.0 {
+                placement = 1
+                state = ST_VICTORY
+            }
+
+            // ---- chests: E opens the nearest one within reach ----
+            if key_down(101) {   // 'e'
+                let pi3 = scene_find(s, player)
+                if pi3 >= 0 {
+                    let pp = s.entities[pi3].pos
+                    let best = -1
+                    let bd = 4.5
+                    let i3 = 0
+                    while i3 < s.entities.len() {
+                        let e = s.entities[i3]
+                        if e.active && e.kind == ENTITY_KIND_PICKUP && e.name == "chest" {
+                            let d = e.pos.sub(pp).length()
+                            if d < bd {
+                                bd = d
+                                best = i3
+                            }
+                        }
+                        i3 += 1
+                    }
+                    if best >= 0 {
+                        s.entities[best].active = false
+                        // chest loot: weapon tier rises with the storm phase
+                        let tier = rand_int(0, 2)
+                        if storm.phase >= 2 { tier = rand_int(1, 2) }
+                        if storm.phase >= 4 { tier = 2 }
+                        if tier == 0 { weapon = gun_pistol() }
+                        elif tier == 1 { weapon = gun_smg() }
+                        else { weapon = gun_rifle() }
+                        ammo = weapon.mag
+                        reloading = 0.0
+                        msg_timer = 1.6
+                        msg_text = weapon.name + " ACQUIRED"
+                        // chests can also patch you up
+                        let pi4 = scene_find(s, player)
+                        if pi4 >= 0 {
+                            s.entities[pi4].hp = min(s.entities[pi4].max_hp, s.entities[pi4].hp + 25.0)
+                        }
+                        s = scene_spawn_particle(s, s.entities[best].pos, Vec3 { x: 0.0, y: 4.0, z: 0.0 }, 0.6, 0xFFD54F)
+                    }
+                }
+            }
+        }
+
+        // ================= render =================
+        let sky = sky_colors(s.time)
+        let sun = sun_light(s.time)
+        clear(sky[0])
+        draw_sky_gradient(sky[0], sky[1], 120)
+        draw_ground(s, sun, sky[1])
+
+        // combatants as rigs with walk cycles
+        let pi = scene_find(s, player)
+        let i = 0
+        while i < s.entities.len() {
+            let e = s.entities[i]
+            if !e.active { i += 1; continue }
+            if e.kind == ENTITY_KIND_BOT {
+                let moving = sqrt(e.vel.x * e.vel.x + e.vel.z * e.vel.z)
+                let rig = bot_rigs[e.id as i64 % bot_rigs.len()]
+                rig_draw(rig, s.camera, e.pos, s.time * 2.0 + e.id as f64, s.time * 9.0, min(1.0, moving / 4.0))
+            }
+            if e.kind == ENTITY_KIND_PICKUP && e.name == "chest" {
+                let bob = 0.2 + 0.15 * sin(s.time * 2.0 + e.id as f64)
+                mesh_draw(chest_mesh, s.camera, Vec3 { x: e.pos.x, y: e.pos.y + bob, z: e.pos.z }, 0.7)
+            }
+            i += 1
+        }
+        // you (drawn last so you're never hidden by your own camera boom)
+        if pi >= 0 {
+            let pp = s.entities[pi]
+            let moving = sqrt(pp.vel.x * pp.vel.x + pp.vel.z * pp.vel.z)
+            rig_draw(you_rig, s.camera, pp.pos, yaw + 1.5708, s.time * 9.0, min(1.0, moving / 5.0))
+        }
+        draw_particles(s)
+
+        // ================= HUD =================
+        let alive = scene_count_alive(s, ENTITY_KIND_BOT) + 1
+        draw_text(4, 4, "VULCAN ROYALE", 0xFFFFFF)
+        draw_text(4, 12, "ALIVE " + to_string(alive) + "  KILLS " + to_string(kills), 0x9FB4C7)
+
+        // storm banner
+        let phase_label = "STORM PHASE " + to_string(storm.phase + 1)
+        let time_label = ""
+        if storm.phase < phases.len() {
+            if storm.shrinking {
+                time_label = "CLOSING " + to_string(storm.timer as i64) + "S"
+            } else {
+                time_label = "MOVES IN " + to_string(storm.timer as i64) + "S"
+            }
+        } else {
+            time_label = "FINAL STORM"
+        }
+        draw_text(120, 4, phase_label + " " + time_label, 0xBA68C8)
+
+        // health bar + ammo
+        if pi >= 0 {
+            hud_health_bar(4, 200, 60, s.entities[pi].hp, s.entities[pi].max_hp)
+            if storm_outside(storm, s.entities[pi].pos.x, s.entities[pi].pos.z) {
+                draw_text(4, 192, "OUTSIDE THE STORM - RUN TO THE CIRCLE", 0xEF5350)
+            }
+        }
+        let ammo_s = "AMMO " + to_string(ammo) + "/" + to_string(weapon.mag)
+        if reloading > 0.0 { ammo_s = "RELOADING" }
+        draw_text(300, 200, ammo_s, weapon.color)
+        draw_text(300, 192, weapon.name, weapon.color)
+        hud_crosshair(192, 108)
+        if pi >= 0 {
+            royale_minimap(s, storm, 320, 148, 60, 52.0, pi)
+        }
+
+        // kill feed
+        let fi = 0
+        while fi < killfeed.len() {
+            draw_text(214, 4 + fi * 8, killfeed[fi], 0x9FB4C7)
+            fi += 1
+        }
+
+        // banner messages
+        if msg_timer > 0.0 {
+            msg_timer -= dt
+            draw_text(160 - msg_text.len() as f64 * 2.0, 60, msg_text, 0xFFD54F)
+        }
+
+        // end screens
+        if state == ST_GAMEOVER {
+            draw_rect(104.0, 88.0, 176.0, 44.0, 0x101820)
+            draw_text(156, 96, "ELIMINATED", 0xEF5350)
+            draw_text(132, 108, "PLACEMENT #" + to_string(placement) + " OF " + to_string(COMBATANTS), 0x9FB4C7)
+            draw_text(140, 120, "KILLS " + to_string(kills) + "  PRESS R", 0x9FB4C7)
+        }
+        if state == ST_VICTORY {
+            draw_rect(104.0, 88.0, 176.0, 44.0, 0x101820)
+            draw_text(140, 96, "VULCAN ROYALE CHAMPION", 0x66BB6A)
+            draw_text(140, 108, "16 COMBATANTS. ONE SURVIVOR.", 0x9FB4C7)
+            draw_text(148, 120, "KILLS " + to_string(kills) + "  PRESS R", 0x9FB4C7)
+        }
+
+        present()
+        sleep_ms(16)
+    }
+}
