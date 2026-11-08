@@ -279,7 +279,11 @@ fn handle_server_line(line: string) -> void {
 
 fn run_client() -> void {
     let host = "127.0.0.1"
-    if arg_count() >= 2 { host = arg(1) }
+    if arg_count() >= 2 { host = arg(1) } else {
+        print("server address [127.0.0.1]: ")
+        let h = input()
+        if h != "" { host = h }
+    }
     let port = 7777
     if arg_count() >= 3 { port = to_int(arg(2)) }
     let conn = net_connect(host, port)
@@ -337,13 +341,13 @@ fn run_client() -> void {
 }
 
 fn main() -> void {
-    if arg_count() < 1 {
-        print("usage: discord server [port]   — start the chat server")
-        print("       discord client [host] [port] [nick] — join it")
-        exit(1)
-    }
-    if arg(0) == "server" { run_server(); return }
-    if arg(0) == "client" { run_client(); return }
-    print("unknown mode: " + arg(0))
+    // no args = client mode (the APK/browser build has no argv): the host
+    // prompt below makes that usable from a phone
+    let mode = arg(0)
+    if mode == "server" { run_server(); return }
+    if mode == "client" || mode == "" { run_client(); return }
+    print("usage: discord server [port]   — start the chat server")
+    print("       discord client [host] [port] [nick] — join it")
+    print("unknown mode: " + mode)
     exit(1)
 }

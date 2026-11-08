@@ -158,6 +158,17 @@ function __sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); 
 let __netrt = null;
 function __net() {
     if (__netrt) return __netrt;
+    // Android WebView: full TCP via the Java bridge injected by the APK shell
+    // (VulcanNet.addJavascriptInterface). addJavascriptInterface objects are
+    // only visible to the main page thread, which is why the APK bundle runs
+    // the program inline instead of in a Web Worker.
+    try {
+        if (typeof globalThis.VulcanNet !== "undefined" && globalThis.VulcanNet &&
+            typeof globalThis.VulcanNet.connect === "function") {
+            __netrt = { bridge: globalThis.VulcanNet };
+            return __netrt;
+        }
+    } catch (e) { /* fall through to worker_threads */ }
     let wt = null;
     try { wt = require("worker_threads"); } catch (e) { wt = null; }
     if (!wt || !wt.Worker) {
@@ -285,6 +296,23 @@ function __netWorkerFn() {
 }
 function __netcmd(cmd) {
     const rt = __net();
+    // Android JS bridge: synchronous calls into the Java socket layer
+    if (rt.bridge) {
+        const b = rt.bridge;
+        switch (cmd.op) {
+            case "listen":  return { str: "", ival: b.listen(cmd.port) };
+            case "port":    return { str: "", ival: b.port(cmd.h) };
+            case "accept":  return { str: "", ival: b.accept(cmd.h) };
+            case "connect": return { str: "", ival: b.connect(cmd.host, cmd.port) };
+            case "send":    return { str: "", ival: b.send(cmd.h, cmd.data) };
+            case "recv":    return { str: b.recv(cmd.h), ival: 0 };
+            case "ready":   return { str: "", ival: b.ready(cmd.h) };
+            case "alive":   return { str: "", ival: b.alive(cmd.h) };
+            case "peer":    return { str: b.peer(cmd.h), ival: 0 };
+            case "close":   return { str: "", ival: b.close(cmd.h) };
+        }
+        return { str: "", ival: -1 };
+    }
     const t = ++rt.ticket;
     cmd.ticket = t;
     rt.w.postMessage(cmd);
@@ -712,12 +740,22 @@ pub fn generate_js(program: &[Item]) -> String {
         out.push_str("  await main();\n");
     }
     out.push_str("}\n");
-    out.push_str("if (typeof __VULCAN_NO_BOOT === \"undefined\") __vulcan_boot().catch(function (e) {\n");
-    out.push_str("  if (!(e && e.__vulcan_exit)) {\n");
-    out.push_str("    if (typeof globalThis.console !== \"undefined\") globalThis.console.error(e && e.stack || e);\n");
-    out.push_str("    if (typeof globalThis.process !== \"undefined\") globalThis.process.exit(1);\n");
+    // The browser bundle (web/desktop/APK) sets __VULCAN_DEFER_BOOT and
+    // rebinding I/O in its shim; main() must only run AFTER that, so the
+    // boot is handed over instead of executed (web_bundle strips and
+    // re-adds the main marker around it).
+    out.push_str("if (typeof __VULCAN_NO_BOOT === \"undefined\") {\n");
+    out.push_str("  if (typeof globalThis.__VULCAN_DEFER_BOOT !== \"undefined\") {\n");
+    out.push_str("    globalThis.__VULCAN_BOOT_MAIN = __vulcan_boot;\n");
+    out.push_str("  } else {\n");
+    out.push_str("    __vulcan_boot().catch(function (e) {\n");
+    out.push_str("      if (!(e && e.__vulcan_exit)) {\n");
+    out.push_str("        if (typeof globalThis.console !== \"undefined\") globalThis.console.error(e && e.stack || e);\n");
+    out.push_str("        if (typeof globalThis.process !== \"undefined\") globalThis.process.exit(1);\n");
+    out.push_str("      }\n");
+    out.push_str("    });\n");
     out.push_str("  }\n");
-    out.push_str("});\n");
+    out.push_str("}\n");
     out.push_str("})();\n");
     out
 }

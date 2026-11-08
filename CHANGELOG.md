@@ -3,6 +3,42 @@
 Per-version history, newest first. The version number lives in Cargo.toml
 (single source of truth, exposed by `vulcan --version`).
 
+## 1.16.1 — Android APKs get real networking
+
+**The APK pipeline learns TCP.** `vulcan apk` now ships apps whose
+`net_*` builtins actually work on the phone — plus a fix for a web-bundle
+regression that 1.16.0 introduced.
+
+### APK: real sockets on Android
+
+- The APK shell's `MainActivity` now embeds a `NetBridge`
+  (`addJavascriptInterface("VulcanNet")`) exposing the full socket API
+  (listen/accept/connect/send/recv/ready/alive/peer/close) to the page's
+  JavaScript — same handle/ops contract as the Node bridge.
+- The browser bundle for APKs runs the program on the main page thread
+  instead of a Web Worker (workers cannot see `addJavascriptInterface`
+  objects), with the same ANSI-terminal shell.
+- A hidden focused input keeps the Android soft keyboard available; its
+  keydown events feed the program's key queue, so line editors and
+  `input()` prompts work on touch screens.
+- The APK manifest now requests `INTERNET`.
+- The build pipeline accepts a desktop JDK: `javac` gets explicit `.java`
+  file lists + `-encoding UTF-8` + `-source/-target 8`, and `d8` gets
+  explicit `.class` lists (aapt/ecj/d8 on Termux behave exactly as
+  before).
+- `examples/discord.vulcan` defaults to client mode with no argv (the
+  APK/browser build has none) and prompts for the server address — so the
+  phone app asks where to connect.
+
+### Fixed: web bundle regression from 1.16.0
+
+The JS backend's name-shadowing IIFE (1.16.0) left the web/desktop bundle
+unbalanced: the program wrapper was split at the main marker and never
+closed. The boot is now deferred (`__VULCAN_DEFER_BOOT`) — the bundle
+closes the IIFE around the shim and runs `main()` only after I/O is
+rebound. Verified end-to-end: the APK's embedded HTML connects to a real
+Vulcan discord server, renders the welcome and echoes channel traffic.
+
 ## 1.16.0 — the networked language: TCP sockets, HTTP, Discord-style chat
 
 **Vulcan learns to talk to the world.** A TCP socket layer with identical

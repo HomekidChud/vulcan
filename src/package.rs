@@ -24,7 +24,7 @@ pub fn apk(entry: &str) {
     let pkg_id = format!("com.vulcan.{}", name.to_lowercase().chars().filter(|c| c.is_ascii_alphanumeric()).collect::<String>());
 
     let dir = format!("package-{name}-apk");
-    let (_wd, webfiles) = web_bundle(stem, &js);
+    let (_wd, webfiles) = apk_bundle(stem, &js);
 
     let mut files: Vec<(String, String)> = vec![];
     for (n, c) in webfiles {
@@ -73,6 +73,37 @@ fn sh(cmd: &mut std::process::Command, what: &str) -> Result<(), String> {
         return Err(format!("step `{}` failed:\n{}", what, String::from_utf8_lossy(&log)));
     }
     Ok(())
+}
+
+// javac (unlike ecj) does not accept source directories as arguments —
+// collect every .java under `fs_root` onto the command, emitted as paths
+// relative to `prefix` (the command's current_dir)
+fn collect_java_files(prefix: &str, fs_root: &str, cmd: &mut std::process::Command) {
+    let Ok(rd) = std::fs::read_dir(fs_root) else { return };
+    for e in rd.flatten() {
+        let p = e.path();
+        let name = e.file_name().to_string_lossy().to_string();
+        let rel = format!("{prefix}/{name}");
+        if p.is_dir() {
+            collect_java_files(&rel, &p.to_string_lossy(), cmd);
+        } else if p.extension().map(|x| x == "java").unwrap_or(false) {
+            cmd.arg(rel);
+        }
+    }
+}
+
+fn collect_class_files(prefix: &str, fs_root: &str, out: &mut Vec<String>) {
+    let Ok(rd) = std::fs::read_dir(fs_root) else { return };
+    for e in rd.flatten() {
+        let p = e.path();
+        let name = e.file_name().to_string_lossy().to_string();
+        let rel = format!("{prefix}/{name}");
+        if p.is_dir() {
+            collect_class_files(&rel, &p.to_string_lossy(), out);
+        } else if p.extension().map(|x| x == "class").unwrap_or(false) {
+            out.push(rel);
+        }
+    }
 }
 
 fn find_tool(names: &[&str]) -> Option<std::path::PathBuf> {
@@ -171,21 +202,34 @@ fn apk_build(dir: &str, name: &str) -> Result<(), String> {
     let mut jc = std::process::Command::new(&ecj);
     jc.current_dir(d)
         .arg("-d").arg("build/obj")
-        .arg("-classpath").arg(&aj)
-        .arg("build/gen")
-        .arg("src");
+        .arg("-classpath").arg(&aj);
     if ecj.file_name().map(|f| f == "ecj").unwrap_or(false) {
         jc.arg("-8"); // ecj wants a source level
+        jc.arg("build/gen").arg("src");
+    } else {
+        // javac (a desktop JDK) takes explicit .java files, not directories
+        jc.arg("-source").arg("8").arg("-target").arg("8").arg("-encoding").arg("UTF-8");
+        for root in ["build/gen", "src"] {
+            collect_java_files(root, &format!("{d}/{root}"), &mut jc);
+        }
     }
     sh(&mut jc, "ecj: compiling MainActivity + R.java")?;
 
     // ---- 3. dex ----
+    // d8 (and dx) want explicit class files — a directory arg is rejected
+    let mut classfiles: Vec<String> = vec![];
+    collect_class_files("build/obj", &format!("{d}/build/obj"), &mut classfiles);
+    if classfiles.is_empty() {
+        return Err("javac produced no .class files".into());
+    }
     let mut dex = std::process::Command::new(&dexer);
     dex.current_dir(d);
     if dexer.file_name().map(|f| f == "d8").unwrap_or(false) {
-        dex.args(["--release", "--lib", &aj, "--output", "build", "build/obj"]);
+        dex.args(["--release", "--lib", &aj, "--output", "build"]);
+        dex.args(&classfiles);
     } else {
-        dex.args(["--dex", "--output=build/classes.dex", "build/obj"]);
+        dex.args(["--dex", "--output=build/classes.dex"]);
+        dex.args(&classfiles);
     }
     sh(&mut dex, "d8: dexing classes")?;
     // d8 writes build/classes.dex; dx already wrote it
@@ -227,7 +271,8 @@ fn apk_build(dir: &str, name: &str) -> Result<(), String> {
 
     // ---- 7. sign ----
     let apksigner = find_tool(&["apksigner"]).ok_or_else(|| "apksigner not found — install it: pkg install apksigner".to_string())?;
-    let out_apk = format!("{d}/{name}.apk");
+    // the command already runs with current_dir(d) — keep --out relative
+    let out_apk = format!("{name}.apk");
     sh(
         std::process::Command::new(&apksigner)
             .current_dir(d)
@@ -242,10 +287,10 @@ fn apk_build(dir: &str, name: &str) -> Result<(), String> {
     )?;
 
     let cwd = std::env::current_dir().map(|c| c.display().to_string()).unwrap_or_default();
-    println!("\nAPK built: {cwd}/{out_apk}");
+    println!("\nAPK built: {cwd}/{d}/{out_apk}");
     println!("install it with:");
     println!("  pkg install android-tools   # if you don't have adb");
-    println!("  adb install {cwd}/{out_apk}");
+    println!("  adb install {cwd}/{d}/{out_apk}");
     println!("or copy it to shared storage and tap it:");
     println!("  cp {cwd}/{out_apk} ~/storage/downloads/   # after termux-setup-storage");
     println!("(Settings > install unknown apps > allow Termux, if prompted)");
@@ -259,6 +304,8 @@ const APK_MANIFEST: &str = r#"<?xml version="1.0" encoding="utf-8"?>
     android:versionName="1.0">
 
     <uses-sdk android:minSdkVersion="21" android:targetSdkVersion="33"/>
+
+    <uses-permission android:name="android.permission.INTERNET"/>
 
     <application
         android:label="@string/app_name"
@@ -280,16 +327,76 @@ const APK_MANIFEST: &str = r#"<?xml version="1.0" encoding="utf-8"?>
 </manifest>
 "#;
 
+// APK: the app must run the program on the MAIN page thread — a Web Worker
+// cannot see the Java VulcanNet socket bridge (addJavascriptInterface is
+// main-thread only). Same HTML shell, but the Worker is swapped for an
+// inline eval with a postMessage shim.
+fn apk_bundle(stem: &str, js: &str) -> (String, Vec<(String, String)>) {
+    let body = match js.rsplit_once("// ---- main ----") {
+        Some((b, _)) => b.to_string(),
+        None => js.to_string(),
+    };
+    let worker_src = WORKER_SHIM.to_string() + "\n" + &body + "\n" + WORKER_MAIN + "\n})();\n";
+    let html = HTML_TEMPLATE
+        .replace("__TITLE__", &file_stem(stem))
+        .replace("__WORKER_JSON__", &json_escape(&worker_src))
+        .replace(
+            "const worker = new Worker(URL.createObjectURL(new Blob([WORKER_SRC], {type: \"application/javascript\"})));",
+            APK_WORKER_SWAP,
+        );
+    (format!("package-{}-apk", file_stem(stem)), vec![("index.html".into(), html)])
+}
+
+const APK_WORKER_SWAP: &str = r#"class __VulcanMainThread {
+    constructor(src) {
+        const self = this;
+        // the program shim's postMessage ({out}/{exit}/{fswrite}) lands in
+        // our onmessage handler, exactly like a real Worker
+        globalThis.postMessage = (d) => { if (self.onmessage) self.onmessage({ data: d }); };
+        // evaluate the program inline in THIS (main) thread — this is the
+        // whole point: the Java VulcanNet bridge is invisible to Workers
+        (0, eval)(src);
+        this.postMessage = (d) => { if (typeof onmessage === "function") onmessage({ data: d }); };
+        this.terminate = () => {};
+        // main() runs now, with the shim's rebound __out/__key_ready
+        globalThis.__VULCAN_RUN_MAIN();
+    }
+}
+const worker = new __VulcanMainThread(WORKER_SRC);
+// soft keyboard: Android only opens the IME for a focused text field. A
+// hidden input keeps the keyboard available; its keydown events flow through
+// the same document listener into the program's __vkeys queue.
+const softkb = document.createElement("input");
+softkb.setAttribute("autocomplete", "off");
+softkb.setAttribute("style",
+    "position:fixed;left:0;top:0;width:1px;height:1px;opacity:0;border:none;padding:0;background:transparent;");
+document.body.appendChild(softkb);
+document.addEventListener("touchstart", () => { softkb.focus(); }, { passive: true });
+document.addEventListener("click", () => { softkb.focus(); });
+softkb.focus();"#;
+
 const APK_MAIN_ACTIVITY: &str = r#"package com.vulcan.app;
 
 // Vulcan's Android shell: a fullscreen WebView written by the toolchain.
-// No Gradle, no Capacitor — just the platform WebView and the game bundle.
+// No Gradle, no Capacitor — just the platform WebView and the app bundle.
+// The NetBridge class exposes real TCP sockets to the page's JS (the
+// vulcan net_* builtins) via addJavascriptInterface — browsers cannot
+// open sockets, but the app shell can.
 import android.app.Activity;
 import android.os.Bundle;
 import android.view.View;
 import android.view.WindowManager;
 import android.webkit.WebView;
 import android.webkit.WebSettings;
+import android.webkit.JavascriptInterface;
+
+import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
+import java.net.InetSocketAddress;
+import java.net.ServerSocket;
+import java.net.Socket;
+import java.net.SocketTimeoutException;
+import java.util.HashMap;
 
 public class MainActivity extends Activity {
     private WebView web;
@@ -306,8 +413,167 @@ public class MainActivity extends Activity {
         s.setDomStorageEnabled(true);
         s.setAllowFileAccess(true);
         s.setMediaPlaybackRequiresUserGesture(false);
+        web.addJavascriptInterface(new NetBridge(), "VulcanNet");
         hideBars();
         web.loadUrl("file:///android_asset/index.html");
+    }
+
+    /** Full TCP for the vulcan net_* builtins: same handle/ops contract as
+     *  the Node worker_threads bridge (listen/port/accept/connect/send/recv/
+     *  ready/alive/peer/close). Calls are synchronous from JS. */
+    public static class NetBridge {
+        private final HashMap<Integer, Socket> socks = new HashMap<Integer, Socket>();
+        private final HashMap<Integer, ServerSocket> srvs = new HashMap<Integer, ServerSocket>();
+        private final HashMap<Integer, ByteArrayOutputStream> bufs = new HashMap<Integer, ByteArrayOutputStream>();
+        private int next = 100;
+
+        private int alloc() { return next++; }
+
+        private void startReader(final int h, final Socket s) {
+            Thread t = new Thread(new Runnable() {
+                public void run() {
+                    byte[] chunk = new byte[8192];
+                    try {
+                        InputStream in = s.getInputStream();
+                        int n;
+                        while ((n = in.read(chunk)) > 0) {
+                            ByteArrayOutputStream b;
+                            synchronized (socks) { b = bufs.get(h); }
+                            if (b == null) break;
+                            synchronized (b) { b.write(chunk, 0, n); }
+                        }
+                    } catch (Exception ignored) { }
+                }
+            });
+            t.setDaemon(true);
+            t.start();
+        }
+
+        @JavascriptInterface
+        public int connect(String host, int port) {
+            try {
+                Socket s = new Socket();
+                s.connect(new InetSocketAddress(host, port), 5000);
+                s.setTcpNoDelay(true);
+                int h = alloc();
+                synchronized (socks) {
+                    socks.put(h, s);
+                    bufs.put(h, new ByteArrayOutputStream());
+                }
+                startReader(h, s);
+                return h;
+            } catch (Exception e) { return -1; }
+        }
+
+        @JavascriptInterface
+        public int listen(int port) {
+            try {
+                ServerSocket ss = new ServerSocket();
+                ss.setReuseAddress(true);
+                ss.bind(new InetSocketAddress(port)); // port 0 = ephemeral
+                int h = alloc();
+                synchronized (socks) { srvs.put(h, ss); }
+                return h;
+            } catch (Exception e) { return -1; }
+        }
+
+        @JavascriptInterface
+        public int port(int h) {
+            synchronized (socks) {
+                ServerSocket ss = srvs.get(h);
+                return ss == null ? -1 : ss.getLocalPort();
+            }
+        }
+
+        @JavascriptInterface
+        public int accept(int h) {
+            ServerSocket ss;
+            synchronized (socks) { ss = srvs.get(h); }
+            if (ss == null) return -1;
+            try {
+                ss.setSoTimeout(1); // non-blocking accept
+                Socket s = ss.accept();
+                ss.setSoTimeout(0);
+                s.setTcpNoDelay(true);
+                int c = alloc();
+                synchronized (socks) {
+                    socks.put(c, s);
+                    bufs.put(c, new ByteArrayOutputStream());
+                }
+                startReader(c, s);
+                return c;
+            } catch (SocketTimeoutException e) {
+                return -1;
+            } catch (Exception e) { return -1; }
+        }
+
+        @JavascriptInterface
+        public int send(int h, String data) {
+            Socket s;
+            synchronized (socks) { s = socks.get(h); }
+            if (s == null) return -1;
+            try {
+                byte[] b = data.getBytes("UTF-8");
+                s.getOutputStream().write(b);
+                s.getOutputStream().flush();
+                return b.length;
+            } catch (Exception e) { return -1; }
+        }
+
+        @JavascriptInterface
+        public String recv(int h) {
+            ByteArrayOutputStream b;
+            synchronized (socks) { b = bufs.get(h); }
+            if (b == null) return "";
+            byte[] all;
+            synchronized (b) { all = b.toByteArray(); b.reset(); }
+            try { return new String(all, "UTF-8"); } catch (Exception e) { return ""; }
+        }
+
+        @JavascriptInterface
+        public int ready(int h) {
+            ServerSocket ss;
+            synchronized (socks) { ss = srvs.get(h); }
+            if (ss != null) return 1; // pending accept (accept() is non-blocking)
+            Socket s;
+            ByteArrayOutputStream b;
+            synchronized (socks) { s = socks.get(h); b = bufs.get(h); }
+            if (s == null) return 0;
+            if (b != null && b.size() > 0) return 1;
+            try { return s.getInputStream().available() > 0 ? 1 : 0; }
+            catch (Exception e) { return 0; }
+        }
+
+        @JavascriptInterface
+        public int alive(int h) {
+            synchronized (socks) {
+                Socket s = socks.get(h);
+                if (s != null)
+                    return (!s.isClosed() && s.isConnected() && !s.isInputShutdown()) ? 1 : 0;
+                return srvs.containsKey(h) ? 1 : 0;
+            }
+        }
+
+        @JavascriptInterface
+        public String peer(int h) {
+            Socket s;
+            synchronized (socks) { s = socks.get(h); }
+            if (s == null) return "";
+            return s.getInetAddress().getHostAddress() + ":" + s.getPort();
+        }
+
+        @JavascriptInterface
+        public int close(int h) {
+            boolean ok = false;
+            synchronized (socks) {
+                Socket s = socks.remove(h);
+                bufs.remove(h);
+                ServerSocket ss = srvs.remove(h);
+                if (s != null) { try { s.close(); ok = true; } catch (Exception e) { } }
+                if (ss != null) { try { ss.close(); ok = true; } catch (Exception e) { } }
+            }
+            return ok ? 1 : 0;
+        }
     }
 
     private void hideBars() {
@@ -373,11 +639,13 @@ fi
 if [ "$(basename "$ECJ")" = ecj ]; then
     "$ECJ" -8 -d build/obj -classpath "$AJ" build/gen src
 else
-    "$ECJ" -d build/obj -classpath "$AJ" build/gen src
+    # javac (a desktop JDK) takes explicit .java files, not directories
+    find build/gen src -name "*.java" > build/sources.txt
+    "$ECJ" -source 8 -target 8 -encoding UTF-8 -d build/obj -classpath "$AJ" @build/sources.txt
 fi
 
 if [ "$(basename "$D8")" = d8 ]; then
-    d8 --release --lib "$AJ" --output build build/obj
+    d8 --release --lib "$AJ" --output build $(find build/obj -name "*.class")
 else
     dx --dex --output=build/classes.dex build/obj
 fi
@@ -489,7 +757,11 @@ fn web_bundle(stem: &str, js: &str) -> (String, Vec<(String, String)>) {
         Some((b, _)) => b.to_string(),
         None => js.to_string(),
     };
-    let worker_src = WORKER_SHIM.to_string() + "\n" + &body + "\n" + WORKER_MAIN;
+    // the body opens the program IIFE (`;(function(){`); close it after the
+    // shim's rebinding so runMain() (called from onmessage init) sees the
+    // rebound __out/__key_ready. The shim sets __VULCAN_DEFER_BOOT so the
+    // IIFE only HANDS OVER the boot fn instead of running main() immediately.
+    let worker_src = WORKER_SHIM.to_string() + "\n" + &body + "\n" + WORKER_MAIN + "\n})();\n";
     let html = HTML_TEMPLATE
         .replace("__TITLE__", &file_stem(stem))
         .replace("__WORKER_JSON__", &json_escape(&worker_src));
@@ -616,6 +888,7 @@ fn json_escape(s: &str) -> String {
 }
 
 const WORKER_SHIM: &str = r#"// Vulcan web worker shim: stdin/stdout/terminal/files for the browser
+globalThis.__VULCAN_DEFER_BOOT = 1; // main() runs from runMain(), after rebinding
 let __vkeys = [];
 let __held = new Set();
 let __vfs = new Map();
@@ -625,7 +898,7 @@ onmessage = (e) => {
     if (d.init) {
         for (const k in d.fs) __vfs.set(k, d.fs[k]);
         globalThis.__VULCAN_TOUCH = !!d.touch;
-        runMain();
+        globalThis.__VULCAN_RUN_MAIN();
     }
     if (d.keys) { for (const k of d.keys) { __vkeys.push(k); __held.add(k); } }
     if (d.keysup) { for (const k of d.keysup) __held.delete(k); }
@@ -633,7 +906,7 @@ onmessage = (e) => {
     if (d.touches) { __touches = d.touches; }
 };
 const process = {
-    argv: ["vulcan", "app"],
+    argv: ["vulcan"], // no program args: apps with a mode arg default sensibly
     stdout: { columns: 80, rows: 24, write: (s) => postMessage({ out: s }) },
     exit: (c) => { postMessage({ exit: c }); throw new Error("__vulcan_exit"); }
 };
@@ -689,6 +962,9 @@ function runMain() {
         }
     );
 }
+// the program body wraps everything (main included) in an IIFE, so expose
+// runMain on globalThis for the shim's onmessage init branch
+globalThis.__VULCAN_RUN_MAIN = runMain;
 "#;
 
 const HTML_TEMPLATE: &str = r##"<!DOCTYPE html>
