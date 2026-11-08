@@ -1,21 +1,53 @@
-// examples/snake.vulcan — a playable snake, pure Vulcan, ~130 lines.
+// examples/snake.vulcan — playable snake, pure Vulcan.
 //
-// run:      vulcan run examples/snake.vulcan
-// js/py:    vulcan run --target js examples/snake.vulcan
-// keys:     WASD or arrow keys to steer, SPACE restarts, Q quits
+// run:    vulcan run examples/snake.vulcan
+// js/py:  vulcan run --target js examples/snake.vulcan
+// apk:    vulcan package examples/snake.vulcan --platform android
+// web:    vulcan package examples/snake.vulcan --platform web
+// keys:   WASD or arrows to steer, SPACE restarts, Q quits
+// touch:  hold a direction relative to the head (mobile bundles)
 //
-// Shows off the 1.14 frame-perfect terminal presentation: present() clears
-// into an alternate screen sized to your real terminal, and only re-emits
-// the cells that changed — flicker-free at any size, truecolor when the
-// terminal has it, 256-color otherwise.
+// Terminal-native rendering: the canvas is sized to the terminal's real
+// pixel grid — screen_width() x screen_height()*2 half-block pixels — so
+// every canvas pixel lands on exactly one terminal pixel. No downsample
+// blur, crisp at any size; the board refits automatically when the
+// terminal changes (rotation, font zoom). Want more detail? Pinch-zoom
+// the terminal font smaller — more cells, crisper game.
 
-const CELL = 8.0        // pixel size of one grid cell
-const GW = 32           // grid width  (256 / 8)
-const GH = 18           // grid height (144 / 8)
+const GW = 32           // board cells on roomy terminals
+const GH = 18
+const SGW = 16          // smaller board when the terminal is tiny
+const SGH = 12
 
-fn on_body(body: [i64], x: i64, y: i64) -> bool {
+struct Fit {
+    cw: f64,            // cell size in canvas pixels
+    ch: f64,
+    ox: f64,            // board offset (centered on the canvas)
+    oy: f64,
+    gw: i64,            // live grid dimensions
+    gh: i64,
+    cols: i64,          // terminal size this fit was computed for
+    rows: i64,
+}
+
+fn fit_screen() -> Fit {
+    let cols = screen_width()
+    let rows = screen_height()
+    if cols < 8 { cols = 8 }
+    if rows < 6 { rows = 6 }
+    canvas_resize(cols, rows * 2)      // native pixel grid, square pixels
+    let f = Fit { cw: 8.0, ch: 8.0, ox: 0.0, oy: 0.0, gw: GW, gh: GH, cols: cols, rows: rows }
+    if cols < 48 { f.gw = SGW; f.gh = SGH }
+    f.cw = canvas_width() as f64 / (f.gw as f64)
+    f.ch = canvas_height() as f64 / (f.gh as f64)
+    f.ox = (canvas_width() as f64 - f.cw * (f.gw as f64)) / 2.0
+    f.oy = (canvas_height() as f64 - f.ch * (f.gh as f64)) / 2.0
+    return f
+}
+
+fn on_body(body: [i64], gw: i64, x: i64, y: i64) -> bool {
     for i in 0 .. body.len() {
-        if body[i] == y * GW + x { return true }
+        if body[i] == y * gw + x { return true }
     }
     return false
 }
@@ -24,25 +56,48 @@ fn main() -> void {
     term_raw()
     defer { term_normal() }
 
+    let f = fit_screen()
     let dx = 1
     let dy = 0
     let nx = 0
     let ny = 0
-    let fx = 20
-    let fy = 9
+    let fx = 0
+    let fy = 0
     let score = 0
     let best = 0
     let speed = 120
     let alive = true
-    let esc = 0          // arrow-escape sequence state: 0 none, 1 saw ESC, 2 saw [
-    let body = [5 * GW + 9, 4 * GW + 9, 3 * GW + 9]
-    let hx = 5
-    let hy = 9
-    let last = ms_now()
+    let esc = 0          // arrow-escape state: 0 none, 1 saw ESC, 2 saw [
     let running = true
+    let body = [0, 0, 0]
+    let hx = 0
+    let hy = 0
+    let last = ms_now()
+
+    // initial round
+    hx = f.gw / 4
+    hy = f.gh / 2
+    body = [hy * f.gw + hx, hy * f.gw + hx - 1, hy * f.gw + hx - 2]
+    fx = f.gw * 3 / 4
+    fy = f.gh / 2
 
     loop {
         if !running { break }
+
+        // ---- refit when the terminal changes (rotation / font zoom) ----
+        if screen_width() != f.cols || screen_height() != f.rows {
+            f = fit_screen()
+            hx = f.gw / 4
+            hy = f.gh / 2
+            body = [hy * f.gw + hx, hy * f.gw + hx - 1, hy * f.gw + hx - 2]
+            fx = f.gw * 3 / 4
+            fy = f.gh / 2
+            dx = 1
+            dy = 0
+            alive = true
+            last = ms_now()
+        }
+
         // ---- input: drain every pending key this frame ----
         while key_ready() != 0 {
             let k = read_key()
@@ -63,11 +118,42 @@ fn main() -> void {
                 if k == 97  && dx == 0 { dx = -1; dy = 0 }  // a
                 if k == 113 { running = false }              // q quits
                 if k == 32 && !alive {                       // space restarts
-                    body = [5 * GW + 9, 4 * GW + 9, 3 * GW + 9]
-                    hx = 5; hy = 9; dx = 1; dy = 0
-                    score = 0; speed = 120; alive = true; last = ms_now()
+                    hx = f.gw / 4
+                    hy = f.gh / 2
+                    body = [hy * f.gw + hx, hy * f.gw + hx - 1, hy * f.gw + hx - 2]
+                    fx = f.gw * 3 / 4
+                    fy = f.gh / 2
+                    dx = 1
+                    dy = 0
+                    score = 0
+                    speed = 120
+                    alive = true
+                    last = ms_now()
                 }
             }
+        }
+
+        // ---- touch steering (mobile bundles): hold a direction ----
+        if is_touch() && touch_count() > 0 {
+            let gx = ((touch_x(0) - f.ox) / f.cw) as i64
+            let gy = ((touch_y(0) - f.oy) / f.ch) as i64
+            if !alive {
+                hx = f.gw / 4
+                hy = f.gh / 2
+                body = [hy * f.gw + hx, hy * f.gw + hx - 1, hy * f.gw + hx - 2]
+                fx = f.gw * 3 / 4
+                fy = f.gh / 2
+                dx = 1
+                dy = 0
+                score = 0
+                speed = 120
+                alive = true
+                last = ms_now()
+            }
+            if gy < hy - 1 && dy == 0 { dx = 0; dy = -1 }
+            if gy > hy + 1 && dy == 0 { dx = 0; dy = 1 }
+            if gx > hx + 1 && dx == 0 { dx = 1; dy = 0 }
+            if gx < hx - 1 && dx == 0 { dx = -1; dy = 0 }
         }
 
         // ---- step the simulation on its own clock ----
@@ -75,20 +161,20 @@ fn main() -> void {
             last = ms_now()
             nx = hx + dx
             ny = hy + dy
-            if nx < 0 || nx >= GW || ny < 0 || ny >= GH || on_body(body, nx, ny) {
+            if nx < 0 || nx >= f.gw || ny < 0 || ny >= f.gh || on_body(body, f.gw, nx, ny) {
                 alive = false
                 if score > best { best = score }
             } else {
                 hx = nx
                 hy = ny
-                body.push(hy * GW + hx)
+                body.push(hy * f.gw + hx)
                 if hx == fx && hy == fy {
                     score += 1
                     if speed > 60 { speed -= 4 }
                     loop {   // new food, never on the snake
-                        fx = rand_int(0, GW - 1)
-                        fy = rand_int(0, GH - 1)
-                        if !on_body(body, fx, fy) { break }
+                        fx = rand_int(0, f.gw - 1)
+                        fy = rand_int(0, f.gh - 1)
+                        if !on_body(body, f.gw, fx, fy) { break }
                     }
                 } else {
                     body.shift()   // didn't eat: drop the tail
@@ -96,19 +182,36 @@ fn main() -> void {
             }
         }
 
-        // ---- draw ----
+        // ---- draw (canvas = terminal pixel grid, 1:1) ----
         clear(0x101820)
+        let inset = 0.5
+        if f.cw < 6.0 { inset = 0.0 }
         for i in 0 .. body.len() {
             let c = body[i]
             let seg = 0x20A060
             if i == body.len() - 1 { seg = 0x40E0A0 }   // brighter head
-            draw_rect((c % GW) * CELL + 1.0, (c / GW) * CELL + 1.0, CELL - 2.0, CELL - 2.0, seg)
+            draw_rect(f.ox + (c % f.gw) as f64 * f.cw + inset,
+                      f.oy + (c / f.gw) as f64 * f.ch + inset,
+                      f.cw - inset * 2.0, f.ch - inset * 2.0, seg)
         }
-        draw_rect(fx * CELL + 1.0, fy * CELL + 1.0, CELL - 2.0, CELL - 2.0, 0xE05050)
-        draw_text(4.0, 4.0, f"SCORE {score}  BEST {best}", 0xD0D8E0)
+        draw_rect(f.ox + fx as f64 * f.cw + inset, f.oy + fy as f64 * f.ch + inset,
+                  f.cw - inset * 2.0, f.ch - inset * 2.0, 0xE05050)
+        let hud = f"SCORE {score} BEST {best}"
+        let over1 = "GAME OVER"
+        let over2 = "SPACE TO RESTART"
+        if f.cols < 48 {   // tiny phone terminal: keep the text inside the canvas
+            hud = f"S {score}"
+            over1 = "OVER"
+            over2 = "TAP"
+        }
+        draw_text(2.0, 2.0, hud, 0xD0D8E0)
         if !alive {
-            draw_text(72.0, 64.0, "GAME OVER", 0xFF6060)
-            draw_text(40.0, 80.0, "SPACE TO RESTART", 0xD0D8E0)
+            let bw = f.cw * (f.gw as f64)
+            let bh = f.ch * (f.gh as f64)
+            let tx = f.ox + (bw - (over1.len() as f64) * 4.0) / 2.0
+            if tx < 2.0 { tx = 2.0 }
+            draw_text(tx, f.oy + bh / 2.0 - 6.0, over1, 0xFF6060)
+            draw_text(f.ox + (bw - (over2.len() as f64) * 4.0) / 2.0, f.oy + bh / 2.0 + 4.0, over2, 0xD0D8E0)
         }
         present()
         sleep_ms(10)
