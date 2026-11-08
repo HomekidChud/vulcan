@@ -33,6 +33,8 @@ USAGE (single file):
   vulcan bench <file.vulcan>  compile, run, time it
   vulcan package <file.vulcan> --platform <p>   ship it: web, desktop, android, ios,
                                mobile (iOS+Android), linux, windows, macos
+  vulcan apk <file.vulcan>    build an installable Android APK (Termux-native
+                               pipeline: aapt + ecj + d8 + apksigner, no Gradle)
   vulcan check <file.vulcan>  type-check without building (file:line:col errors)
   vulcan test <file.vulcan>   run every fn test_*() in the file
   vulcan doc <file|dir>       print the public API (structs, fns, consts)
@@ -167,6 +169,16 @@ fn main() {
             eprintln!("vulcan: --platform needs a value (web, desktop, mobile, linux, windows, macos)");
             std::process::exit(1);
         }
+    }
+    if cmd == "apk" {
+        let file = args.get(2).map(|s| s.as_str())
+            .unwrap_or_else(|| { eprintln!("usage: vulcan apk <file.vulcan>"); std::process::exit(1); });
+        if !Path::new(file).exists() {
+            eprintln!("error: file not found: {file}");
+            std::process::exit(1);
+        }
+        package::apk(file);
+        return;
     }
     if cmd == "package" {
         let file = args.get(2).map(|s| s.as_str())

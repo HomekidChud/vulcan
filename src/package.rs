@@ -1,3 +1,429 @@
+// ---------------------------------------------------------------------------
+// `vulcan apk` — build an installable Android APK entirely on-device (Termux)
+//
+// Gradle + the Android SDK build-tools are x86_64-only, so they can't run on
+// a phone. Termux ships native aarch64 builds of the same tools, and this
+// pipeline drives them directly:
+//
+//   aapt package  -> unsigned APK (manifest + res + assets + R.java)
+//   ecj           -> compile MainActivity.java + R.java against android.jar
+//   d8 (or dx)    -> classes.dex
+//   aapt add     -> classes.dex into the APK
+//   zipalign      -> 4-byte alignment
+//   apksigner     -> sign with an auto-generated debug keystore
+//
+// Everything is also written to <dir>/build.sh so the build can be re-run
+// without invoking vulcan again.
+// ---------------------------------------------------------------------------
+
+pub fn apk(entry: &str) {
+    let program = crate::modules::load_program(std::path::Path::new(entry));
+    let js = crate::codegen_js::generate_js(&program);
+    let stem = entry.trim_end_matches(".vulcan");
+    let name = file_stem(stem);
+    let pkg_id = format!("com.vulcan.{}", name.to_lowercase().chars().filter(|c| c.is_ascii_alphanumeric()).collect::<String>());
+
+    let dir = format!("package-{name}-apk");
+    let (_wd, webfiles) = web_bundle(stem, &js);
+
+    let mut files: Vec<(String, String)> = vec![];
+    for (n, c) in webfiles {
+        files.push((format!("assets/{n}"), c));
+    }
+    files.push(("AndroidManifest.xml".into(), APK_MANIFEST.replace("__PKG__", &pkg_id).replace("__NAME__", &name)));
+    files.push(("src/com/vulcan/app/MainActivity.java".into(), APK_MAIN_ACTIVITY.to_string()));
+    files.push(("res/values/strings.xml".into(), APK_STRINGS.replace("__NAME__", &name)));
+    files.push(("build.sh".into(), APK_BUILD_SH.replace("__NAME__", &name)));
+    files.push(("README.md".into(), APK_README.replace("__NAME__", &name)));
+
+    let _ = std::fs::create_dir_all(&dir);
+    for (rel, content) in files {
+        let path = format!("{dir}/{rel}");
+        if let Some(parent) = std::path::Path::new(&path).parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        std::fs::write(&path, content).unwrap();
+    }
+    // launcher icon (embedded 192x192 PNG)
+    let _ = std::fs::create_dir_all(format!("{dir}/res/mipmap-xxhdpi"));
+    std::fs::write(format!("{dir}/res/mipmap-xxhdpi/ic_launcher.png"), include_bytes!("apk_icon.png")).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let p = format!("{dir}/build.sh");
+        let mut perms = std::fs::metadata(&p).unwrap().permissions();
+        perms.set_mode(0o755);
+        let _ = std::fs::set_permissions(p, perms);
+    }
+
+    println!("project ready: {dir}/");
+    if let Err(e) = apk_build(&dir, &name) {
+        eprintln!("\nvulcan: {e}");
+        eprintln!("  the project is complete in {dir}/ — install any missing tools and re-run:");
+        eprintln!("    bash {dir}/build.sh");
+        std::process::exit(1);
+    }
+}
+
+fn sh(cmd: &mut std::process::Command, what: &str) -> Result<(), String> {
+    println!("  {what}");
+    let out = cmd.output().map_err(|e| format!("could not run `{}`: {e}", cmd.get_program().to_string_lossy()))?;
+    if !out.status.success() {
+        let log = if out.stderr.is_empty() { out.stdout } else { out.stderr };
+        return Err(format!("step `{}` failed:\n{}", what, String::from_utf8_lossy(&log)));
+    }
+    Ok(())
+}
+
+fn find_tool(names: &[&str]) -> Option<std::path::PathBuf> {
+    let path = std::env::var("PATH").unwrap_or_default();
+    for dir in path.split(':') {
+        for n in names {
+            let p = std::path::Path::new(dir).join(n);
+            if p.is_file() {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
+
+// locate a platform android.jar for ecj/d8 (Termux ships one)
+fn find_android_jar() -> Option<String> {
+    if let Ok(p) = std::env::var("ANDROID_JAR") {
+        if std::path::Path::new(&p).is_file() {
+            return Some(p);
+        }
+    }
+    let prefix = std::env::var("PREFIX").unwrap_or_else(|_| "/data/data/com.termux/files/usr".into());
+    let candidates = [
+        format!("{prefix}/share/java/android.jar"),
+        format!("{prefix}/usr/share/java/android.jar"),
+        "/usr/share/java/android.jar".into(),
+        format!("{}/android-sdk/platforms/android.jar", std::env::var("HOME").unwrap_or_default()),
+        "android.jar".into(),
+    ];
+    for c in candidates {
+        if std::path::Path::new(&c).is_file() {
+            return Some(c);
+        }
+    }
+    None
+}
+
+fn apk_build(dir: &str, name: &str) -> Result<(), String> {
+    let d = dir;
+    println!("building APK (Termux-native pipeline)...");
+
+    // ---- tool checks with friendly errors ----
+    let aapt = find_tool(&["aapt", "aapt2"]).ok_or_else(|| "aapt not found — install it: pkg install aapt".to_string())?;
+    let is_aapt2 = aapt.file_name().map(|f| f == "aapt2").unwrap_or(false);
+    let aj = find_android_jar().ok_or_else(|| {
+        "android.jar not found — install the platform jar: pkg install aapt (ships android.jar in $PREFIX/share/java), or set ANDROID_JAR=/path/android.jar".to_string()
+    })?;
+    let ecj = find_tool(&["ecj", "javac"]).ok_or_else(|| "ecj not found — install it: pkg install ecj".to_string())?;
+    let dexer = find_tool(&["d8", "dx"]).ok_or_else(|| "d8 not found — install it: pkg install d8".to_string())?;
+
+    // ---- clean slate ----
+    let _ = std::fs::remove_dir_all(format!("{d}/build"));
+    std::fs::create_dir_all(format!("{d}/build")).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(format!("{d}/build/gen")).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(format!("{d}/build/obj")).map_err(|e| e.to_string())?;
+
+    // ---- 1. resources + manifest -> base APK + R.java ----
+    if !is_aapt2 {
+        sh(
+            std::process::Command::new(&aapt)
+                .current_dir(d)
+                .args(["package", "-f",
+                    "-M", "AndroidManifest.xml",
+                    "-S", "res",
+                    "-A", "assets",
+                    "-I", &aj,
+                    "-J", "build/gen",
+                    "-F", "build/app-unsigned.apk"]),
+            "aapt: packaging manifest + resources + assets",
+        )?;
+    } else {
+        // aapt2: compile res then link
+        sh(
+            std::process::Command::new(&aapt)
+                .current_dir(d)
+                .args(["compile", "--dir", "res", "-o", "build/res.zip"]),
+            "aapt2: compiling resources",
+        )?;
+        sh(
+            std::process::Command::new(&aapt)
+                .current_dir(d)
+                .args(["link", "-o", "build/app-unsigned.apk",
+                    "--manifest", "AndroidManifest.xml",
+                    "--java", "build/gen",
+                    "-A", "assets",
+                    "-I", &aj,
+                    "build/res.zip"]),
+            "aapt2: linking manifest + resources + assets",
+        )?;
+    }
+
+    // ---- 2. compile Java (MainActivity + R) ----
+    let mut jc = std::process::Command::new(&ecj);
+    jc.current_dir(d)
+        .arg("-d").arg("build/obj")
+        .arg("-classpath").arg(&aj)
+        .arg("build/gen")
+        .arg("src");
+    if ecj.file_name().map(|f| f == "ecj").unwrap_or(false) {
+        jc.arg("-8"); // ecj wants a source level
+    }
+    sh(&mut jc, "ecj: compiling MainActivity + R.java")?;
+
+    // ---- 3. dex ----
+    let mut dex = std::process::Command::new(&dexer);
+    dex.current_dir(d);
+    if dexer.file_name().map(|f| f == "d8").unwrap_or(false) {
+        dex.args(["--release", "--lib", &aj, "--output", "build", "build/obj"]);
+    } else {
+        dex.args(["--dex", "--output=build/classes.dex", "build/obj"]);
+    }
+    sh(&mut dex, "d8: dexing classes")?;
+    // d8 writes build/classes.dex; dx already wrote it
+    if !std::path::Path::new(&format!("{d}/build/classes.dex")).is_file() {
+        return Err("d8 did not produce classes.dex".into());
+    }
+
+    // ---- 4. add classes.dex into the APK (must run inside build/) ----
+    sh(
+        std::process::Command::new(&aapt)
+            .current_dir(format!("{d}/build"))
+            .args(["add", "app-unsigned.apk", "classes.dex"]),
+        "aapt: adding classes.dex",
+    )?;
+
+    // ---- 5. zipalign ----
+    let zipalign = find_tool(&["zipalign"]).ok_or_else(|| "zipalign not found — install it: pkg install zipalign".to_string())?;
+    sh(
+        std::process::Command::new(&zipalign)
+            .current_dir(d)
+            .args(["-f", "4", "build/app-unsigned.apk", "build/app-aligned.apk"]),
+        "zipalign",
+    )?;
+
+    // ---- 6. debug keystore (auto-generate once) ----
+    let ks = format!("{d}/debug.keystore");
+    if !std::path::Path::new(&ks).is_file() {
+        let keytool = find_tool(&["keytool"]).ok_or_else(|| "keytool not found — install it: pkg install openjdk-17".to_string())?;
+        sh(
+            std::process::Command::new(&keytool)
+                .args(["-genkeypair", "-keystore", &ks,
+                    "-alias", "androiddebugkey",
+                    "-storepass", "android", "-keypass", "android",
+                    "-keyalg", "RSA", "-keysize", "2048", "-validity", "10000",
+                    "-dname", "CN=Android Debug,O=Android,C=US"]),
+            "keytool: generating debug keystore (first run only)",
+        )?;
+    }
+
+    // ---- 7. sign ----
+    let apksigner = find_tool(&["apksigner"]).ok_or_else(|| "apksigner not found — install it: pkg install apksigner".to_string())?;
+    let out_apk = format!("{d}/{name}.apk");
+    sh(
+        std::process::Command::new(&apksigner)
+            .current_dir(d)
+            .args(["sign",
+                "--ks", "debug.keystore",
+                "--ks-key-alias", "androiddebugkey",
+                "--ks-pass", "pass:android",
+                "--key-pass", "pass:android",
+                "--out", &out_apk,
+                "build/app-aligned.apk"]),
+        "apksigner: signing the APK",
+    )?;
+
+    let cwd = std::env::current_dir().map(|c| c.display().to_string()).unwrap_or_default();
+    println!("\nAPK built: {cwd}/{out_apk}");
+    println!("install it with:");
+    println!("  pkg install android-tools   # if you don't have adb");
+    println!("  adb install {cwd}/{out_apk}");
+    println!("or copy it to shared storage and tap it:");
+    println!("  cp {cwd}/{out_apk} ~/storage/downloads/   # after termux-setup-storage");
+    println!("(Settings > install unknown apps > allow Termux, if prompted)");
+    Ok(())
+}
+
+const APK_MANIFEST: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="__PKG__"
+    android:versionCode="1"
+    android:versionName="1.0">
+
+    <uses-sdk android:minSdkVersion="21" android:targetSdkVersion="33"/>
+
+    <application
+        android:label="@string/app_name"
+        android:icon="@mipmap/ic_launcher"
+        android:hardwareAccelerated="true"
+        android:theme="@android:style/Theme.NoTitleBar.Fullscreen">
+
+        <activity
+            android:name="com.vulcan.app.MainActivity"
+            android:exported="true"
+            android:screenOrientation="landscape"
+            android:configChanges="orientation|screenSize|keyboardHidden|screenLayout">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
+"#;
+
+const APK_MAIN_ACTIVITY: &str = r#"package com.vulcan.app;
+
+// Vulcan's Android shell: a fullscreen WebView written by the toolchain.
+// No Gradle, no Capacitor — just the platform WebView and the game bundle.
+import android.app.Activity;
+import android.os.Bundle;
+import android.view.View;
+import android.view.WindowManager;
+import android.webkit.WebView;
+import android.webkit.WebSettings;
+
+public class MainActivity extends Activity {
+    private WebView web;
+
+    @Override
+    protected void onCreate(Bundle b) {
+        super.onCreate(b);
+        // keep the screen on while playing
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        web = new WebView(this);
+        setContentView(web);
+        WebSettings s = web.getSettings();
+        s.setJavaScriptEnabled(true);
+        s.setDomStorageEnabled(true);
+        s.setAllowFileAccess(true);
+        s.setMediaPlaybackRequiresUserGesture(false);
+        hideBars();
+        web.loadUrl("file:///android_asset/index.html");
+    }
+
+    private void hideBars() {
+        getWindow().getDecorView().setSystemUiVisibility(
+            View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+            | View.SYSTEM_UI_FLAG_FULLSCREEN
+            | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+            | View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+            | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+            | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION);
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean f) {
+        super.onWindowFocusChanged(f);
+        if (f) hideBars();
+    }
+
+    @Override
+    protected void onPause()  { super.onPause();  if (web != null) web.onPause(); }
+    @Override
+    protected void onResume() { super.onResume(); if (web != null) web.onResume(); }
+    @Override
+    public void onBackPressed() { /* let the game handle it */ }
+}
+"#;
+
+const APK_STRINGS: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">__NAME__</string>
+</resources>
+"#;
+
+const APK_BUILD_SH: &str = r#"#!/bin/sh
+# builds <name>.apk using Termux's native Android tools (no Gradle needed)
+set -e
+cd "$(dirname "$0")"
+
+AJ="${ANDROID_JAR:-$PREFIX/share/java/android.jar}"
+AAPT="$(command -v aapt || command -v aapt2)"
+ECJ="$(command -v ecj || command -v javac)"
+D8="$(command -v d8 || command -v dx)"
+
+rm -rf build
+mkdir -p build/gen build/obj
+
+if command -v aapt >/dev/null; then
+    aapt package -f -M AndroidManifest.xml -S res -A assets \
+        -I "$AJ" -J build/gen -F build/app-unsigned.apk
+else
+    aapt2 compile --dir res -o build/res.zip
+    aapt2 link -o build/app-unsigned.apk --manifest AndroidManifest.xml \
+        --java build/gen -A assets -I "$AJ" build/res.zip
+fi
+
+if [ "$(basename "$ECJ")" = ecj ]; then
+    "$ECJ" -8 -d build/obj -classpath "$AJ" build/gen src
+else
+    "$ECJ" -d build/obj -classpath "$AJ" build/gen src
+fi
+
+if [ "$(basename "$D8")" = d8 ]; then
+    d8 --release --lib "$AJ" --output build build/obj
+else
+    dx --dex --output=build/classes.dex build/obj
+fi
+
+(cd build && "$AAPT" add app-unsigned.apk classes.dex)
+zipalign -f 4 build/app-unsigned.apk build/app-aligned.apk
+
+if [ ! -f debug.keystore ]; then
+    keytool -genkeypair -keystore debug.keystore -alias androiddebugkey \
+        -storepass android -keypass android -keyalg RSA -keysize 2048 \
+        -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+fi
+
+apksigner sign --ks debug.keystore --ks-key-alias androiddebugkey \
+    --ks-pass pass:android --key-pass pass:android \
+    --out __NAME__.apk build/app-aligned.apk
+
+echo "built: __NAME__.apk"
+"#;
+
+const APK_README: &str = r#"# __NAME__ (Android APK)
+
+A Vulcan program packaged as an installable Android app: a fullscreen
+WebView running the self-contained web build of the game.
+
+## One-time setup in Termux
+
+    pkg update && pkg upgrade
+    pkg install aapt ecj d8 zipalign apksigner openjdk-17
+
+## Build
+
+    bash build.sh
+
+or, from the vulcan repo:
+
+    ./target/release/vulcan apk src-file.vulcan
+
+## Install on this phone
+
+    pkg install android-tools        # once, for adb
+    adb install __NAME__.apk
+
+or without adb:
+
+    termux-setup-storage              # once
+    cp __NAME__.apk ~/storage/downloads/
+    # open Downloads in your file manager and tap the APK
+    # (allow "install unknown apps" from Termux if prompted)
+
+The APK is signed with the auto-generated `debug.keystore` in this folder —
+fine for personal use and sideloading; generate your own keystore before
+publishing to a store.
+"#;
+
 // Packaging: ship a Vulcan program anywhere — all of it OURS, no Electron,
 // no Capacitor, no third-party scaffolding:
 //  - web:     single self-contained HTML file (terminal emulator + web worker)
