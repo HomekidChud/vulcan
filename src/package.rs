@@ -393,7 +393,14 @@ const APK_BUILD_SH: &str = r#"#!/bin/sh
 set -e
 cd "$(dirname "$0")"
 
-AJ="${ANDROID_JAR:-$PREFIX/share/java/android.jar}"
+AJ="${ANDROID_JAR:-}"
+if [ -z "$AJ" ]; then
+    if [ -f "$PREFIX/share/java/android.jar" ]; then
+        AJ="$PREFIX/share/java/android.jar"   # full framework classes (from the ecj package)
+    else
+        AJ="$PREFIX/share/aapt/android.jar"  # manifest+resources only (from the aapt package)
+    fi
+fi
 AAPT="$(command -v aapt || command -v aapt2)"
 ECJ="$(command -v ecj || command -v javac)"
 D8="$(command -v d8 || command -v dx)"
