@@ -839,11 +839,12 @@ pub fn sea_color(time: f64, sky_bot: i64) -> i64 {
 // Vertical sky gradient (top color at the top of the screen, bottom color
 // at the horizon line `horizon_y`). Cheap fake skybox.
 pub fn draw_sky_gradient(top: i64, bot: i64, horizon_y: i64) -> void {
+    let cw = canvas_width()
     let y = 0
-    while y < 144 {
+    while y < canvas_height() {
         let t = y as f64 / horizon_y as f64
         if t > 1.0 { t = 1.0 }
-        draw_rect(0.0, y as f64, 256.0, 1.0, color_lerp(top, bot, t))
+        draw_rect(0.0, y as f64, cw as f64, 1.0, color_lerp(top, bot, t))
         y = y + 1
     }
 }

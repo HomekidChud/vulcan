@@ -413,6 +413,8 @@ worker.onmessage = (e) => {
         const termEl = document.getElementById("term");
         cv.style.display = "block";
         termEl.style.display = "none";
+        if (d.lw) logW = d.lw;
+        if (d.lh) logH = d.lh;
         const ctx = cv.getContext("2d");
         if (cv.width !== d.w || cv.height !== d.h) { cv.width = d.w; cv.height = d.h; }
         const img = ctx.createImageData(d.w, d.h);
@@ -461,10 +463,12 @@ document.addEventListener("mousemove", (e) => {
     if (__mdown) worker.postMessage({ mouse: [e.movementX || 0, e.movementY || 0] });
 });
 // touch input: raw touch points are ALWAYS forwarded to the game in logical
-// canvas coords (0-255 x 0-143) via touch_count()/touch_x()/touch_y().
+// canvas coords via touch_count()/touch_x()/touch_y(). The logical size is
+// whatever the game set with canvas_resize() (default 256x144).
 // A game that wants full control calls touch_custom() — the default UI then
 // disappears and every touch belongs to the game (right-side drag = look).
 // Without touch_custom() the default joystick + FIRE/JUMP/RST UI stays on.
+let logW = 256, logH = 144;
 const isTouch = "ontouchstart" in window || navigator.maxTouchPoints > 0;
 const touchUI = document.getElementById("touchui");
 if (isTouch) touchUI.style.display = "block";
@@ -476,8 +480,8 @@ function sendTouches(e) {
     const pts = [];
     for (const t of e.touches) {
         pts.push([
-            Math.round((t.clientX - r.left) / r.width * 255),
-            Math.round((t.clientY - r.top) / r.height * 143)
+            Math.round((t.clientX - r.left) / r.width * (logW - 1)),
+            Math.round((t.clientY - r.top) / r.height * (logH - 1))
         ]);
     }
     worker.postMessage({ touches: pts });

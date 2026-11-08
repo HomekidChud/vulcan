@@ -377,7 +377,7 @@ const IDE_HTML: &str = r####"<!DOCTYPE html>
   #right { display: grid; grid-template-rows: auto 1fr; min-height: 0; min-width: 0; }
   #canvas-bar { background: var(--panel); border-bottom: 1px solid var(--border); padding: 8px 12px; display: flex; align-items: center; gap: 10px; }
   #cv {
-    display: block; background: #000; width: 100%; max-width: 512px; aspect-ratio: 16 / 9;
+    display: block; background: #000; width: 100%; max-width: 512px; height: auto;
     image-rendering: pixelated; border: 1px solid var(--border); border-radius: 4px;
     margin: 10px auto;
   }
@@ -435,7 +435,7 @@ const cv = $("cv"), ctx = cv.getContext("2d");
 // ---------- syntax highlighting ----------
 const KEYWORDS = new Set(["fn","let","struct","impl","enum","if","elif","else","for","while","return","import","pub","break","continue","defer","as","const","true","false"]);
 const TYPES = new Set(["i64","f64","bool","string","void"]);
-const BUILTINS = new Set(["print","len","sqrt","sin","cos","pow","floor","ceil","abs","min","max","clock","ms_now","sleep_ms","exit","read_key","key_ready","read_line","clear_screen","set_color","print_at","screen_width","screen_height","cursor_visible","canvas_width","canvas_height","clear","draw_rect","draw_circle","draw_line","draw_text","present","mouse_x","mouse_y","mouse_down","key_down","touch_count","touch_x","touch_y","is_touch","touch_custom","file_read","file_write","file_exists","args","arg_count","to_string","to_int","to_float","rand_int","repeat","find","split","push","pop","shift","contains","join","substr","trim","upper","lower","char_at","insert","remove","last","reverse","sort"]);
+const BUILTINS = new Set(["print","len","sqrt","sin","cos","pow","floor","ceil","abs","min","max","clock","ms_now","sleep_ms","exit","read_key","key_ready","read_line","clear_screen","set_color","print_at","screen_width","screen_height","cursor_visible","canvas_width","canvas_height","canvas_resize","clear","draw_rect","draw_circle","draw_line","draw_text","present","mouse_x","mouse_y","mouse_down","key_down","touch_count","touch_x","touch_y","is_touch","touch_custom","file_read","file_write","file_exists","args","arg_count","to_string","to_int","to_float","rand_int","repeat","find","split","push","pop","shift","contains","join","substr","trim","upper","lower","char_at","insert","remove","last","reverse","sort"]);
 const esc = (s) => s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
 const span = (cls, s) => '<span class="' + cls + '">' + esc(s) + "</span>";
 const TOKEN_RE = /(\/\/[^\n]*)|(f?"(?:[^"\\]|\\.)*")|(\b\d+(?:\.\d+)?\b)|([A-Za-z_][A-Za-z0-9_]*)|([\s\S])/g;
@@ -540,9 +540,11 @@ try {
 } catch (e) {
   input = new Int32Array(300); // no isolation: program runs, but no live input
 }
+// logical canvas size (set by the program via canvas_resize; default 256x144)
+let logW = 256, logH = 144;
 function canvasPos(e) {
   const r = cv.getBoundingClientRect();
-  return [ (e.clientX - r.left) / r.width * 256, (e.clientY - r.top) / r.height * 144 ];
+  return [ (e.clientX - r.left) / r.width * logW, (e.clientY - r.top) / r.height * logH ];
 }
 function pushInput() {
   if (worker && !inputShared) worker.postMessage({ type: "input", input: input.slice() });
@@ -578,7 +580,10 @@ window.addEventListener("keyup", (e) => {
 
 // ---------- frame rendering ----------
 let frames = 0, lastFps = performance.now(), fpsVal = 0;
-function drawFrame(buf, w, h) {
+function drawFrame(buf, w, h, lw, lh) {
+  if (lw) logW = lw;
+  if (lh) logH = lh;
+  if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
   const view = new Int32Array(buf);
   const img = ctx.createImageData(w, h);
   const px = img.data;
@@ -644,7 +649,7 @@ function makeWorker() {
   const w = new Worker(URL.createObjectURL(blob));
   w.onmessage = (e) => {
     const d = e.data;
-    if (d.__vulcan_frame !== undefined) { drawFrame(d.__vulcan_frame, d.w, d.h); return; }
+    if (d.__vulcan_frame !== undefined) { drawFrame(d.__vulcan_frame, d.w, d.h, d.lw, d.lh); return; }
     if (d.type === "out") logLine(d.s, "out");
     else if (d.type === "err") logLine(d.s, "err");
     else if (d.type === "done") stopRun();
@@ -681,7 +686,8 @@ async function run() {
   }
   statusEl.textContent = "running"; statusEl.className = "";
   consoleEl.textContent = "";
-  ctx.fillStyle = "#000"; ctx.fillRect(0, 0, 256, 144);
+  logW = 256; logH = 144; // reset: the next run may call canvas_resize() itself
+  ctx.fillStyle = "#000"; ctx.fillRect(0, 0, cv.width, cv.height);
   worker = makeWorker();
   running = true;
   $("stop").disabled = false; $("run").disabled = true;

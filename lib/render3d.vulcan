@@ -56,9 +56,9 @@ pub fn cam_up(c: Camera) -> Vec3 {
     return f.cross(r)
 }
 
-// Projects a world point to the 256x144 canvas. depth is camera-space
-// distance (use as draw_tri z: smaller = nearer); visible = 0 when behind
-// the camera (skip triangles with invisible vertices).
+// Projects a world point to the canvas (any size set with canvas_resize).
+// depth is camera-space distance (use as draw_tri z: smaller = nearer);
+// visible = 0 when behind the camera (skip triangles with invisible vertices).
 pub fn project(c: Camera, p: Vec3) -> Projected {
     let f = cam_forward(c)
     let r = cam_right(c)
@@ -71,8 +71,8 @@ pub fn project(c: Camera, p: Vec3) -> Projected {
     if z < 0.5 { z = 0.5 }
     let fl = 160.0
     return Projected {
-        sx: 128.0 + d.dot(r) * fl / z,
-        sy: 72.0 - d.dot(u) * fl / z,
+        sx: canvas_width() as f64 / 2.0 + d.dot(r) * fl / z,
+        sy: canvas_height() as f64 / 2.0 - d.dot(u) * fl / z,
         depth: cz,
         visible: vis
     }

@@ -115,15 +115,33 @@ function __clear_screen() { __out("\x1b[2J\x1b[H"); }
 function __exit(c) { process.exit(c); }
 function __min(a, b) { return a < b ? a : b; }
 function __max(a, b) { return a > b ? a : b; }
-// ---- graphics: 512x288 supersampled framebuffer (2x2 SSAA), resolved to 256x144 on present ----
-const __FB_W = 512, __FB_H = 288, __VAA = 2, __OUT_W = 256, __OUT_H = 144;
-const __fb = new Int32Array(__FB_W * __FB_H);
-const __zbuf = new Float64Array(__FB_W * __FB_H);
+// ---- graphics: dynamic supersampled framebuffer (2x2 SSAA), any logical size ----
+// __canvas_resize(w, h) reallocates at any time; default 256x144.
+const __VAA = 2;
+let __FB_W = 512, __FB_H = 288, __OUT_W = 256, __OUT_H = 144;
+let __fb = null, __zbuf = null;
+function __fb_alloc() {
+    if (__fb) return;
+    __fb = new Int32Array(__FB_W * __FB_H);
+    __zbuf = new Float64Array(__FB_W * __FB_H).fill(1e30);
+}
+function __canvas_resize(w, h) {
+    w = Math.round(w); h = Math.round(h);
+    if (w < 1) w = 1; if (h < 1) h = 1;
+    if (w > 4096) w = 4096; if (h > 4096) h = 4096;
+    __OUT_W = w; __OUT_H = h;
+    __FB_W = __OUT_W * __VAA; __FB_H = __OUT_H * __VAA;
+    __fb = null; __zbuf = null;
+    __fb_alloc();
+}
+function __canvas_w() { return __OUT_W; }
+function __canvas_h() { return __OUT_H; }
 const __FONT_CHARS = " 0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ.:-!?/+%";
 const __FONT_DATA = "000007555726227717477171755711747177475771122757577571775755656567444765556746477464474557557557222711157556554444757755655557555775744755717565574717722225555755552557755525555722712470000202020007002220271302112440272051245";
-function __clear(c) { __fb.fill(c | 0); __zbuf.fill(1e30); }
+function __clear(c) { __fb_alloc(); __fb.fill(c | 0); __zbuf.fill(1e30); }
 // depth-buffered triangle: (x,y,z) vertices, z compared with < (near = smaller)
 function __draw_tri(x0, y0, z0, x1, y1, z1, x2, y2, z2, c) {
+    __fb_alloc();
     x0 *= 2; y0 *= 2; x1 *= 2; y1 *= 2; x2 *= 2; y2 *= 2; // supersampling
     let area = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0);
     if (area === 0) return;
@@ -152,6 +170,7 @@ function __draw_tri(x0, y0, z0, x1, y1, z1, x2, y2, z2, c) {
     }
 }
 function __draw_rect(x, y, w, h, c) {
+    __fb_alloc();
     x *= 2; y *= 2; w *= 2; h *= 2;
     const x0 = Math.ceil(x - 0.5), x1 = Math.floor(x + w - 0.5);
     const y0 = Math.ceil(y - 0.5), y1 = Math.floor(y + h - 0.5);
@@ -160,6 +179,7 @@ function __draw_rect(x, y, w, h, c) {
         for (let px = a; px <= b; px++) __fb[py * __FB_W + px] = c | 0;
 }
 function __draw_circle(x, y, r, c) {
+    __fb_alloc();
     x *= 2; y *= 2; r *= 2;
     if (r < 0) return;
     const x0 = Math.max(0, Math.ceil(x - r - 0.5)), x1 = Math.min(__FB_W - 1, Math.floor(x + r + 0.5));
@@ -172,6 +192,7 @@ function __draw_circle(x, y, r, c) {
         }
 }
 function __draw_line(x0, y0, x1, y1, c) {
+    __fb_alloc();
     x0 *= 2; y0 *= 2; x1 *= 2; y1 *= 2;
     let px = Math.round(x0), py = Math.round(y0);
     const ex = Math.round(x1), ey = Math.round(y1);
@@ -188,6 +209,7 @@ function __draw_line(x0, y0, x1, y1, c) {
     }
 }
 function __draw_text(x, y, s, c) {
+    __fb_alloc();
     if (typeof s !== "string") s = Number.isInteger(s) ? String(s) : __g6(s);
     s = s.toUpperCase();
     const bx = Math.round(x) * 2, by = Math.round(y) * 2;
@@ -207,8 +229,10 @@ function __draw_text(x, y, s, c) {
     }
 }
 function __downsample() {
-    // supersampling resolve: average 2x2 blocks + subtle vignette -> 256x144
+    // supersampling resolve: average 2x2 blocks + subtle vignette
+    __fb_alloc();
     const out = new Int32Array(__OUT_W * __OUT_H);
+    const cxn = __OUT_W > 1 ? (__OUT_W - 1) / 2 : 1, cyn = __OUT_H > 1 ? (__OUT_H - 1) / 2 : 1;
     for (let y = 0; y < __OUT_H; y++) {
         for (let x = 0; x < __OUT_W; x++) {
             let ur = 0, ug = 0, ub = 0;
@@ -216,7 +240,7 @@ function __downsample() {
                 const v = __fb[(y * __VAA + sy) * __FB_W + x * __VAA + sx];
                 ur += (v >> 16) & 255; ug += (v >> 8) & 255; ub += v & 255;
             }
-            const dx = (x - 127.5) / 127.5, dy = (y - 71.5) / 71.5;
+            const dx = (x - cxn) / cxn, dy = (y - cyn) / cyn;
             let f = 1.0 - (dx * dx + dy * dy) * 0.30;
             if (f < 0.0) f = 0.0; if (f > 1.0) f = 1.0;
             const r = Math.trunc(((ur + 2) >> 2) * f), g = Math.trunc(((ug + 2) >> 2) * f), b = Math.trunc(((ub + 2) >> 2) * f);
@@ -226,6 +250,7 @@ function __downsample() {
     return out;
 }
 function __present() {
+    __fb_alloc();
     if (typeof importScripts === "function" && typeof postMessage === "function") {
         // running in a worker — ship the FULL supersampled framebuffer (512x288)
         // for crisp visuals on the canvas (no 2x2 average, same vignette look)
@@ -241,7 +266,7 @@ function __present() {
                 frame[y * __FB_W + x] = (r << 16) | (g << 8) | b;
             }
         }
-        postMessage({ __vulcan_frame: frame.buffer, w: __FB_W, h: __FB_H }, [frame.buffer]);
+        postMessage({ __vulcan_frame: frame.buffer, w: __FB_W, h: __FB_H, lw: __OUT_W, lh: __OUT_H }, [frame.buffer]);
         return;
     }
     // terminal: downsample to 64x18 half-block cells (same output as the C backend)
@@ -250,17 +275,24 @@ function __present() {
     for (let cy = 0; cy < 18; cy++) {
         let row = "";
         for (let cx = 0; cx < 64; cx++) {
-            let ur = 0, ug = 0, ub = 0, lr = 0, lg = 0, lb = 0;
-            for (let sy = 0; sy < 4; sy++) for (let sx = 0; sx < 4; sx++) {
-                const v = down[(cy * 8 + sy) * __OUT_W + cx * 4 + sx];
-                ur += (v >> 16) & 255; ug += (v >> 8) & 255; ub += v & 255;
+            const x0 = Math.min(__OUT_W - 1, Math.trunc(cx * __OUT_W / 64));
+            const x1 = Math.max(x0, Math.min(__OUT_W - 1, Math.trunc((cx + 1) * __OUT_W / 64) - 1));
+            const y0 = Math.min(__OUT_H - 1, Math.trunc(cy * __OUT_H / 18));
+            const y1 = Math.max(y0, Math.min(__OUT_H - 1, Math.trunc((cy + 1) * __OUT_H / 18) - 1));
+            const yh = y0 + Math.trunc((y1 - y0 + 1) / 2); // first row of the lower half
+            let ur = 0, ug = 0, ub = 0, lr = 0, lg = 0, lb = 0, nu = 0, nl = 0;
+            for (let sy = y0; sy < yh; sy++) for (let sx = x0; sx <= x1; sx++) {
+                const v = down[sy * __OUT_W + sx];
+                ur += (v >> 16) & 255; ug += (v >> 8) & 255; ub += v & 255; nu++;
             }
-            for (let sy = 4; sy < 8; sy++) for (let sx = 0; sx < 4; sx++) {
-                const v = down[(cy * 8 + sy) * __OUT_W + cx * 4 + sx];
-                lr += (v >> 16) & 255; lg += (v >> 8) & 255; lb += v & 255;
+            for (let sy = yh; sy <= y1; sy++) for (let sx = x0; sx <= x1; sx++) {
+                const v = down[sy * __OUT_W + sx];
+                lr += (v >> 16) & 255; lg += (v >> 8) & 255; lb += v & 255; nl++;
             }
-            const urr = (ur + 8) >> 4, urg = (ug + 8) >> 4, urb = (ub + 8) >> 4;
-            const lrr = (lr + 8) >> 4, lrg = (lg + 8) >> 4, lrb = (lb + 8) >> 4;
+            if (nu === 0) { ur = lr; ug = lg; ub = lb; nu = nl ? nl : 1; }
+            if (nl === 0) { lr = ur; lg = ug; lb = ub; nl = nu; }
+            const urr = Math.trunc((ur + nu / 2) / nu), urg = Math.trunc((ug + nu / 2) / nu), urb = Math.trunc((ub + nu / 2) / nu);
+            const lrr = Math.trunc((lr + nl / 2) / nl), lrg = Math.trunc((lg + nl / 2) / nl), lrb = Math.trunc((lb + nl / 2) / nl);
             row += "\x1b[38;2;" + urr + ";" + urg + ";" + urb + "m\x1b[48;2;" + lrr + ";" + lrg + ";" + lrb + "m\u2580";
         }
         out += row + "\x1b[0m\n";
@@ -1655,8 +1687,14 @@ impl JsGen {
             }
             "screen_width" => ("__screen_w()".into(), Ty::I64),
             "screen_height" => ("__screen_h()".into(), Ty::I64),
-            "canvas_width" => ("256".into(), Ty::I64),
-            "canvas_height" => ("144".into(), Ty::I64),
+            "canvas_width" => ("__canvas_w()".into(), Ty::I64),
+            "canvas_height" => ("__canvas_h()".into(), Ty::I64),
+            "canvas_resize" => {
+                if args.len() != 2 { panic!("vulcan: canvas_resize(w, h) takes 2 args"); }
+                let (w, wt) = self.gen_expr(&args[0]); let w = self.cast(&w, &wt, &Ty::I64);
+                let (h, ht) = self.gen_expr(&args[1]); let h = self.cast(&h, &ht, &Ty::I64);
+                (format!("(__canvas_resize({w}, {h}), undefined)"), Ty::Void)
+            }
             "clear" => {
                 if args.len() != 1 { panic!("vulcan: clear(color) takes 1 arg"); }
                 let (c, t) = self.gen_expr(&args[0]);

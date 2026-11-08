@@ -1,0 +1,131 @@
+// examples/flappy.vulcan — VULCAN FLAPPY, a Flappy-Bird-style game.
+//
+// Showcases canvas_resize(): the canvas is the ORIGINAL Flappy Bird
+// resolution, 288x512 portrait — impossible before the framebuffer went
+// dynamic. Physics constants follow the values documented from the
+// original (scaled to this canvas): gravity 0.25/frame, flap -4.6,
+// pipe gap 100, pipe width 52, ground 112.
+//
+// Controls: SPACE / click / tap to flap. R restarts.
+
+// ---- constants (documented original Flappy Bird values, 288x512 space) ----
+const W: f64 = 288.0
+const H: f64 = 512.0
+const GROUND_H: f64 = 112.0
+const BIRD_X: f64 = 70.0
+const BIRD_R: f64 = 12.0
+const GRAVITY: f64 = 0.25
+const FLAP: f64 = -4.6
+const PIPE_W: f64 = 52.0
+const PIPE_GAP: f64 = 100.0
+const PIPE_SPACING: f64 = 172.0
+const SPEED: f64 = 2.0
+
+fn main() -> void {
+    canvas_resize(288, 512)
+    term_raw()
+    defer { term_normal() }
+    cursor_visible(0)
+
+    let playing = true
+    while playing {
+        // ---- state ----
+        let bird_y = 220.0
+        let bird_v = 0.0
+        let score: i64 = 0
+        let pipes: [f64] = []      // x of each pipe pair
+        let gaps: [f64] = []       // gap center y of each pipe pair
+        let px = W + 40.0
+        let i = 0
+        while i < 4 {
+            pipes.push(px)
+            gaps.push(120.0 + rand_int(0, 220) as f64)
+            px = px + PIPE_SPACING
+            i = i + 1
+        }
+        let dead = false
+
+        while dead == false {
+            // ---- input ----
+            if key_down(32) || mouse_down() || touch_count() > 0 { bird_v = FLAP }
+            if key_down(114) { dead = true; playing = true; continue }  // R
+            // quick restart on death: any flap after a beat restarts
+            if bird_y > H - GROUND_H - BIRD_R + 200.0 { dead = true }
+
+            // ---- physics ----
+            bird_v = bird_v + GRAVITY
+            bird_y = bird_y + bird_v
+            let rotation = bird_v * 6.0
+            if rotation > 90.0 { rotation = 90.0 }
+            if rotation < -20.0 { rotation = -20.0 }
+
+            // ---- pipes ----
+            let j = 0
+            while j < pipes.len() {
+                pipes[j] = pipes[j] - SPEED
+                if pipes[j] < -PIPE_W {
+                    pipes[j] = pipes[j] + PIPE_SPACING * 4.0
+                    gaps[j] = 120.0 + rand_int(0, 220) as f64
+                }
+                j = j + 1
+            }
+
+            // ---- collisions ----
+            if bird_y < BIRD_R || bird_y > H - GROUND_H - BIRD_R { dead = true }
+            j = 0
+            while j < pipes.len() {
+                let dx = BIRD_X - (pipes[j] + PIPE_W / 2.0)
+                if dx < 0.0 { dx = -dx }
+                if dx < PIPE_W / 2.0 + BIRD_R * 0.8 {
+                    let dy = bird_y - gaps[j]
+                    if dy < 0.0 { dy = -dy }
+                    if dy > PIPE_GAP / 2.0 - BIRD_R * 0.7 { dead = true }
+                }
+                // score when a pipe passes the bird
+                if pipes[j] + PIPE_W < BIRD_X - BIRD_R && pipes[j] + PIPE_W > BIRD_X - BIRD_R - SPEED {
+                    score = score + 1
+                }
+                j = j + 1
+            }
+
+            // ---- draw ----
+            clear(0x4EC0CA)                                     // sky
+            draw_rect(0.0, 0.0, W, 100.0, 0x55C4E8)            // sky band
+            let k = 0
+            while k < pipes.len() {
+                let p = pipes[k]
+                draw_rect(p, 0.0, PIPE_W, gaps[k] - PIPE_GAP / 2.0, 0x74BF2E)          // top pipe
+                draw_rect(p - 3.0, gaps[k] - PIPE_GAP / 2.0 - 26.0, PIPE_W + 6.0, 26.0, 0x74BF2E)  // top lip
+                draw_rect(p, gaps[k] + PIPE_GAP / 2.0, PIPE_W, H - GROUND_H - gaps[k] - PIPE_GAP / 2.0, 0x74BF2E)  // bottom pipe
+                draw_rect(p - 3.0, gaps[k] + PIPE_GAP / 2.0, PIPE_W + 6.0, 26.0, 0x74BF2E)  // bottom lip
+                k = k + 1
+            }
+            draw_rect(0.0, H - GROUND_H, W, GROUND_H, 0xDED895) // ground
+            draw_rect(0.0, H - GROUND_H, W, 10.0, 0xD0C86E)     // ground line
+            // bird: body + eye + beak, tilted by velocity
+            let c = 0xF5C842                                     // body
+            draw_circle(BIRD_X, bird_y, BIRD_R, c)
+            draw_circle(BIRD_X + 4.0, bird_y - 4.0, 3.0, 0xFFFFFF)  // eye white
+            draw_circle(BIRD_X + 5.0, bird_y - 4.0, 1.5, 0x000000)  // pupil
+            draw_rect(BIRD_X + BIRD_R - 2.0, bird_y - 2.0, 8.0, 4.0, 0xF76B3C)  // beak
+            // HUD
+            draw_text(2.0, 2.0, "SCORE " + to_string(score), 0xFFFFFF)
+            draw_text(2.0, 500.0, "SPACE/TAP FLAP R RESTART", 0xFFFFFF)
+
+            present()
+            sleep_ms(16)
+        }
+
+        // ---- game over screen ----
+        let frames = 0
+        while frames < 90 {
+            if key_down(114) || key_down(32) { frames = 90 }
+            draw_text(90.0, 220.0, "GAME OVER", 0xFFFFFF)
+            draw_text(80.0, 240.0, "SCORE " + to_string(score), 0xFFFFFF)
+            draw_text(66.0, 260.0, "PRESS R OR SPACE TO RETRY", 0xFFFFFF)
+            present()
+            frames = frames + 1
+            sleep_ms(16)
+        }
+    }
+}

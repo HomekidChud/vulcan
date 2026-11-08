@@ -130,7 +130,7 @@ cursor_visible(0)
 // per frame: drain keys, update state, draw at print_at(x, y, ...), sleep_ms(70)
 ```
 
-The IDE canvas adds a 256x144 framebuffer with live mouse/keyboard input, and `import render3d` gives you a complete software 3D renderer (see Graphics + physics reference below). Write your own games in pure Vulcan — that's what the stack is for.
+The IDE canvas is a live framebuffer with mouse/keyboard input, and `import render3d` gives you a complete software 3D renderer (see Graphics + physics reference below). Write your own games in pure Vulcan — that's what the stack is for.
 
 ## How it works
 
@@ -143,11 +143,12 @@ The IDE canvas adds a 256x144 framebuffer with live mouse/keyboard input, and `i
 
 ## Graphics + physics reference
 
-The canvas is a fixed 256x144 framebuffer (colors are `0xRRGGBB` integers). Drawing is identical on every backend — `present()` renders it to the IDE canvas, or to your terminal as truecolor ANSI half-blocks.
+The canvas defaults to 256x144 but is fully dynamic: call `canvas_resize(w, h)` to make it any size up to 4096x4096 — portrait, ultrawide, square, whatever the game wants (288x512 for a Flappy-Bird-style layout, 384x216 for 16:9 HD, ...). Colors are `0xRRGGBB` integers. Drawing is identical on every backend — `present()` renders it to the IDE canvas, or to your terminal as truecolor ANSI half-blocks.
 
 | builtin | description |
 |---|---|
-| `canvas_width()`, `canvas_height()` | 256 and 144 |
+| `canvas_width()`, `canvas_height()` | current logical size (default 256x144) |
+| `canvas_resize(w, h)` | set any canvas size, 1x1 to 4096x4096 (clamped); reallocates the framebuffer on all backends, IDE, web and mobile bundles |
 | `clear(color)` | fill the canvas |
 | `draw_rect(x, y, w, h, color)` | axis-aligned rectangle |
 | `draw_circle(x, y, r, color)` | filled circle |
@@ -197,6 +198,7 @@ The physics engine (`import physics`) follows the copy-in/copy-out discipline th
 - `examples/tour.vulcan` — a tour of every feature (runs identically on all backends)
 - `examples/impl_demo.vulcan` — struct methods (`impl`) across all three backends
 - `examples/obby.vulcan` — VULCAN OBBY, a Roblox-style obstacle course game (checkpoints, kill bricks, jump pad, moving platforms, R6 avatar)
+- `examples/flappy.vulcan` — VULCAN FLAPPY, a Flappy-Bird-style game at the original's true 288x512 portrait resolution (showcases `canvas_resize`)
 - `examples/frontier.vulcan` — VULCAN FRONTIER, an open-world western adventure (RDR/GTA-flavored): horse riding, three bandit camps with bosses, six-shooter, general store, day/night cycle; playable natively and as a web build
 - `examples/todo.vulcan` — a CLI todo app: subcommands, file persistence, struct lists with impl methods
 - `examples/ffi_demo.vulcan` — calling C libraries (`extern "c"` + `link`)

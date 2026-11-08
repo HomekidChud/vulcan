@@ -143,17 +143,38 @@ static int vulcan_stdin_eof = 0;
 static int64_t key_ready(void){ if(vulcan_stdin_eof) return 0; fd_set s; FD_ZERO(&s); FD_SET(STDIN_FILENO,&s); struct timeval tv={0,0}; return select(STDIN_FILENO+1,&s,NULL,NULL,&tv)>0; }
 static int64_t read_key(void){ unsigned char c=0; ssize_t r=read(STDIN_FILENO,&c,1); if(r==0){ vulcan_stdin_eof=1; return 0; } if(r==1){ vheld[c]=1; return (int64_t)c; } return 0; }
 static void clear_screen(void){ fputs("\033[2J\033[H",stdout); }
-// ---- graphics: 512x288 supersampled framebuffer (2x2 SSAA), resolved to 256x144 on present ----
-#define VFB_W 512
-#define VFB_H 288
+// ---- graphics: dynamic supersampled framebuffer (2x2 SSAA), any logical size ----
+// canvas_resize(w, h) reallocates the framebuffer at any time; the default is
+// 256x144 so every existing game behaves exactly as before.
 #define VAA 2
-#define VOUT_W 256
-#define VOUT_H 144
-static int32_t vfb[VFB_W * VFB_H];
-static double vzbuf[VFB_W * VFB_H];
-static void vclear(int64_t color){ for(int i=0;i<VFB_W*VFB_H;i++){ vfb[i]=(int32_t)color; vzbuf[i]=1e30; } }
+#define VCANVAS_MAX 4096
+static int VFB_W = 512, VFB_H = 288, VOUT_W = 256, VOUT_H = 144;
+static int32_t *vfb = NULL;
+static double *vzbuf = NULL;
+static int32_t *vdown = NULL;
+static void vfb_alloc(void){
+    if(vfb) return;
+    size_t n = (size_t)VFB_W * (size_t)VFB_H;
+    vfb = (int32_t*)malloc(n * sizeof(int32_t));
+    vzbuf = (double*)malloc(n * sizeof(double));
+    vdown = (int32_t*)malloc((size_t)VOUT_W * (size_t)VOUT_H * sizeof(int32_t));
+    for(size_t i=0;i<n;i++){ vfb[i]=0; vzbuf[i]=1e30; }
+}
+static void vcanvas_resize(int64_t w, int64_t h){
+    if(w<1) w=1; if(h<1) h=1;
+    if(w>VCANVAS_MAX) w=VCANVAS_MAX; if(h>VCANVAS_MAX) h=VCANVAS_MAX;
+    VOUT_W=(int)w; VOUT_H=(int)h;
+    VFB_W=VOUT_W*VAA; VFB_H=VOUT_H*VAA;
+    free(vfb); free(vzbuf); free(vdown);
+    vfb=NULL; vzbuf=NULL; vdown=NULL;
+    vfb_alloc();
+}
+static int64_t vcanvas_w(void){ return (int64_t)VOUT_W; }
+static int64_t vcanvas_h(void){ return (int64_t)VOUT_H; }
+static void vclear(int64_t color){ vfb_alloc(); for(int i=0;i<VFB_W*VFB_H;i++){ vfb[i]=(int32_t)color; vzbuf[i]=1e30; } }
 // depth-buffered triangle: z compared with < (near = smaller); winding-insensitive
 static void vdraw_tri(double x0,double y0,double z0,double x1,double y1,double z1,double x2,double y2,double z2,int64_t color){
+    vfb_alloc();
     x0*=VAA;y0*=VAA;x1*=VAA;y1*=VAA;x2*=VAA;y2*=VAA;
     double area=(x1-x0)*(y2-y0)-(x2-x0)*(y1-y0);
     if(area==0.0) return;
@@ -183,12 +204,14 @@ static void vdraw_tri(double x0,double y0,double z0,double x1,double y1,double z
 static const char* vfont_chars = " 0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ.:-!?/+%";
 static const char* vfont_data = "000007555726227717477171755711747177475771122757577571775755656567444765556746477464474557557557222711157556554444757755655557555775744755717565574717722225555755552557755525555722712470000202020007002220271302112440272051245";
 static void vdraw_rect(double x, double y, double w, double h, int64_t color){
+    vfb_alloc();
     x*=VAA;y*=VAA;w*=VAA;h*=VAA;
     int x0=(int)ceil(x-0.5), x1=(int)floor(x+w-0.5), y0=(int)ceil(y-0.5), y1=(int)floor(y+h-0.5);
     if(x0<0)x0=0; if(y0<0)y0=0; if(x1>VFB_W-1)x1=VFB_W-1; if(y1>VFB_H-1)y1=VFB_H-1;
     for(int py=y0;py<=y1;py++) for(int px=x0;px<=x1;px++) vfb[py*VFB_W+px]=(int32_t)color;
 }
 static void vdraw_circle(double x, double y, double r, int64_t color){
+    vfb_alloc();
     x*=VAA;y*=VAA;r*=VAA;
     if(r<0) return;
     int x0=(int)ceil(x-r-0.5), x1=(int)floor(x+r+0.5), y0=(int)ceil(y-r-0.5), y1=(int)floor(y+r+0.5);
@@ -200,6 +223,7 @@ static void vdraw_circle(double x, double y, double r, int64_t color){
     }
 }
 static void vdraw_line(double x0, double y0, double x1, double y1, int64_t color){
+    vfb_alloc();
     x0*=VAA;y0*=VAA;x1*=VAA;y1*=VAA;
     int px=(int)llround(x0), py=(int)llround(y0), ex=(int)llround(x1), ey=(int)llround(y1);
     int dx=abs(ex-px), dy=abs(ey-py);
@@ -214,6 +238,7 @@ static void vdraw_line(double x0, double y0, double x1, double y1, int64_t color
     }
 }
 static void vdraw_text(double x, double y, const char* s, int64_t color){
+    vfb_alloc();
     int bx=(int)llround(x)*VAA, by=(int)llround(y)*VAA;
     for(size_t i=0;s[i];i++){
         const char* p=strchr(vfont_chars, toupper((unsigned char)s[i]));
@@ -232,8 +257,9 @@ static void vdraw_text(double x, double y, const char* s, int64_t color){
     }
 }
 static void vpresent(void){
-    // supersampling resolve: average VAAxVAA blocks + subtle vignette -> 256x144
-    static int32_t down[VOUT_W * VOUT_H];
+    // supersampling resolve: average VAAxVAA blocks + subtle vignette
+    vfb_alloc();
+    int ss = VAA*VAA;
     for(int y=0;y<VOUT_H;y++){
         for(int x=0;x<VOUT_W;x++){
             int ur=0,ug=0,ub=0;
@@ -241,26 +267,35 @@ static void vpresent(void){
                 int32_t v=vfb[(y*VAA+sy)*VFB_W+x*VAA+sx];
                 ur+=(v>>16)&255; ug+=(v>>8)&255; ub+=v&255;
             }
-            double dx=(x-127.5)/127.5, dy=(y-71.5)/71.5;
-            double f=1.0-(dx*dx+dy*dy)*0.30;
+            double cx=(VOUT_W>1)?((double)x-(VOUT_W-1)/2.0)/((VOUT_W-1)/2.0):0.0;
+            double cy=(VOUT_H>1)?((double)y-(VOUT_H-1)/2.0)/((VOUT_H-1)/2.0):0.0;
+            double f=1.0-(cx*cx+cy*cy)*0.30;
             if(f<0.0)f=0.0; if(f>1.0)f=1.0;
-            int r=(int)(((ur+2)>>2)*f), g=(int)(((ug+2)>>2)*f), b=(int)(((ub+2)>>2)*f);
-            down[y*VOUT_W+x]=(r<<16)|(g<<8)|b;
+            int r=(int)(((ur+ss/2)/ss)*f), g=(int)(((ug+ss/2)/ss)*f), b=(int)(((ub+ss/2)/ss)*f);
+            vdown[y*VOUT_W+x]=(r<<16)|(g<<8)|b;
         }
     }
+    // terminal: downsample to 64x18 half-block cells, whatever the canvas size
     fputs("\033[H", stdout);
     for(int cy=0;cy<18;cy++){
         for(int cx=0;cx<64;cx++){
-            int ur=0,ug=0,ub=0,lr=0,lg=0,lb=0;
-            for(int sy=0;sy<4;sy++) for(int sx=0;sx<4;sx++){
-                int32_t v=down[(cy*8+sy)*VOUT_W+cx*4+sx];
-                ur+=(v>>16)&255; ug+=(v>>8)&255; ub+=v&255;
+            int x0=(int)((double)cx*VOUT_W/64), x1=(int)((double)(cx+1)*VOUT_W/64)-1;
+            if(x1<x0)x1=x0; if(x1>VOUT_W-1)x1=VOUT_W-1;
+            int y0=(int)((double)cy*VOUT_H/18), y1=(int)((double)(cy+1)*VOUT_H/18)-1;
+            if(y1<y0)y1=y0; if(y1>VOUT_H-1)y1=VOUT_H-1;
+            int yh=y0+(y1-y0+1)/2; if(yh>y1)yh=y1; // first row of the lower half
+            int ur=0,ug=0,ub=0,lr=0,lg=0,lb=0,nu=0,nl=0;
+            for(int sy=y0;sy<yh;sy++) for(int sx=x0;sx<=x1;sx++){
+                int32_t v=vdown[sy*VOUT_W+sx];
+                ur+=(v>>16)&255; ug+=(v>>8)&255; ub+=v&255; nu++;
             }
-            for(int sy=4;sy<8;sy++) for(int sx=0;sx<4;sx++){
-                int32_t v=down[(cy*8+sy)*VOUT_W+cx*4+sx];
-                lr+=(v>>16)&255; lg+=(v>>8)&255; lb+=v&255;
+            for(int sy=yh;sy<=y1;sy++) for(int sx=x0;sx<=x1;sx++){
+                int32_t v=vdown[sy*VOUT_W+sx];
+                lr+=(v>>16)&255; lg+=(v>>8)&255; lb+=v&255; nl++;
             }
-            printf("\033[38;2;%d;%d;%dm\033[48;2;%d;%d;%dm\342\226\200", (ur+8)>>4, (ug+8)>>4, (ub+8)>>4, (lr+8)>>4, (lg+8)>>4, (lb+8)>>4);
+            if(nu==0){ ur=lr; ug=lg; ub=lb; nu=nl?nl:1; }
+            if(nl==0){ lr=ur; lg=ug; lb=ub; nl=nu; }
+            printf("\033[38;2;%d;%d;%dm\033[48;2;%d;%d;%dm\342\226\200", (ur+nu/2)/nu, (ug+nu/2)/nu, (ub+nu/2)/nu, (lr+nl/2)/nl, (lg+nl/2)/nl, (lb+nl/2)/nl);
         }
         fputs("\033[0m\n", stdout);
     }
@@ -2197,8 +2232,14 @@ impl Codegen {
             }
             "screen_width" => ("vscreen_w()".into(), Ty::I64),
             "screen_height" => ("vscreen_h()".into(), Ty::I64),
-            "canvas_width" => ("256".into(), Ty::I64),
-            "canvas_height" => ("144".into(), Ty::I64),
+            "canvas_width" => ("vcanvas_w()".into(), Ty::I64),
+            "canvas_height" => ("vcanvas_h()".into(), Ty::I64),
+            "canvas_resize" => {
+                if args.len() != 2 { panic!("vulcan: canvas_resize(w, h) takes 2 args"); }
+                let (w, wt) = self.gen_expr(&args[0]); let w = self.cast(&w, &wt, &Ty::I64);
+                let (h, ht) = self.gen_expr(&args[1]); let h = self.cast(&h, &ht, &Ty::I64);
+                (format!("(vcanvas_resize({w}, {h}), (void)0)"), Ty::Void)
+            }
             "draw_tri" => {
                 if args.len() != 10 { panic!("vulcan: draw_tri(x0,y0,z0, x1,y1,z1, x2,y2,z2, color) takes 10 args"); }
                 let mut cs = Vec::new();

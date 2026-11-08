@@ -122,12 +122,15 @@ pub fn world_add_static_box(w: World, x: f64, y: f64, hw: f64, hh: f64, restitut
     return w
 }
 
-// Adds walls + floor + ceiling around the default 256x144 canvas.
+// Adds walls + floor + ceiling around the current canvas (any size set
+// with canvas_resize; the default 256x144 gives the classic layout).
 pub fn world_add_bounds(w: World, restitution: f64, friction: f64) -> World {
-    w = world_add_static_box(w, 128.0, 152.0, 140.0, 8.0, restitution, friction)  // floor
-    w = world_add_static_box(w, -6.0, 72.0, 8.0, 80.0, restitution, friction)     // left
-    w = world_add_static_box(w, 262.0, 72.0, 8.0, 80.0, restitution, friction)   // right
-    w = world_add_static_box(w, 128.0, -8.0, 140.0, 8.0, restitution, friction)  // ceiling
+    let cw = canvas_width() as f64
+    let ch = canvas_height() as f64
+    w = world_add_static_box(w, cw / 2.0, ch + 8.0, cw / 2.0 + 12.0, 8.0, restitution, friction)   // floor
+    w = world_add_static_box(w, -6.0, ch / 2.0, 8.0, ch / 2.0 + 8.0, restitution, friction)        // left
+    w = world_add_static_box(w, cw + 6.0, ch / 2.0, 8.0, ch / 2.0 + 8.0, restitution, friction)   // right
+    w = world_add_static_box(w, cw / 2.0, -8.0, cw / 2.0 + 12.0, 8.0, restitution, friction)      // ceiling
     return w
 }
 

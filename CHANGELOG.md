@@ -3,6 +3,29 @@
 Per-version history, newest first. The version number lives in Cargo.toml
 (single source of truth, exposed by `vulcan --version`).
 
+## 1.13.0 — canvas freedom: any resolution, any aspect ratio
+
+**The canvas is no longer hardcoded to 256x144.** New builtin
+`canvas_resize(w, h)` reallocates the framebuffer at any time, on every
+backend — anything from 1x1 to 4096x4096 (clamped), portrait or ultrawide.
+`canvas_width()` / `canvas_height()` now report the live size. The default
+stays 256x144, and rendering at that size is byte-for-byte identical to
+1.12 (verified with a byte-diff of `present()` output between builds).
+
+- **All three backends** (C, JS, Python): framebuffers are heap/dynamically
+  allocated; `present()` in the terminal downsamples whatever size you set
+  to the same 64x18 half-block grid, proportionally.
+- **IDE**: the canvas element resizes to the frame; mouse coordinates map
+  to the logical size; `canvas_resize` is syntax-highlighted.
+- **Web/mobile bundles**: `#vscreen` already resized per frame; touch
+  coordinates now scale to the logical size the game chose (frame messages
+  carry `lw`/`lh`).
+- **Libs**: `draw_sky_gradient` (engine), `project` (render3d) and
+  `world_add_bounds` (physics) use `canvas_width()/canvas_height()` instead
+  of hardcoded 256/144, so they follow any resize.
+- New selftest case `canvas_resize (all backends)` covers resize, draw at
+  the new size, and clamping; all 32 cases pass on all three backends.
+
 ## 1.12.0 — touch freedom, crisp 2x rendering, character rigs, LIBERTY CITY
 
 **Mobile controls are no longer hardcoded.** New builtins — `is_touch()`,

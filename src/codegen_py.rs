@@ -174,15 +174,37 @@ def _min(a, b): return a if a < b else b
 def _max(a, b): return a if a > b else b
 def _exit(c): sys.exit(c)
 import shutil
-# ---- graphics: 512x288 supersampled framebuffer (2x2 SSAA), resolved to 256x144 on present ----
+# ---- graphics: dynamic supersampled framebuffer (2x2 SSAA), any logical size ----
+# _canvas_resize(w, h) reallocates at any time; default 256x144.
+__VAA = 2
 __FB_W, __FB_H = 512, 288
-__VAA, __OUT_W, __OUT_H = 2, 256, 144
+__OUT_W, __OUT_H = 256, 144
 _fb = [0] * (__FB_W * __FB_H)
 _zbuf = [1e30] * (__FB_W * __FB_H)
+def _fb_alloc():
+    global _fb, _zbuf
+    if _fb and len(_fb) == __FB_W * __FB_H:
+        return
+    _fb = [0] * (__FB_W * __FB_H)
+    _zbuf = [1e30] * (__FB_W * __FB_H)
+def _canvas_resize(w, h):
+    global __FB_W, __FB_H, __OUT_W, __OUT_H, _fb, _zbuf
+    w = int(w); h = int(h)
+    if w < 1: w = 1
+    if h < 1: h = 1
+    if w > 4096: w = 4096
+    if h > 4096: h = 4096
+    __OUT_W, __OUT_H = w, h
+    __FB_W, __FB_H = __OUT_W * __VAA, __OUT_H * __VAA
+    _fb = [0] * (__FB_W * __FB_H)
+    _zbuf = [1e30] * (__FB_W * __FB_H)
+def _canvas_w(): return __OUT_W
+def _canvas_h(): return __OUT_H
 __FONT_CHARS = " 0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ.:-!?/+%"
 __FONT_DATA = "000007555726227717477171755711747177475771122757577571775755656567444765556746477464474557557557222711157556554444757755655557555775744755717565574717722225555755552557755525555722712470000202020007002220271302112440272051245"
 def _clear(c):
     c = int(c)
+    _fb_alloc()
     for i in range(__FB_W * __FB_H):
         _fb[i] = c
         _zbuf[i] = 1e30
@@ -269,8 +291,10 @@ def _draw_text(x, y, s, c):
                         for ox in range(2):
                             if 0 <= px + ox < __FB_W and 0 <= py + oy < __FB_H: _fb[(py + oy) * __FB_W + px + ox] = c
 def _downsample():
-    # supersampling resolve: average 2x2 blocks + subtle vignette -> 256x144
+    # supersampling resolve: average 2x2 blocks + subtle vignette
     out = [0] * (__OUT_W * __OUT_H)
+    cxn = (__OUT_W - 1) / 2 if __OUT_W > 1 else 1
+    cyn = (__OUT_H - 1) / 2 if __OUT_H > 1 else 1
     for y in range(__OUT_H):
         for x in range(__OUT_W):
             ur = ug = ub = 0
@@ -278,7 +302,7 @@ def _downsample():
                 for sx in range(__VAA):
                     v = _fb[(y * __VAA + sy) * __FB_W + x * __VAA + sx]
                     ur += (v >> 16) & 255; ug += (v >> 8) & 255; ub += v & 255
-            dx = (x - 127.5) / 127.5; dy = (y - 71.5) / 71.5
+            dx = (x - cxn) / cxn; dy = (y - cyn) / cyn
             f = 1.0 - (dx * dx + dy * dy) * 0.30
             if f < 0.0: f = 0.0
             if f > 1.0: f = 1.0
@@ -291,16 +315,27 @@ def _present():
     for cy in range(18):
         row = []
         for cx in range(64):
+            x0 = min(__OUT_W - 1, cx * __OUT_W // 64)
+            x1 = max(x0, min(__OUT_W - 1, (cx + 1) * __OUT_W // 64 - 1))
+            y0 = min(__OUT_H - 1, cy * __OUT_H // 18)
+            y1 = max(y0, min(__OUT_H - 1, (cy + 1) * __OUT_H // 18 - 1))
+            yh = y0 + (y1 - y0 + 1) // 2
+            if yh > y1: yh = y1
             ur = ug = ub = lr = lg = lb = 0
-            for sy in range(4):
-                for sx in range(4):
-                    v = down[(cy * 8 + sy) * __OUT_W + cx * 4 + sx]
-                    ur += (v >> 16) & 255; ug += (v >> 8) & 255; ub += v & 255
-            for sy in range(4, 8):
-                for sx in range(4):
-                    v = down[(cy * 8 + sy) * __OUT_W + cx * 4 + sx]
-                    lr += (v >> 16) & 255; lg += (v >> 8) & 255; lb += v & 255
-            row.append("\x1b[38;2;%d;%d;%dm\x1b[48;2;%d;%d;%dm\u2580" % ((ur + 8) >> 4, (ug + 8) >> 4, (ub + 8) >> 4, (lr + 8) >> 4, (lg + 8) >> 4, (lb + 8) >> 4))
+            nu = nl = 0
+            for sy in range(y0, yh):
+                for sx in range(x0, x1 + 1):
+                    v = down[sy * __OUT_W + sx]
+                    ur += (v >> 16) & 255; ug += (v >> 8) & 255; ub += v & 255; nu += 1
+            for sy in range(yh, y1 + 1):
+                for sx in range(x0, x1 + 1):
+                    v = down[sy * __OUT_W + sx]
+                    lr += (v >> 16) & 255; lg += (v >> 8) & 255; lb += v & 255; nl += 1
+            if nu == 0:
+                ur, ug, ub, nu = lr, lg, lb, (nl if nl else 1)
+            if nl == 0:
+                lr, lg, lb, nl = ur, ug, ub, nu
+            row.append("\x1b[38;2;%d;%d;%dm\x1b[48;2;%d;%d;%dm\u2580" % ((ur + nu // 2) // nu, (ug + nu // 2) // nu, (ub + nu // 2) // nu, (lr + nl // 2) // nl, (lg + nl // 2) // nl, (lb + nl // 2) // nl))
         out.append("".join(row) + "\x1b[0m\n")
     sys.stdout.write("".join(out))
 def _mouse_x(): return -1.0
@@ -1666,8 +1701,14 @@ impl PyGen {
                 (format!("(_set_color({fg}, {bg}), None)[1]"), Ty::Void)
             }
             "screen_width" => ("_screen_w()".into(), Ty::I64),
-            "canvas_width" => ("256".into(), Ty::I64),
-            "canvas_height" => ("144".into(), Ty::I64),
+            "canvas_width" => ("_canvas_w()".into(), Ty::I64),
+            "canvas_height" => ("_canvas_h()".into(), Ty::I64),
+            "canvas_resize" => {
+                if args.len() != 2 { panic!("vulcan: canvas_resize(w, h) takes 2 args"); }
+                let (w, wt) = self.gen_expr(&args[0]); let w = self.cast(&w, &wt, &Ty::I64);
+                let (h, ht) = self.gen_expr(&args[1]); let h = self.cast(&h, &ht, &Ty::I64);
+                (format!("(_canvas_resize({w}, {h}), None)"), Ty::Void)
+            }
             "draw_tri" => {
                 if args.len() != 10 { panic!("vulcan: draw_tri(x0,y0,z0, x1,y1,z1, x2,y2,z2, color) takes 10 args"); }
                 let mut cs = Vec::new();

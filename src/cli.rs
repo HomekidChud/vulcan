@@ -749,6 +749,26 @@ fn main() -> void {
         expected: "canvas: 256 x 144\ndrawn\n",
     },
     Case {
+        name: "canvas_resize (all backends)",
+        src: r#"
+fn main() -> void {
+    print("default:", canvas_width(), "x", canvas_height())
+    canvas_resize(320, 200)
+    print("after resize:", canvas_width(), "x", canvas_height())
+    clear(0x0000FF)
+    draw_rect(0.0, 0.0, 320.0, 200.0, 0x00FF00)
+    draw_circle(160.0, 100.0, 50.0, 0xFF0000)
+    draw_text(2.0, 2.0, "HI", 0xFFFFFF)
+    print("drawn at new size")
+    canvas_resize(64, 48)
+    print("small:", canvas_width(), "x", canvas_height())
+    canvas_resize(10000, -5)
+    print("clamped:", canvas_width(), "x", canvas_height())
+}
+"#,
+        expected: "default: 256 x 144\nafter resize: 320 x 200\ndrawn at new size\nsmall: 64 x 48\nclamped: 4096 x 1\n",
+    },
+    Case {
         name: "ffi extern (all backends)",
         src: r#"
 extern "c" {
