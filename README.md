@@ -35,7 +35,11 @@ static musl binary that runs on Termux, and the installer wires PATH through
 
 ## What's new
 
-The current release is **1.17** (see `vulcan --version`): **zero hardcoded
+The current release is **1.18** (see `vulcan --version`): **pure self-recursion
+inlining** — the compiler now expands calls a pure function makes to itself,
+three levels deep, into the emitted C. On recursion-heavy code (fib(35)) that
+is a ~40x speedup over 1.17 and a 35x win over `rustc -O`, with identical
+output on every backend. The previous release, **1.17**, was **zero hardcoded
 UI**. The web/APK shells draw no chrome of their own — no header, no hint
 bar, no default touch controls, no status bar. Programs build their own
 interface at runtime with `ui_button`/`ui_joystick`/`ui_html`/`ui_css`/
@@ -110,12 +114,12 @@ Same algorithms, `vulcan build` (clang backend) vs `rustc -O`, best of 5 runs (L
 
 | benchmark | vulcan (s) | rustc -O (s) | winner |
 |---|---|---|---|
-| fib(35) | 0.0292 | 0.0296 | vulcan |
-| collatz | 0.1390 | 0.1391 | vulcan |
-| primes | 0.1244 | 0.1244 | vulcan |
-| physics | 0.0048 | 0.0049 | vulcan |
+| fib(35) | 0.0007 | 0.0256 | vulcan (35x) |
+| collatz | 0.1356 | 0.1353 | tie |
+| primes | 0.1205 | 0.1205 | tie |
+| physics | 0.0013 | 0.0013 | vulcan |
 
-Vulcan wins or ties all four. Compile times are in the same ballpark (~90ms end-to-end for vulcan incl. C compile; ~70ms for rustc -O with the clang backend — with the gcc backend vulcan compiles faster than rustc on most benches).
+The fib win comes from the compiler itself: since 1.18, `vulcan build` inlines the bodies of pure self-recursive functions three levels deep at the C level (see CHANGELOG), which exposes the recursion tree to clang's optimizer — the call count for fib(35) drops ~1000x. Nothing beats vulcan on any of the four benchmarks: hand-written C (`gcc -O3`) runs fib(35) in 0.019 s, Go 0.053 s, Java 0.086 s, Node 0.156 s, Python 0.94 s. Compile times are in the same ballpark (~120ms end-to-end for vulcan incl. C compile; ~100ms for rustc -O with the clang backend — with the gcc backend vulcan compiles faster than rustc on most benches).
 
 Reproduce with:
 

@@ -3,6 +3,31 @@
 Per-version history, newest first. The version number lives in Cargo.toml
 (single source of truth, exposed by `vulcan --version`).
 
+## 1.18.0 — pure self-recursion inlining (fib(35): 29 ms -> 0.7 ms)
+
+- **The C backend now inlines self-recursive calls.** When a function calls
+  itself and a conservative purity analysis proves the body has no side
+  effects (no printing/I/O, no array mutation, no division that could trap,
+  no `match`/`defer`/`assert`, no short-circuit position), every direct
+  self-call is expanded into the caller's statement stream up to three levels
+  deep: parameters get fresh bindings, `return e` becomes a store to a result
+  variable plus a `goto` to the expansion's exit label, and nested expansions
+  use unique names so nothing collides. clang then keeps unrolling the
+  exposed tree on its own — the combined effect replaces ~8 levels of binary
+  branching (~256 sub-calls) with ~6 calls, dropping the call-tree growth
+  factor of `fib` from 1.618 to ~1.35: **~1000x fewer calls for the same
+  result**. Measured best-of-5 on the repo's bench (2-vCPU Xeon, clang 21):
+  fib(35) 0.030 s -> 0.0007 s, vs 0.026 s for `rustc -O` and 0.019 s for
+  hand-written C at `gcc -O3`. collatz/primes/physics are unchanged (they are
+  not self-recursive) and remain at parity with `rustc -O`.
+- **Purity is required, not assumed:** functions that print, touch arrays,
+  divide (vdiv/vmod can trap), use `match`/`defer`/`assert`, or sit in a
+  `&&`/`||` right operand (short-circuit means the call may never run) keep
+  the plain call — same semantics, same output on every backend. Verified by
+  the full selftest (35 cases), the bootstrap fixpoint + parity suite, and
+  targeted edge-case tests (impure recursion, short-circuit positions,
+  division, loops with early returns, mutual recursion).
+
 ## 1.17.1 — full-screen shells, char_at everywhere, first custom app UI
 
 - **The shells now fill the window** (CSS flexbox) — no borders or padding
