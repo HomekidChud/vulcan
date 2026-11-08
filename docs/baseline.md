@@ -1,7 +1,7 @@
 # Baseline (Phase 0)
 
-Recorded 2026-11-07, on the head of master (commit 757308d, "v1.10: VULCAN
-OBBY"). Machine: Linux sandbox (x86_64), gcc, Node 22, Python 3.13, Rust
+Recorded 2026-11-07, on the head of master at commit 757308d. Machine:
+Linux sandbox (x86_64), gcc, Node 22, Python 3.13, Rust
 stable. Numbers are indicative, not lab-grade; the point is to catch drift.
 
 ## Build and test

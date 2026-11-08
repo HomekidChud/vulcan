@@ -47,7 +47,7 @@ tests (lexer, parser, pkg) run in CI next to selftest on both gcc and clang.
   sleep blocked the worker event loop — ALL input was dead in web games);
   KEY_* constants unified to lowercase char codes across web/IDE/native;
   native key_down() implemented (was a stub returning false); touch buttons
-  release properly; hold-to-fire + arena bounds in the arena game.
+  release properly; hold-to-fire + arena bounds in the early arena demo.
 - Web bundles: single index.html with terminal + 256x144 AA canvas output,
   keyboard AND mouse input (drag-to-look), filesystem shim, and
   **mobile touch controls** (virtual joystick, drag-look, FIRE/JUMP
@@ -56,11 +56,10 @@ tests (lexer, parser, pkg) run in CI next to selftest on both gcc and clang.
 - **Held-key fix**: web workers now track key *down/up* state (the old
   `key_down()` only saw fresh presses, so movement felt dead in web
   builds). Keyboard and touch both go through the same path.
-- **First real game**: `examples/arena.vulcan` — VULCAN ARENA, a
-  complete wave-survival FPS (5 waves, hitscan rifle with recoilless
-  spread + muzzle flash, medkit pickups, minimap, compass, HUD,
-  game-over/victory screens). Built with zero engine-level changes —
-  proof the library API is enough to ship a game.
+- **First real game**: an early wave-survival FPS proved the library API
+  is enough to ship a game with zero engine-level changes. The demo
+  examples were later removed (v1.13.1): the first shipped game will be
+  a large, polished, AAA-style showcase instead.
 
 ## Compiler / language (highest impact first)
 
@@ -258,13 +257,12 @@ proprietary product) — it is vulcan's own engine, built in pure vulcan.
       `cam_spectator`); v0.4 adds `cam_third_person` (boom camera);
       v1.10 fixes its target offset (it built on the first-person
       helper's +1.6 eye offset, pushing the target off-screen).
-- [x] ~~First full game on the engine: VULCAN OBBY~~ — DONE in v1.10
-      (`examples/obby.vulcan`): Roblox-style obstacle course with the
-      R6 noob avatar (canonical BrickColors), Roblox physics numbers
-      (WalkSpeed 16 / JumpPower 50 / gravity 196.2), checkpoints,
-      kill bricks, moving platform, elevator, jump pad, beam walk,
-      finish + win screen, stage/deaths/time HUD. Every mechanic
-      verified end-to-end in a real browser.
+- [x] ~~First full game on the engine~~ — DONE in v1.10 (a Roblox-style
+      obstacle course with the R6 noob avatar, canonical BrickColors,
+      Roblox physics numbers (WalkSpeed 16 / JumpPower 50 / gravity
+      196.2), checkpoints, kill bricks, moving platforms, jump pads and
+      a full HUD; every mechanic verified end-to-end in a real browser).
+      The example was removed in v1.13.1 — demos don't ship; games do.
 - [x] ~~Weapon system~~ — DONE in v0.3 (`Weapon` struct: fire-rate gating,
       ammo magazine, reload timing; `weapon_tick` / `weapon_can_fire` /
       `weapon_fire` / `weapon_reload`).
@@ -293,9 +291,8 @@ proprietary product) — it is vulcan's own engine, built in pure vulcan.
       central index repo.
 - [x] ~~CI~~ — DONE in v1.6 (`.github/workflows/ci.yml`: build + selftest
       on every push/PR to master; watch the Actions tab for the first run).
-- [ ] **Playground examples for the IDE** — add engine demos (terrain
-      flyover, bot arena) to `src/ide.rs` examples list once the engine
-      renders something visual.
+- [ ] **Playground examples for the IDE** — non-game demos only (the
+      feature tour already ships); no game demos until the AAA showcase.
 
 ## The game (private repo: vulcan-royale)
 

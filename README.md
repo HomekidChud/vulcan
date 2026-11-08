@@ -166,8 +166,8 @@ The canvas defaults to 256x144 but is fully dynamic: call `canvas_resize(w, h)` 
 logical canvas coordinates, so a game can lay out any control scheme it
 wants (joysticks, wheels, gesture pads) and hit-test with `touch_x` /
 `touch_y`. Calling `touch_custom()` hides the default joystick + FIRE/JUMP
-overlay and gives the game the whole screen — `examples/liberty.vulcan`
-is the reference implementation. Right-side drag still steers the camera.
+overlay and gives the game the whole screen. Right-side drag still steers
+the camera.
 
 **3D meshes and character rigs** (`import engine`): `mesh_box(hx, hy, hz,
 color)` builds a box with independent half-extents; `mesh_draw_rot(m, cam,
@@ -175,8 +175,7 @@ pos, yaw, pitch)` rotates around Y then the yawed X axis (swinging limbs,
 tilted props). On top of those sits the humanoid rig: `rig_new(shirt,
 pants, skin, hair)` and `rig_draw(rig, cam, pos, yaw, phase, moving)` draw
 a ~1.8-unit character with a walk cycle (advance `phase` ~10 rad/s while
-walking) — legs and arms swing, the torso bobs. `examples/liberty.vulcan`
-uses it for the player and every pedestrian.
+walking) — legs and arms swing, the torso bobs.
 
 The physics engine (`import physics`) follows the copy-in/copy-out discipline that makes one source work on value-semantics (C) and reference-semantics (JS/Python) backends: always re-assign `w = world_step(w, dt)`.
 
@@ -197,12 +196,14 @@ The physics engine (`import physics`) follows the copy-in/copy-out discipline th
 - `examples/fib.vulcan` — classic recursion
 - `examples/tour.vulcan` — a tour of every feature (runs identically on all backends)
 - `examples/impl_demo.vulcan` — struct methods (`impl`) across all three backends
-- `examples/obby.vulcan` — VULCAN OBBY, a Roblox-style obstacle course game (checkpoints, kill bricks, jump pad, moving platforms, R6 avatar)
-- `examples/flappy.vulcan` — VULCAN FLAPPY, a Flappy-Bird-style game at the original's true 288x512 portrait resolution (showcases `canvas_resize`)
-- `examples/frontier.vulcan` — VULCAN FRONTIER, an open-world western adventure (RDR/GTA-flavored): horse riding, three bandit camps with bosses, six-shooter, general store, day/night cycle; playable natively and as a web build
 - `examples/todo.vulcan` — a CLI todo app: subcommands, file persistence, struct lists with impl methods
 - `examples/ffi_demo.vulcan` — calling C libraries (`extern "c"` + `link`)
 - `lib/engine.vulcan` — the Vulcan Engine (entities, terrain, player controller, HUD)
 - `lib/render3d.vulcan`, `lib/physics.vulcan` — 3D math and 2D rigid-body physics
 - `TODO.md` — the roadmap (compiler, engine, tooling, game)
 - `bench/` — vulcan-vs-rust benchmarks
+
+Game examples are intentionally absent: the language ships a full game
+stack (timing, input, canvas, 3D renderer, physics, rigs, touch), and the
+first showcase game will be held to that standard — a large, polished,
+AAA-style title — rather than filling `examples/` with small demos.

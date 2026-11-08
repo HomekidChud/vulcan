@@ -3,6 +3,16 @@
 Per-version history, newest first. The version number lives in Cargo.toml
 (single source of truth, exposed by `vulcan --version`).
 
+## 1.13.1 — examples cleaned: demos out, AAA bar in
+
+**All game examples removed** (`arena`, `frontier`, `liberty`, `obby`,
+`flappy`, `engine_demo`). Small demos undersold the stack, so `examples/`
+now ships only language/library showcases (`fib`, `tour`, `impl_demo`,
+`todo`, `ffi_demo`). The game stack itself is untouched and fully
+documented — timing, input, dynamic canvas, 3D renderer, physics, rigs,
+touch. The first shipped game will be a large, polished, AAA-style
+title written in Vulcan (see TODO.md), not a filler demo.
+
 ## 1.13.0 — canvas freedom: any resolution, any aspect ratio
 
 **The canvas is no longer hardcoded to 256x144.** New builtin
