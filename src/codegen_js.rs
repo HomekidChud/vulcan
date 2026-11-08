@@ -1828,6 +1828,13 @@ impl JsGen {
                         if at != Ty::Str { panic!("vulcan: find needs a string arg"); }
                         (format!("{recv_c}.indexOf({ac})"), Ty::I64)
                     }
+                    "char_at" => {
+                        if recv_ty != Ty::Str { panic!("vulcan: char_at is a string method"); }
+                        if args.len() != 1 { panic!("vulcan: char_at takes 1 arg (index)"); }
+                        let (ic, it) = self.gen_expr(&args[0]);
+                        if it != Ty::I64 { panic!("vulcan: char_at needs an i64 index"); }
+                        (format!("__chat({recv_c}, {ic})"), Ty::I64)
+                    }
                     "remove" => {
                         if !matches!(recv_ty, Ty::Array(_)) { panic!("vulcan: remove is an array method"); }
                         if args.len() != 1 { panic!("vulcan: remove takes 1 arg (index)"); }
@@ -2005,6 +2012,14 @@ impl JsGen {
                 let (c, t) = self.gen_expr(&args[0]);
                 if t != Ty::Str { panic!("vulcan: to_int needs a string"); }
                 (format!("__to_int({c})"), Ty::I64)
+            }
+            "char_at" => {
+                if args.len() != 2 { panic!("vulcan: char_at(s, i) takes 2 args"); }
+                let (c, t) = self.gen_expr(&args[0]);
+                if t != Ty::Str { panic!("vulcan: char_at needs a string"); }
+                let (i, it) = self.gen_expr(&args[1]);
+                let i = self.cast(&i, &it, &Ty::I64);
+                (format!("__chat({c}, {i})"), Ty::I64)
             }
             "to_float" => {
                 if args.len() != 1 { panic!("vulcan: to_float(s) takes 1 arg"); }

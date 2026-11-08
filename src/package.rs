@@ -1036,15 +1036,12 @@ const HTML_TEMPLATE: &str = r##"<!DOCTYPE html>
         background: #0c0d10; color: #d6d8de;
         font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
     }
-    main { flex: 1; display: flex; align-items: flex-start; justify-content: center; padding: 12px; }
-    #term {
-        background: #101116; border: 1px solid #23252c; border-radius: 8px;
-        padding: 12px 14px; width: min(720px, 100%); overflow: hidden;
-    }
-    #screen { margin: 0; font-size: 14px; line-height: 1.25; white-space: pre; }
+    main { flex: 1; display: flex; align-items: stretch; justify-content: center; min-height: 0; }
+    #term { flex: 1; padding: 10px 12px; overflow: hidden; }
+    #screen { margin: 0; font-size: 14px; line-height: 1.3; white-space: pre; }
     #vscreen {
-        display: none; background: #000; border: 1px solid #23252c; border-radius: 8px;
-        width: min(720px, 100%); image-rendering: pixelated; image-rendering: crisp-edges;
+        display: none; background: #000; width: 100%; height: 100%;
+        object-fit: contain; image-rendering: pixelated; image-rendering: crisp-edges;
         touch-action: none;
     }
     /* the program-built UI layer: ui_button()/ui_joystick()/ui_html() elements

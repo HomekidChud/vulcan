@@ -3,6 +3,21 @@
 Per-version history, newest first. The version number lives in Cargo.toml
 (single source of truth, exposed by `vulcan --version`).
 
+## 1.17.1 — full-screen shells, char_at everywhere, first custom app UI
+
+- **The shells now fill the window** (CSS flexbox) — no borders or padding
+  around the program's terminal/canvas, so the app is full-screen on every
+  platform, phone included.
+- **`char_at` on JavaScript and Python** — it existed only in the C backend
+  until now; the first program that actually used it (Discord's new nick
+  colorizer) exposed the gap. All three backends now support both
+  `char_at(s, i)` and `s.char_at(i)`.
+- **The first real program-authored UI** — the Discord example got its own
+  connect screen (banner, host:port prompt, retry loop) and colorized chat
+  (per-user nick colors, gray #channel, magenta DMs, red errors, Discord-dark
+  `ui_css` theme), plus a portrait `AndroidManifest.xml` override so the chat
+  app stands upright instead of the toolchain's landscape default.
+
 ## 1.17.0 — zero hardcoded UI: the program owns every pixel
 
 **The shells stop deciding what your app looks like.** The web/APK shell

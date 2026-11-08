@@ -215,6 +215,9 @@ def _substring(s, a, b):
 def _to_int(s):
     try: return int(s)
     except Exception: return 0
+def _char_at(s, i):
+    if i < 0 or i >= len(s): return -1
+    return ord(s[i])
 def _to_float(s):
     try: return float(s)
     except Exception: return 0.0
@@ -1749,6 +1752,13 @@ impl PyGen {
                         if at != Ty::Str { panic!("vulcan: find needs a string arg"); }
                         (format!("{recv_c}.find({ac})"), Ty::I64)
                     }
+                    "char_at" => {
+                        if recv_ty != Ty::Str { panic!("vulcan: char_at is a string method"); }
+                        if args.len() != 1 { panic!("vulcan: char_at takes 1 arg (index)"); }
+                        let (ic, it) = self.gen_expr(&args[0]);
+                        if it != Ty::I64 { panic!("vulcan: char_at needs an i64 index"); }
+                        (format!("_char_at({recv_c}, {ic})"), Ty::I64)
+                    }
                     "remove" => {
                         if !matches!(recv_ty, Ty::Array(_)) { panic!("vulcan: remove is an array method"); }
                         if args.len() != 1 { panic!("vulcan: remove takes 1 arg (index)"); }
@@ -1902,6 +1912,14 @@ impl PyGen {
                 let (c, t) = self.gen_expr(&args[0]);
                 if t != Ty::Str { panic!("vulcan: to_int needs a string"); }
                 (format!("_to_int({c})"), Ty::I64)
+            }
+            "char_at" => {
+                if args.len() != 2 { panic!("vulcan: char_at(s, i) takes 2 args"); }
+                let (c, t) = self.gen_expr(&args[0]);
+                if t != Ty::Str { panic!("vulcan: char_at needs a string"); }
+                let (i, it) = self.gen_expr(&args[1]);
+                let i = self.cast(&i, &it, &Ty::I64);
+                (format!("_char_at({c}, {i})"), Ty::I64)
             }
             "to_float" => {
                 if args.len() != 1 { panic!("vulcan: to_float(s) takes 1 arg"); }

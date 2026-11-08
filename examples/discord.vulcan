@@ -246,49 +246,132 @@ fn run_server() -> void {
 
 // ---------- client ----------
 
+// ---- the app's own look: the shell draws nothing, the app styles itself ----
+// ui_* calls are no-ops where there is no shell (native terminal); the ANSI
+// colors work on every backend.
+fn ui_setup() -> void {
+    ui_title("Discord — Vulcan")
+    // Discord dark theme for the web/APK shell
+    ui_css("body{background:#313338;color:#dbdee1}#screen{font-size:15px}")
+}
+
+fn nick_color(nick: string) -> i64 {
+    // a stable color per nickname, like a real chat client
+    if nick.len() == 0 { return 12 }
+    let palette = [2, 3, 4, 5, 6, 10, 11, 12, 13, 14]
+    let h = 0
+    for i in 0 ..= nick.len() - 1 {
+        h = (h * 31 + char_at(nick, i)) % 997
+    }
+    return palette[h % 10]
+}
+
+fn prompt_marker() -> void {
+    set_color(63, -1)
+    put("> ")
+    set_color(-1, -1)
+}
+
 fn handle_server_line(line: string) -> void {
     if line.starts_with("MSG|") {
         let rest = line.substring(4, line.len())
         let p1 = rest.find("|")
         if p1 < 0 { return }
-        let p2 = rest.find("|")
         // parse chan|nick|text manually: first | then next |
         let chan = rest.substring(0, p1)
         let after = rest.substring(p1 + 1, rest.len())
         let p3 = after.find("|")
         if p3 < 0 { return }
-        print("[" + chan + "] " + after.substring(0, p3) + ": " + after.substring(p3 + 1, after.len()))
+        let nick = after.substring(0, p3)
+        set_color(8, -1)
+        put("[" + chan + "] ")
+        set_color(nick_color(nick), -1)
+        put(nick)
+        set_color(-1, -1)
+        put(": " + after.substring(p3 + 1, after.len()) + "\n")
         return
     }
     if line.starts_with("DM|") {
         let rest = line.substring(3, line.len())
         let p = rest.find("|")
         if p < 0 { return }
-        print("[dm " + rest.substring(0, p) + "] " + rest.substring(p + 1, rest.len()))
+        let who = rest.substring(0, p)
+        set_color(13, -1)
+        put("[dm] ")
+        set_color(nick_color(who), -1)
+        put(who)
+        set_color(-1, -1)
+        put(": " + rest.substring(p + 1, rest.len()) + "\n")
         return
     }
     if line.starts_with("SYS|") {
-        print("* " + line.substring(4, line.len()))
+        set_color(8, -1)
+        put("* " + line.substring(4, line.len()) + "\n")
+        set_color(-1, -1)
         return
     }
     if line.starts_with("ERR|") {
-        print("! " + line.substring(4, line.len()))
+        set_color(9, -1)
+        put("! " + line.substring(4, line.len()) + "\n")
+        set_color(-1, -1)
         return
     }
 }
 
-fn run_client() -> void {
-    let host = "127.0.0.1"
-    if arg_count() >= 2 { host = arg(1) } else {
-        print("server address [127.0.0.1]: ")
-        let h = input()
-        if h != "" { host = h }
-    }
+// the app's own connect screen: colored banner, address entry with optional
+// :port, and a retry loop so a phone user never hits a dead end
+fn connect_screen() -> i64 {
     let port = 7777
+    while true {
+        clear_screen()
+        set_color(63, -1)
+        put("┌─────────────────────────────┐\n")
+        put("│      VULCAN  DISCORD        │\n")
+        put("└─────────────────────────────┘\n")
+        set_color(-1, -1)
+        set_color(8, -1)
+        put("chat over TCP — run `discord server` anywhere and connect\n\n")
+        set_color(-1, -1)
+        set_color(63, -1)
+        put("server address")
+        set_color(-1, -1)
+        put(" [127.0.0.1]: ")
+        let a = input()
+        if a == "" { a = "127.0.0.1" }
+        let h = a
+        if a.find(":") >= 0 {
+            h = a.substring(0, a.find(":"))
+            port = to_int(a.substring(a.find(":") + 1, a.len()))
+        }
+        set_color(8, -1)
+        put("\nconnecting to " + h + ":" + f"{port}" + " …\n")
+        set_color(-1, -1)
+        let conn = net_connect(h, port)
+        if conn >= 0 {
+            set_color(10, -1)
+            put("connected — ctrl-c quits\n\n")
+            set_color(-1, -1)
+            return conn
+        }
+        set_color(9, -1)
+        put("✗ cannot reach " + h + ":" + f"{port}" + " — is the server running there?\n\n")
+        set_color(-1, -1)
+    }
+}
+
+fn run_client() -> void {
+    ui_setup()
+    let host = ""
+    let port = 7777
+    if arg_count() >= 2 { host = arg(1) }
     if arg_count() >= 3 { port = to_int(arg(2)) }
-    let conn = net_connect(host, port)
-    if conn < 0 { print("client: cannot connect to " + host + ":" + f"{port}"); exit(1) }
-    print("client: connected to " + host + ":" + f"{port}")
+    let conn = -1
+    if host != "" {
+        conn = net_connect(host, port)
+        if conn < 0 { print("client: cannot connect to " + host + ":" + f"{port}"); exit(1) }
+    } else {
+        conn = connect_screen()
+    }
     if arg_count() >= 4 {
         send_line(conn, "/nick " + arg(3))
     }
@@ -296,7 +379,7 @@ fn run_client() -> void {
     defer { term_normal() }
     let buf = ""
     let inbox = ""
-    put("> ")
+    prompt_marker()
     while true {
         if net_ready(conn) {
             inbox = inbox + net_recv(conn)
@@ -307,7 +390,7 @@ fn run_client() -> void {
                 inbox = inbox.substring(nl + 1, inbox.len())
                 handle_server_line(line)
             }
-            put("> ")
+            prompt_marker()
         }
         if key_ready() != 0 {
             let k = read_key()
@@ -315,7 +398,7 @@ fn run_client() -> void {
                 print("")
                 if buf != "" { send_line(conn, buf) }
                 buf = ""
-                put("> ")
+                prompt_marker()
             } elif k == 127 || k == 8 {
                 if buf.len() > 0 {
                     buf = buf.substring(0, buf.len() - 1)

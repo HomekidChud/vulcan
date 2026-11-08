@@ -15,8 +15,8 @@ if [ ! -x "$VULCAN" ]; then echo "vulcan binary not found: $VULCAN (build with: 
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 fails=0
-check() { # check <name> <file> <pattern>
-    if grep -q "$3" "$2"; then echo "[ok] $1"; else echo "[FAIL] $1 (missing '$3' in $2)"; fails=$((fails+1)); fi
+check() { # check <name> <file> <pattern> — ANSI colors stripped first
+    if sed 's/\x1b\[[0-9;?]*[A-Za-z]//g' "$2" | grep -q "$3"; then echo "[ok] $1"; else echo "[FAIL] $1 (missing '$3' in $2)"; fails=$((fails+1)); fi
 }
 
 # tiny helper: run a discord client with stdin from a fifo
@@ -110,10 +110,10 @@ for TARGET in c js py; do
 
     # and rendered correctly in both clients
     check "alice sees bob (client)"        "$TMP/alice.out" "\[#general\] bob: hi alice"
-    check "alice sees dm (client)"          "$TMP/alice.out" "\[dm bob\] nice chat"
+    check "alice sees dm (client)"          "$TMP/alice.out" "\[dm\] bob: nice chat"
     check "alice joined #random (client)"  "$TMP/alice.out" "joined #random"
     check "bob sees alice (client)"         "$TMP/bob.out" "\[#general\] alice: hello everyone"
-    check "bob sees dm (client)"            "$TMP/bob.out" "\[dm alice\] psst bob dm me"
+    check "bob sees dm (client)"            "$TMP/bob.out" "\[dm\] alice: psst bob dm me"
     check "bob sees part notice (client)"   "$TMP/bob.out" "alice left #general"
     check "bob history replay (client)"    "$TMP/bob.out" "\[#general\] alice: hello everyone"
     check "bob history footer (client)"   "$TMP/bob.out" "end of history"
