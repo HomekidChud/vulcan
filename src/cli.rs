@@ -992,6 +992,34 @@ fn main() -> void {
 "#,
         expected: "clamp: 3 0 2\nlerp: 2.5 15\nsign: -1 0 1 -1 0 1\n",
     },
+    Case {
+        name: "closures / iterator methods (all backends)",
+        src: r#"
+fn main() -> void {
+    let xs: [i64] = [1, 2, 3, 4, 5, 6]
+    let doubled = xs.map(|x| x * 2)
+    let evens = xs.filter(|x| x % 2 == 0)
+    let sum = xs.reduce(0, |acc, x| acc + x)
+    let has_big = xs.any(|x| x > 5)
+    let all_pos = xs.all(|x| x > 0)
+    let collected: [i64] = []
+    xs.for_each(|x| collected.push(x))
+    print("map:", doubled.map(|x| f"{x}").join(" "))
+    print("filter:", evens.map(|x| f"{x}").join(" "))
+    print("reduce:", sum)
+    print("any:", has_big, "all:", all_pos)
+    print("for_each:", collected.map(|x| f"{x}").join(" "))
+    let words: [string] = ["ada", "grace", "linus"]
+    let caps = words.map(|w| w.upper())
+    print("strings:", caps.join(","))
+    let strs = xs.map(|x| f"<{x}>")
+    print("fmt:", strs.join(""))
+    let chained = xs.map(|x| x + 1).filter(|x| x % 3 == 0)
+    print("chained:", chained.map(|x| f"{x}").join(" "))
+}
+"#,
+        expected: "map: 2 4 6 8 10 12\nfilter: 2 4 6\nreduce: 21\nany: true all: true\nfor_each: 1 2 3 4 5 6\nstrings: ADA,GRACE,LINUS\nfmt: <1><2><3><4><5><6>\nchained: 3 6\n",
+    },
 ];
 
 // ---- `vulcan doc` — print the public API of a file (or every lib/*.vulcan) ----

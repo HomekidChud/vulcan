@@ -1282,6 +1282,62 @@ impl JsGen {
 
     fn gen_expr(&mut self, e: &Expr) -> (String, Ty) { self.gen_expr_hint(e, None) }
 
+    // Iterator methods (map/filter/reduce/any/all/for_each) — the closure is
+    // emitted as a native JS arrow function, so captures just work.
+    fn gen_iter_method(&mut self, name: &str, recv_c: &str, recv_ty: &Ty, args: &[Expr]) -> (String, Ty) {
+        let elem = match self.norm(recv_ty) {
+            Ty::Array(e) => *e,
+            other => panic!("vulcan: .{name}() is an array iterator method (got {other:?})"),
+        };
+        let (extra, closure_arg) = if name == "reduce" {
+            if args.len() != 2 { panic!("vulcan: reduce takes (init, |acc, x| …)"); }
+            (Some(args[0].clone()), args[1].clone())
+        } else {
+            if args.len() != 1 { panic!("vulcan: {name} takes 1 closure arg"); }
+            (None, args[0].clone())
+        };
+        let (params, body) = match &closure_arg {
+            Expr::Closure { params, body } => (params.clone(), (**body).clone()),
+            _ => panic!("vulcan: .{name}() needs a closure argument, e.g. .{name}(|x| …)"),
+        };
+        if name == "reduce" {
+            if params.len() != 2 { panic!("vulcan: reduce closure takes 2 parameters (acc, x)"); }
+        } else if params.len() != 1 {
+            panic!("vulcan: {name} closure takes 1 parameter");
+        }
+        // register the parameters in a scope so the body resolves them
+        self.locals.push(HashMap::new());
+        for p in &params {
+            if let Some(m) = self.locals.last_mut() { m.insert(p.clone(), (elem.clone(), p.clone())); }
+        }
+        let (body_c, body_ty) = self.gen_expr(&body);
+        self.locals.pop();
+        match name {
+            "map" => {
+                let res_ty = Ty::Array(Box::new(body_ty.clone()));
+                (format!("({recv_c}.map(({}) => ({body_c})))", params[0]), res_ty)
+            }
+            "filter" => {
+                if body_ty != Ty::Bool { panic!("vulcan: filter closure must return bool"); }
+                (format!("({recv_c}.filter(({}) => ({body_c})))", params[0]), self.norm(recv_ty).clone())
+            }
+            "reduce" => {
+                let (init_c, init_ty) = self.gen_expr(&extra.unwrap());
+                if body_ty != init_ty { panic!("vulcan: reduce closure must return the same type as the initial value"); }
+                (format!("({recv_c}.reduce(({}, {}) => ({body_c}), {init_c}))", params[0], params[1]), init_ty)
+            }
+            "any" | "all" => {
+                if body_ty != Ty::Bool { panic!("vulcan: {name} closure must return bool"); }
+                let f = if name == "any" { "some" } else { "every" };
+                (format!("({recv_c}.{f}(({}) => ({body_c})))", params[0]), Ty::Bool)
+            }
+            "for_each" => {
+                (format!("({recv_c}.forEach(({}) => {{ {body_c}; }}))", params[0]), Ty::Void)
+            }
+            _ => panic!("vulcan: unknown iterator method {name}"),
+        }
+    }
+
     // `hint` carries the expected type from the statement context (let
     // annotation / function return type) so bare constructions like
     // `Option.None` can pick the right instantiation
@@ -1292,6 +1348,9 @@ impl JsGen {
             Expr::Str(s) => (format!("\"{}\"", escape_js(s)), Ty::Str),
             Expr::Bool(b) => (if *b { "true".into() } else { "false".into() }, Ty::Bool),
             Expr::Char(c) => (c.to_string(), Ty::I64),
+            Expr::Closure { params, .. } => {
+                panic!("vulcan: closures are only supported as iterator arguments (map/filter/reduce/any/all/for_each), got |{}| …", params.join(", "))
+            }
             Expr::Ident(name) => {
                 if let Some((t, cvar)) = self.lookup(name) {
                     return (cvar, t);
@@ -1438,6 +1497,9 @@ impl JsGen {
                     }
                 }
                 match name.as_str() {
+                    "map" | "filter" | "reduce" | "any" | "all" | "for_each" => {
+                        return self.gen_iter_method(name, &recv_c, &recv_ty, args);
+                    }
                     "len" => match self.norm(&recv_ty) {
                         Ty::Array(_) => (format!("({recv_c}.length)"), Ty::I64),
                         Ty::Str => (format!("({recv_c}.length)"), Ty::I64),
@@ -1712,11 +1774,14 @@ impl JsGen {
                     if i > 0 { parts.push("\" \"".to_string()); }
                     parts.push(self.fmt_val(&c, &t));
                 }
-                self.line(&format!("__out({});", parts.join(" + ")));
+                // comma-expression so print composes inside closures/args
+                // (evaluation order is preserved: the side effect runs at the
+                // expression's position)
+                let mut code = format!("(__out({}), undefined)", parts.join(" + "));
                 if callee == "print" {
-                    self.line("__out(\"\\n\");");
+                    code = format!("(__out({}), __out(\"\\n\"), undefined)", parts.join(" + "));
                 }
-                ("undefined".into(), Ty::Void)
+                (code, Ty::Void)
             }
             "clock" => ("__clock()".into(), Ty::F64),
             "rand" => ("__rand()".into(), Ty::I64),

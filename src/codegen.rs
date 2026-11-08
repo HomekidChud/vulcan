@@ -1616,6 +1616,139 @@ impl Codegen {
         }
     }
 
+    // Iterator methods (map/filter/reduce/any/all/for_each) — the closure is
+    // inlined as a loop over the array, so captured locals just work.
+    // Emits statements into the current function and returns a temp name.
+    fn gen_iter_method(&mut self, name: &str, recv_c: String, recv_ty: &Ty, args: &[crate::parser::Expr]) -> (String, Ty) {
+        let elem = match recv_ty {
+            Ty::Array(e) => (**e).clone(),
+            _ => panic!("vulcan: .{name}() is an array iterator method"),
+        };
+        // first arg must be the closure (reduce: init, then closure)
+        let (extra, closure_arg) = if name == "reduce" {
+            if args.len() != 2 { panic!("vulcan: reduce takes (init, |acc, x| …)"); }
+            (Some(args[0].clone()), args[1].clone())
+        } else {
+            if args.len() != 1 { panic!("vulcan: {name} takes 1 closure arg"); }
+            (None, args[0].clone())
+        };
+        let (params, body) = match &closure_arg {
+            crate::parser::Expr::Closure { params, body } => (params.clone(), (**body).clone()),
+            _ => panic!("vulcan: .{name}() needs a closure argument, e.g. .{name}(|x| …)"),
+        };
+        // materialize the receiver so chained iterators work
+        let src = self.fresh("it");
+        self.line(&format!("{} {src} = {recv_c};", self.ctype(&recv_ty)));
+        let idx = self.fresh("i");
+        let pv = self.fresh("p");
+        // open the loop; caller must emit the body, then call iter_loop_end
+        macro_rules! loop_begin {
+            () => {{
+                self.line(&format!("for (size_t {idx} = 0; {idx} < {src}.len; {idx}++) {{"));
+                self.indent += 1;
+                self.line(&format!("{} {pv} = {src}.data[{idx}];", self.ctype(&elem)));
+                self.locals.push(HashMap::new());
+            }};
+        }
+        match name {
+            "map" => {
+                if params.len() != 1 { panic!("vulcan: map closure takes 1 parameter"); }
+                // probe the body type once (discard the emitted probe lines)
+                self.locals.push(HashMap::new());
+                if let Some(m) = self.locals.last_mut() { m.insert(params[0].clone(), (elem.clone(), pv.clone())); }
+                let mark = self.body.len();
+                let (_, body_ty) = self.gen_expr(&body);
+                self.body.truncate(mark);
+                self.locals.pop();
+                let res_ty = Ty::Array(Box::new(body_ty.clone()));
+                self.note_struct_array(&body_ty);
+                let new = self.vec_helper(&res_ty, "new");
+                let push = self.vec_helper(&res_ty, "push");
+                let res = self.fresh("m");
+                self.line(&format!("{} {res} = {new}(0);", self.ctype(&res_ty)));
+                loop_begin!();
+                if let Some(m) = self.locals.last_mut() { m.insert(params[0].clone(), (elem.clone(), pv.clone())); }
+                let (c, _) = self.gen_expr(&body);
+                self.line(&format!("{push}(&{res}, {c});"));
+                self.locals.pop();
+                self.indent -= 1;
+                self.line("}");
+                (res, res_ty)
+            }
+            "filter" => {
+                if params.len() != 1 { panic!("vulcan: filter closure takes 1 parameter"); }
+                let res_ty = Ty::Array(Box::new(elem.clone()));
+                let new = self.vec_helper(&res_ty, "new");
+                let push = self.vec_helper(&res_ty, "push");
+                let res = self.fresh("f");
+                self.line(&format!("{} {res} = {new}(0);", self.ctype(&res_ty)));
+                loop_begin!();
+                if let Some(m) = self.locals.last_mut() { m.insert(params[0].clone(), (elem.clone(), pv.clone())); }
+                let (c, t) = self.gen_expr(&body);
+                if t != Ty::Bool { panic!("vulcan: filter closure must return bool"); }
+                self.line(&format!("if ({c}) {{ {push}(&{res}, {pv}); }}"));
+                self.locals.pop();
+                self.indent -= 1;
+                self.line("}");
+                (res, res_ty)
+            }
+            "reduce" => {
+                if params.len() != 2 { panic!("vulcan: reduce closure takes 2 parameters (acc, x)"); }
+                let (init_c, init_ty) = self.gen_expr(&extra.unwrap());
+                let acc = self.fresh("acc");
+                self.line(&format!("{} {acc} = {init_c};", self.ctype(&init_ty)));
+                loop_begin!();
+                // acc -> accumulator temp, x -> element
+                if let Some(m) = self.locals.last_mut() {
+                    m.insert(params[0].clone(), (init_ty.clone(), acc.clone()));
+                    m.insert(params[1].clone(), (elem.clone(), pv.clone()));
+                }
+                let (c, t) = self.gen_expr(&body);
+                if t != init_ty { panic!("vulcan: reduce closure must return the same type as the initial value"); }
+                self.line(&format!("{acc} = {c};"));
+                self.locals.pop();
+                self.indent -= 1;
+                self.line("}");
+                (acc, init_ty)
+            }
+            "any" | "all" => {
+                if params.len() != 1 { panic!("vulcan: {name} closure takes 1 parameter"); }
+                let flag = self.fresh("flag");
+                let init = if name == "any" { 0 } else { 1 };
+                self.line(&format!("int {flag} = {init};"));
+                loop_begin!();
+                if let Some(m) = self.locals.last_mut() { m.insert(params[0].clone(), (elem.clone(), pv.clone())); }
+                let (c, t) = self.gen_expr(&body);
+                if t != Ty::Bool { panic!("vulcan: {name} closure must return bool"); }
+                if name == "any" {
+                    self.line(&format!("if ({c}) {{ {flag} = 1; break; }}"));
+                } else {
+                    self.line(&format!("if (!({c})) {{ {flag} = 0; break; }}"));
+                }
+                self.locals.pop();
+                self.indent -= 1;
+                self.line("}");
+                (flag.to_string(), Ty::Bool)
+            }
+            "for_each" => {
+                if params.len() != 1 { panic!("vulcan: for_each closure takes 1 parameter"); }
+                loop_begin!();
+                if let Some(m) = self.locals.last_mut() { m.insert(params[0].clone(), (elem.clone(), pv.clone())); }
+                // emit the body like an expression statement (push returns a
+                // call expression; print self-emits and returns a placeholder)
+                let (c, _) = self.gen_expr(&body);
+                if !c.is_empty() && c != "(void)0" {
+                    self.line(&format!("{c};"));
+                }
+                self.locals.pop();
+                self.indent -= 1;
+                self.line("}");
+                ("0".to_string(), Ty::Void)
+            }
+            _ => panic!("vulcan: unknown iterator method {name}"),
+        }
+    }
+
     fn note_struct_array(&mut self, elem: &Ty) {
         // unwrap nested arrays: [[Point]] still needs Vec_Point emitted
         let mut e = elem;
@@ -1831,6 +1964,9 @@ impl Codegen {
                 let ty = if *mutable { Ty::RefMut(Box::new(t)) } else { Ty::Ref(Box::new(t)) };
                 (format!("&({c})"), ty)
             }
+            Expr::Closure { params, body } => {
+                panic!("vulcan: closures are only supported as iterator arguments (map/filter/reduce/any/all/for_each), got |{}| …", params.join(", "))
+            }
             Expr::Try(inner) => {
                 // `expr?` — propagate None/Err, yield the payload
                 let (c, t) = self.gen_expr(inner);
@@ -1930,6 +2066,9 @@ impl Codegen {
                     }
                 }
                 match name.as_str() {
+                    "map" | "filter" | "reduce" | "any" | "all" | "for_each" => {
+                        return self.gen_iter_method(name, recv_c, &recv_ty, args);
+                    }
                     "len" => match recv_ty {
                         Ty::Array(_) => (format!("({recv_c}.len)"), Ty::I64),
                         Ty::Str => (format!("((int64_t)strlen({recv_c}))"), Ty::I64),

@@ -225,6 +225,9 @@ fn walk_expr(e: &Expr, out: &mut Vec<Ty>) {
         Expr::As(inner, t) => { walk_expr(inner, out); push_ty(out, t); }
         Expr::Try(inner) => walk_expr(inner, out),
         Expr::Addr { inner, .. } => walk_expr(inner, out),
+        // closures are inlined by the iterator methods; they are walked for
+        // diagnostics but never evaluated standalone
+        Expr::Closure { body, .. } => walk_expr(body, out),
         Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bool(_) | Expr::Char(_) | Expr::Ident(_) => {}
     }
 }

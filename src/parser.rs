@@ -157,6 +157,9 @@ pub enum Expr {
     As(Box<Expr>, Ty),           // x as f64
     Try(Box<Expr>),              // expr? — early-return None/Err, bind the payload
     Addr { inner: Box<Expr>, mutable: bool }, // &expr / &mut expr (call arguments)
+    // closure literal |params| expr — inlined by the iterator methods
+    // (map/filter/reduce/any/all/for_each); captures enclosing locals
+    Closure { params: Vec<String>, body: Box<Expr> },
 }
 
 pub struct Parser {
@@ -752,6 +755,23 @@ impl Parser {
                 let e = self.parse_expr();
                 self.expect(Tok::RParen, ")");
                 e
+            }
+            Tok::Pipe => {
+                // closure literal: |a, b| expr — inlined by the iterator
+                // methods; the body is a full expression (may capture locals)
+                let mut params = Vec::new();
+                if !self.eat(&Tok::Pipe) {
+                    loop {
+                        match self.next() {
+                            Tok::Ident(n) => params.push(n),
+                            t => panic!("vulcan: closure parameter must be an identifier, got {t:?}"),
+                        }
+                        if !self.eat(&Tok::Comma) { break; }
+                    }
+                    self.expect(Tok::Pipe, "| after closure parameters");
+                }
+                let body = self.parse_expr();
+                Expr::Closure { params, body: Box::new(body) }
             }
             Tok::Amp => {
                 // &expr / &mut expr — a reference argument (postfix allowed:
