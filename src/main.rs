@@ -227,7 +227,7 @@ fn main() {
         _ => Vec::new(),
     };
 
-    let program = modules::load_program(&entry);
+    let program = load_program_or_diag(&entry);
 
     if target != "c" {
         if cmd == "test" {
@@ -243,13 +243,21 @@ fn main() {
             "py" => (codegen_py::generate_py(&program), "py", "python3"),
             _ => unreachable!(),
         };
-        let out_path = match proj_root {
-            Some(root) => {
+        let out_path = match (&proj_root, &pkg_name) {
+            (Some(root), Some(name)) => {
                 let build = root.join("build");
                 let _ = std::fs::create_dir_all(&build);
-                build.join(format!("{}.{}", stem_name(&entry), ext)).to_string_lossy().into_owned()
+                build.join(format!("{name}.{ext}")).to_string_lossy().into_owned()
             }
-            None => format!("{}.{}", entry.to_string_lossy().trim_end_matches(".vulcan"), ext),
+            // no manifest: write next to the source file, creating parent dirs
+            // (e.g. `vulcan run src/game.vulcan --target js` outside a project)
+            _ => {
+                let p = format!("{}.{}", entry.to_string_lossy().trim_end_matches(".vulcan"), ext);
+                if let Some(parent) = std::path::Path::new(&p).parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                p
+            }
         };
         match cmd.as_str() {
             "emit" => print!("{src}"),
@@ -345,12 +353,46 @@ fn main() {
     }
 }
 
+// Load + parse + import a program, converting compiler panics (syntax errors,
+// missing imports) into a clean one-line error instead of a Rust backtrace.
+// Same spirit as check_file's handling, for the run/build/package paths.
+pub fn load_program_or_diag(path: &Path) -> Vec<parser::Item> {
+    let src = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => { eprintln!("vulcan: cannot read {}: {e}", path.display()); std::process::exit(1); }
+    };
+    let (_, lex_errs) = lexer::lex_diags(&src);
+    if !lex_errs.is_empty() {
+        eprint!("{}", diag::render(&src, &path.display().to_string(), &lex_errs));
+        eprintln!("vulcan: {} error(s) in {}", lex_errs.len(), path.display());
+        std::process::exit(1);
+    }
+    let prev_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let r = std::panic::catch_unwind(|| modules::load_program(path));
+    std::panic::set_hook(prev_hook);
+    match r {
+        Ok(p) => p,
+        Err(payload) => {
+            let msg = if let Some(s) = payload.downcast_ref::<String>() { s.clone() }
+                else if let Some(s) = payload.downcast_ref::<&str>() { s.to_string() }
+                else { "unknown error".to_string() };
+            let msg = msg.strip_prefix("vulcan: ").unwrap_or(&msg).to_string();
+            eprintln!("vulcan: {msg} (in {})", path.display());
+            std::process::exit(1);
+        }
+    }
+}
+
 fn compile_c(c_path: &str, out: &str, safe: bool, libs: &[String]) {
     let t0 = std::time::Instant::now();
     let out_flag = format!("-o{out}");
     let cc = std::env::var("VULCAN_CC").unwrap_or_else(|_| pick_cc());
     let mut flags: Vec<&str> = vec![
         "-fno-strict-aliasing", "-Wall", "-Wno-unused-variable", "-Wno-unused-function",
+        // generated C uses single-line guard chains (`if(w<1) w=1;`) that trip
+        // this warning on every compile — silence it
+        "-Wno-misleading-indentation",
         // hardening: stack canaries, fortified libc calls, full PIE/ASLR, strict format strings,
         // and read-only relocations (GOT hardening where the platform supports it)
         "-fstack-protector-strong", "-D_FORTIFY_SOURCE=2", "-fPIE", "-pie",
@@ -378,10 +420,6 @@ fn compile_c(c_path: &str, out: &str, safe: bool, libs: &[String]) {
     eprintln!("native compile: {:.0} ms", dt.as_secs_f64() * 1000.0);
 }
 
-fn stem_name(entry: &Path) -> String {
-    let s = entry.to_string_lossy();
-    s.trim_end_matches(".vulcan").to_string()
-}
 
 // Prefer clang (LLVM codegen — measurably faster loops), fall back to gcc.
 pub fn pick_cc() -> String {

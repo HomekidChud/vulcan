@@ -17,7 +17,7 @@
 // ---------------------------------------------------------------------------
 
 pub fn apk(entry: &str) {
-    let program = crate::modules::load_program(std::path::Path::new(entry));
+    let program = crate::load_program_or_diag(std::path::Path::new(entry));
     let js = crate::codegen_js::generate_js(&program);
     let stem = entry.trim_end_matches(".vulcan");
     let name = file_stem(stem);
@@ -443,7 +443,7 @@ publishing to a store.
 //  - mobile:  android + ios together
 //  - linux/windows/macos: native C cross-build scripts
 pub fn package(entry: &str, platform: &str) {
-    let program = crate::modules::load_program(std::path::Path::new(entry));
+    let program = crate::load_program_or_diag(std::path::Path::new(entry));
     let js = crate::codegen_js::generate_js(&program);
     let stem = entry.trim_end_matches(".vulcan");
     let (dir, files): (String, Vec<(String, String)>) = match platform {
@@ -453,8 +453,8 @@ pub fn package(entry: &str, platform: &str) {
         "android" => android_bundle(stem, &js),
         "ios" => ios_bundle(stem, &js),
         "linux" | "windows" | "macos" => {
-            let c_src = crate::codegen::generate(&program);
-            native_bundle(stem, platform, &c_src)
+            let (c_src, libs) = crate::codegen::generate_with_libs(&program);
+            native_bundle(stem, platform, &c_src, &libs)
         }
         _ => {
             eprintln!("vulcan: unknown platform `{platform}` (web, desktop, mobile, android, ios, linux, windows, macos)");
@@ -483,7 +483,9 @@ pub fn package(entry: &str, platform: &str) {
 
 fn web_bundle(stem: &str, js: &str) -> (String, Vec<(String, String)>) {
     // strip the `main()` invocation — the worker bootstrap runs it after wiring I/O
-    let body = match js.split_once("// ---- main ----") {
+    // rsplit: a user string containing the marker would otherwise truncate
+    // the bundle at its first occurrence — the real main split is the last one
+    let body = match js.rsplit_once("// ---- main ----") {
         Some((b, _)) => b.to_string(),
         None => js.to_string(),
     };
@@ -522,7 +524,11 @@ fn android_bundle(stem: &str, js: &str) -> (String, Vec<(String, String)>) {
     files.push(("settings.gradle".into(), AND_SETTINGS.replace("__NAME__", &name)));
     files.push(("build.gradle".into(), AND_ROOT_GRADLE.into()));
     files.push(("gradle.properties".into(), AND_GRADLE_PROPS.into()));
-    files.push(("app/build.gradle".into(), AND_APP_GRADLE.replace("__NAME__", &name)));
+    // applicationId must be a valid Java package name (lowercase alphanumerics
+    // only) — same sanitization as `vulcan apk`
+    let pkg: String = name.chars().filter(|c| c.is_ascii_alphanumeric()).collect::<String>().to_lowercase();
+    let pkg = if pkg.is_empty() { "app".to_string() } else { pkg };
+    files.push(("app/build.gradle".into(), AND_APP_GRADLE.replace("__NAME__", &pkg)));
     files.push(("app/src/main/AndroidManifest.xml".into(), AND_MANIFEST.replace("__NAME__", &name)));
     files.push(("app/src/main/java/com/vulcan/app/MainActivity.java".into(), AND_MAIN_ACTIVITY.replace("__NAME__", &name)));
     files.push(("app/src/main/res/values/strings.xml".into(), AND_STRINGS.replace("__NAME__", &name)));
@@ -535,7 +541,9 @@ fn ios_bundle(stem: &str, js: &str) -> (String, Vec<(String, String)>) {
     let name = file_stem(stem);
     let dir = format!("package-{name}-ios");
     let mut files: Vec<(String, String)> = vec![];
-    for (n, c) in webfiles { files.push((format!("VulcanApp/Resources/{n}"), c)); }
+    // NOTE: written to VulcanApp/ (not VulcanApp/Resources/) — the pbxproj
+    // file reference resolves index.html relative to the VulcanApp group
+    for (n, c) in webfiles { files.push((format!("VulcanApp/{n}"), c)); }
     files.push(("VulcanApp.xcodeproj/project.pbxproj".into(), IOS_PBXPROJ.replace("__NAME__", &name)));
     files.push(("VulcanApp/Info.plist".into(), IOS_PLIST.replace("__NAME__", &name)));
     files.push(("VulcanApp/AppDelegate.swift".into(), IOS_APPDELEGATE.replace("__NAME__", &name)));
@@ -557,13 +565,22 @@ fn mobile_bundle(stem: &str, js: &str) -> (String, Vec<(String, String)>) {
     (dir, files)
 }
 
-fn native_bundle(stem: &str, platform: &str, c_src: &str) -> (String, Vec<(String, String)>) {
+fn native_bundle(stem: &str, platform: &str, c_src: &str, libs: &[String]) -> (String, Vec<(String, String)>) {
     let name = file_stem(stem);
     let dir = format!("package-{name}-{platform}");
+    // `link "name"` libraries must reach the native compiler — append them
+    // to the build script's link line (same -l flags `vulcan build` uses)
+    let lib_flags = libs.iter().map(|l| format!(" -l{l}")).collect::<String>();
+    let link_line = |s: String| if s.contains(" -lm") {
+        s.replace(" -lm", &format!(" -lm{lib_flags}"))
+    } else {
+        // windows cross-build has no -lm — append directly to the source arg
+        s.replace("main.vulcan.c", &format!("main.vulcan.c{lib_flags}"))
+    };
     let (script, readme): (String, String) = match platform {
-        "linux" => (NATIVE_LINUX.replace("__NAME__", &name), NATIVE_LINUX_README.replace("__NAME__", &name)),
-        "windows" => (NATIVE_WINDOWS.replace("__NAME__", &name), NATIVE_WINDOWS_README.replace("__NAME__", &name)),
-        "macos" => (NATIVE_MACOS.replace("__NAME__", &name), NATIVE_MACOS_README.replace("__NAME__", &name)),
+        "linux" => (link_line(NATIVE_LINUX.replace("__NAME__", &name)), NATIVE_LINUX_README.replace("__NAME__", &name)),
+        "windows" => (link_line(NATIVE_WINDOWS.replace("__NAME__", &name)), NATIVE_WINDOWS_README.replace("__NAME__", &name)),
+        "macos" => (link_line(NATIVE_MACOS.replace("__NAME__", &name)), NATIVE_MACOS_README.replace("__NAME__", &name)),
         _ => unreachable!(),
     };
     let files = vec![
@@ -587,6 +604,10 @@ fn json_escape(s: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
+            // </script> inside the embedded worker source would close the
+            // page's script element early — escape '<' so the HTML parser
+            // can never see the literal sequence
+            '<' => out.push_str("\\u003c"),
             c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
             c => out.push(c),
         }
@@ -739,9 +760,18 @@ const HTML_TEMPLATE: &str = r##"<!DOCTYPE html>
 "use strict";
 // ---- tiny ANSI terminal (80x24) ----
 const COLS = 80, ROWS = 24;
-const PALETTE = ["#17181c", "#c0392b", "#27ae60", "#c9a227", "#2965d8", "#a44bd8", "#1fb6c9", "#cfd3da"];
+const PALETTE = ["#17181c", "#c0392b", "#27ae60", "#c9a227", "#2965d8", "#a44bd8", "#1fb6c9", "#cfd3da",
+                 "#6b7280", "#e74c3c", "#2ecc71", "#f1c40f", "#5b8def", "#bb6bd9", "#4dd0e1", "#ffffff"];
+function cssColor(n) {
+    // truecolor cells are encoded as -(0x1000000 + rgb); -1 = terminal default
+    if (n <= -0x1000000) {
+        const rgb = -n - 0x1000000;
+        return "rgb(" + ((rgb >> 16) & 255) + "," + ((rgb >> 8) & 255) + "," + (rgb & 255) + ")";
+    }
+    return xterm256(n % 256);
+}
 function xterm256(n) {
-    if (n < 16) return PALETTE[n % 8];
+    if (n < 16) return PALETTE[n];
     if (n < 232) {
         n -= 16;
         const g = [0, 95, 135, 175, 215, 255];
@@ -760,9 +790,11 @@ const term = {
     },
     put(ch) {
         this.scroll();
-        const x = Math.min(this.cx, COLS - 1);
-        this.grid[this.cy][x] = { ch, fg: this.fg, bg: this.bg };
-        this.cx = Math.min(this.cx + 1, COLS);
+        // real terminals wrap long lines at the right edge instead of
+        // silently dropping characters past column COLS
+        if (this.cx >= COLS) { this.cx = 0; this.cy++; this.scroll(); }
+        this.grid[this.cy][this.cx] = { ch, fg: this.fg, bg: this.bg };
+        this.cx++;
     },
     seq(params, cmd) {
         const ps = params.split(";").map((p) => parseInt(p || "0", 10));
@@ -784,9 +816,11 @@ const term = {
                 if (p === 0) { this.fg = -1; this.bg = -1; }
                 else if (p >= 30 && p <= 37) this.fg = p - 30;
                 else if (p === 38 && ps[i + 1] === 5) { this.fg = ps[i + 2]; i += 2; }
+                else if (p === 38 && ps[i + 1] === 2) { this.fg = -(0x1000000 + ((ps[i + 2] << 16) + (ps[i + 3] << 8) + ps[i + 4])); i += 4; }
                 else if (p === 39) this.fg = -1;
                 else if (p >= 40 && p <= 47) this.bg = p - 40;
                 else if (p === 48 && ps[i + 1] === 5) { this.bg = ps[i + 2]; i += 2; }
+                else if (p === 48 && ps[i + 1] === 2) { this.bg = -(0x1000000 + ((ps[i + 2] << 16) + (ps[i + 3] << 8) + ps[i + 4])); i += 4; }
                 else if (p === 49) this.bg = -1;
                 i++;
             }
@@ -819,8 +853,8 @@ const term = {
                 if (cell.fg !== curFg || cell.bg !== curBg) {
                     if (open) html += "</span>";
                     let style = "";
-                    if (cell.fg >= 0) style += "color:" + xterm256(cell.fg % 256) + ";";
-                    if (cell.bg >= 0) style += "background:" + xterm256(cell.bg % 256) + ";";
+                    if (cell.fg >= 0 || cell.fg <= -0x1000000) style += "color:" + cssColor(cell.fg) + ";";
+                    if (cell.bg >= 0 || cell.bg <= -0x1000000) style += "background:" + cssColor(cell.bg) + ";";
                     html += "<span style='" + style + "'>";
                     open = true; curFg = cell.fg; curBg = cell.bg;
                 }
