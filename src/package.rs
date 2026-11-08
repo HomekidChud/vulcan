@@ -199,28 +199,75 @@ fn apk_build(dir: &str, name: &str) -> Result<(), String> {
         "aapt: adding classes.dex",
     )?;
 
-    // ---- 5. zipalign ----
-    let zipalign = find_tool(&["zipalign"]).ok_or_else(|| "zipalign not found — install it: pkg install zipalign".to_string())?;
-    sh(
-        std::process::Command::new(&zipalign)
-            .current_dir(d)
-            .args(["-f", "4", "build/app-unsigned.apk", "build/app-aligned.apk"]),
-        "zipalign",
-    )?;
+    // ---- 5. zipalign (optional — aapt's compressed resources.arsc doesn't
+    //      require it, and modern apksigner v2+ signing tolerates skipping it) ----
+    let aligned = format!("{d}/build/app-aligned.apk");
+    match find_tool(&["zipalign"]) {
+        Some(zipalign) => {
+            sh(
+                std::process::Command::new(&zipalign)
+                    .current_dir(d)
+                    .args(["-f", "4", "build/app-unsigned.apk", "build/app-aligned.apk"]),
+                "zipalign",
+            )?;
+        }
+        None => {
+            println!("  zipalign: not found — skipping (aapt bundles it; `pkg install aapt` provides it)");
+            std::fs::copy(format!("{d}/build/app-unsigned.apk"), &aligned).map_err(|e| e.to_string())?;
+        }
+    }
 
-    // ---- 6. debug keystore (auto-generate once) ----
+    // ---- 6. debug keystore (auto-generate once; keytool or openssl) ----
     let ks = format!("{d}/debug.keystore");
     if !std::path::Path::new(&ks).is_file() {
-        let keytool = find_tool(&["keytool"]).ok_or_else(|| "keytool not found — install it: pkg install openjdk-17".to_string())?;
-        sh(
-            std::process::Command::new(&keytool)
-                .args(["-genkeypair", "-keystore", &ks,
-                    "-alias", "androiddebugkey",
-                    "-storepass", "android", "-keypass", "android",
-                    "-keyalg", "RSA", "-keysize", "2048", "-validity", "10000",
-                    "-dname", "CN=Android Debug,O=Android,C=US"]),
-            "keytool: generating debug keystore (first run only)",
-        )?;
+        match find_tool(&["keytool"]) {
+            Some(keytool) => {
+                sh(
+                    std::process::Command::new(&keytool)
+                        .args(["-genkeypair", "-keystore", &ks,
+                            "-alias", "androiddebugkey",
+                            "-storepass", "android", "-keypass", "android",
+                            "-keyalg", "RSA", "-keysize", "2048", "-validity", "10000",
+                            "-dname", "CN=Android Debug,O=Android,C=US"]),
+                    "keytool: generating debug keystore (first run only)",
+                )?;
+            }
+            None => {
+                // no JDK keytool — build a PKCS#12 keystore with openssl instead
+                let openssl = find_tool(&["openssl"]).ok_or_else(|| {
+                    "neither keytool nor openssl found — install one: pkg install openssl (or openjdk-17 if available)".to_string()
+                })?;
+                sh(
+                    std::process::Command::new(&openssl)
+                        .current_dir(d)
+                        .args(["genrsa", "-out", "build/debug.key", "2048"]),
+                    "openssl: generating signing key (first run only)",
+                )?;
+                sh(
+                    std::process::Command::new(&openssl)
+                        .current_dir(d)
+                        .args(["req", "-new", "-key", "build/debug.key", "-out", "build/debug.csr",
+                            "-subj", "/CN=Android Debug/O=Android/C=US"]),
+                    "openssl: certificate request",
+                )?;
+                sh(
+                    std::process::Command::new(&openssl)
+                        .current_dir(d)
+                        .args(["x509", "-req", "-in", "build/debug.csr", "-signkey", "build/debug.key",
+                            "-out", "build/debug.crt", "-days", "10000"]),
+                    "openssl: self-signed certificate",
+                )?;
+                sh(
+                    std::process::Command::new(&openssl)
+                        .current_dir(d)
+                        .args(["pkcs12", "-export", "-out", "build/debug.p12",
+                            "-inkey", "build/debug.key", "-in", "build/debug.crt",
+                            "-passout", "pass:android", "-name", "androiddebugkey"]),
+                    "openssl: PKCS#12 keystore",
+                )?;
+                std::fs::copy(format!("{d}/build/debug.p12"), &ks).map_err(|e| e.to_string())?;
+            }
+        }
     }
 
     // ---- 7. sign ----
@@ -374,12 +421,31 @@ else
 fi
 
 (cd build && "$AAPT" add app-unsigned.apk classes.dex)
-zipalign -f 4 build/app-unsigned.apk build/app-aligned.apk
+
+# zipalign ships with the aapt package; skip it if missing
+if command -v zipalign >/dev/null; then
+    zipalign -f 4 build/app-unsigned.apk build/app-aligned.apk
+else
+    cp build/app-unsigned.apk build/app-aligned.apk
+fi
 
 if [ ! -f debug.keystore ]; then
-    keytool -genkeypair -keystore debug.keystore -alias androiddebugkey \
-        -storepass android -keypass android -keyalg RSA -keysize 2048 \
-        -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+    if command -v keytool >/dev/null; then
+        keytool -genkeypair -keystore debug.keystore -alias androiddebugkey \
+            -storepass android -keypass android -keyalg RSA -keysize 2048 \
+            -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+    else
+        # no JDK keytool: build a PKCS#12 keystore with openssl
+        openssl genrsa -out build/debug.key 2048
+        openssl req -new -key build/debug.key -out build/debug.csr \
+            -subj "/CN=Android Debug/O=Android/C=US"
+        openssl x509 -req -in build/debug.csr -signkey build/debug.key \
+            -out build/debug.crt -days 10000
+        openssl pkcs12 -export -out build/debug.p12 \
+            -inkey build/debug.key -in build/debug.crt \
+            -passout pass:android -name androiddebugkey
+        cp build/debug.p12 debug.keystore
+    fi
 fi
 
 apksigner sign --ks debug.keystore --ks-key-alias androiddebugkey \
@@ -397,7 +463,11 @@ WebView running the self-contained web build of the game.
 ## One-time setup in Termux
 
     pkg update && pkg upgrade
-    pkg install aapt ecj d8 zipalign apksigner openjdk-17
+    pkg install aapt ecj d8 apksigner openssl
+
+Notes: `zipalign` ships inside the `aapt` package (no separate package).
+`openjdk-17` is only needed for `keytool` — if it is unavailable on your
+mirror, the build falls back to an openssl-generated PKCS#12 keystore.
 
 ## Build
 
