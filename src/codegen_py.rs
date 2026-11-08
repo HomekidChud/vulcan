@@ -122,11 +122,14 @@ _stdin_eof = False
 def _read_key():
     global _stdin_eof
     try:
-        c = sys.stdin.read(1)
+        # os.read(0, 1) is unbuffered — the old sys.stdin.read(1) pulled a
+        # whole chunk into Python's buffer where select() could never see
+        # the remaining bytes (stranded keys)
+        c = os.read(0, 1)
         if not c:
             _stdin_eof = True
             return 0
-        return _ord(c)
+        return c[0]
     except Exception:
         return 0
 def _key_ready():
@@ -138,6 +141,31 @@ def _key_ready():
     except Exception:
         return 0
 def _sleep(ms): time.sleep(ms / 1000.0)
+# term_raw/term_normal: cbreak mode like the C backend (the old no-op mapping
+# left Python games in canonical mode — every key needed Enter)
+_termios_saved = None
+_term_atexit = False
+def _term_raw():
+    global _termios_saved, _term_atexit
+    try:
+        import termios, tty
+        if _termios_saved is None:
+            _termios_saved = termios.tcgetattr(0)
+        if not _term_atexit:
+            _term_atexit = True
+            atexit.register(_term_normal)
+        tty.setcbreak(0)
+    except Exception:
+        pass
+def _term_normal():
+    global _termios_saved
+    if _termios_saved is not None:
+        try:
+            import termios
+            termios.tcsetattr(0, termios.TCSAFLUSH, _termios_saved)
+        except Exception:
+            pass
+        _termios_saved = None
 def _rand_int(lo, hi): return _vrand.randint(lo, hi)
 def _rand(): return _vrand.randint(0, 2147483647)
 def _print_at(x, y, s): sys.stdout.write('\x1b[%d;%dH%s' % (y + 1, x + 1, s))
@@ -302,7 +330,9 @@ def _downsample():
                 for sx in range(__VAA):
                     v = _fb[(y * __VAA + sy) * __FB_W + x * __VAA + sx]
                     ur += (v >> 16) & 255; ug += (v >> 8) & 255; ub += v & 255
-            dx = (x - cxn) / cxn; dy = (y - cyn) / cyn
+            # match the C backend: no darkening on a 1-pixel-wide/tall canvas
+            dx = (x - cxn) / cxn if __OUT_W > 1 else 0
+            dy = (y - cyn) / cyn if __OUT_H > 1 else 0
             f = 1.0 - (dx * dx + dy * dy) * 0.30
             if f < 0.0: f = 0.0
             if f > 1.0: f = 1.0
@@ -331,17 +361,23 @@ def _truecolor():
                             (tm and ("truecolor" in tm or "direct" in tm))) else 0
     return _tc_mode[0]
 def _quant256(r, g, b):
-    # nearest xterm-256 entry: 6x6x6 cube vs 24-step gray ramp
+    # nearest xterm-256 entry: 6x6x6 cube vs 24-step gray ramp. The cube
+    # rounds each axis independently (exact within the cube); the gray ramp
+    # checks the neighbouring steps too, so the result is the true nearest
     qr = (r * 5 + 127) // 255; qg = (g * 5 + 127) // 255; qb = (b * 5 + 127) // 255
     cr = qr * 51; cg = qg * 51; cb = qb * 51
+    dc = (r - cr) ** 2 + (g - cg) ** 2 + (b - cb) ** 2
     gray = (r + g + b + 2) // 3
     qy = (gray - 8 + 5) // 10
     if qy < 0: qy = 0
     if qy > 23: qy = 23
-    gv = 8 + qy * 10
-    dc = (r - cr) ** 2 + (g - cg) ** 2 + (b - cb) ** 2
-    dg = (r - gv) ** 2 + (g - gv) ** 2 + (b - gv) ** 2
-    return 232 + qy if dg < dc else 16 + qr * 36 + qg * 6 + qb
+    best, dg = qy, 1 << 30
+    for y in range(qy - 1, qy + 2):
+        if y < 0 or y > 23: continue
+        gv = 8 + y * 10
+        d = (r - gv) ** 2 + (g - gv) ** 2 + (b - gv) ** 2
+        if d < dg: dg, best = d, y
+    return 232 + best if dg < dc else 16 + qr * 36 + qg * 6 + qb
 def _sample(down, px, py, pw, ph):
     # exact box filter from the logical canvas to the terminal pixel grid;
     # zero-width ranges collapse to a single source pixel (crisp nearest-neighbour)
@@ -1738,7 +1774,8 @@ impl PyGen {
             "key_ready" => ("_key_ready()".into(), Ty::I64),
             "read_key" => ("_read_key()".into(), Ty::I64),
             "clear_screen" => ("(_clear_screen(), None)[1]".into(), Ty::Void),
-            "term_raw" | "term_normal" => ("None".into(), Ty::Void),
+            "term_raw" => ("_term_raw()".into(), Ty::Void),
+            "term_normal" => ("_term_normal()".into(), Ty::Void),
             "ms_now" => ("_ms_now()".into(), Ty::I64),
             "rand_int" => {
                 if args.len() != 2 { panic!("vulcan: rand_int(lo, hi) takes 2 args"); }

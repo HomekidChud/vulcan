@@ -69,6 +69,25 @@ function __to_int(s) { const n = parseInt(s, 10); return Number.isNaN(n) ? 0 : M
 function __to_float(s) { const n = parseFloat(s); return Number.isNaN(n) ? 0 : n; }
 function __out(s) { process.stdout.write(s); }
 function __input() {
+    __stdin_setup();
+    if (__stdin_mode === 1) {
+        // tty: line input from the event queue — resolve once a full line
+        // (or EOF) has arrived; the event loop runs between game frames
+        return new Promise((resolve) => {
+            const scan = () => {
+                for (let i = 0; i < __ttykeys.length; i++) {
+                    if (__ttykeys[i] === 10 || __ttykeys[i] === 13) {
+                        const line = __ttykeys.splice(0, i + 1);
+                        resolve(Buffer.from(line).toString("utf8").replace(/\r?\n$/, ""));
+                        return;
+                    }
+                }
+                if (__stdin_eof) { const line = __ttykeys.splice(0, __ttykeys.length); resolve(Buffer.from(line).toString("utf8")); return; }
+                setTimeout(scan, 25);
+            };
+            scan();
+        });
+    }
     let b = Buffer.alloc(0);
     const c = Buffer.alloc(1);
     try {
@@ -82,7 +101,39 @@ function __input() {
     return b.toString("utf8").replace(/\r?\n$/, "");
 }
 let __stdin_eof = false;
+// stdin: TTYs use an event-driven byte queue (keys arrive while the event
+// loop runs during __sleep — the old always-0 __key_ready made keyboard
+// input completely dead in JS terminal programs). Pipes/files keep the
+// blocking readSync path. The worker/web bundle rebinds all of this.
+let __ttykeys = [];
+let __stdin_mode = 0; // 0 = untouched, 1 = tty event queue, 2 = blocking fd
+let __want_raw = false;
+function __stdin_setup() {
+    if (__stdin_mode !== 0) return;
+    const sin = (typeof process !== "undefined" && process.stdin) ? process.stdin : null;
+    if (sin && sin.isTTY) {
+        __stdin_mode = 1;
+        if (__want_raw) { try { sin.setRawMode(true); } catch (e) {} }
+        sin.resume();
+        sin.on("data", (d) => { for (let i = 0; i < d.length; i++) __ttykeys.push(d[i]); });
+        sin.on("end", () => { __stdin_eof = true; });
+        sin.on("error", () => { __stdin_eof = true; });
+    } else {
+        __stdin_mode = 2;
+    }
+}
+function __term_raw() {
+    __want_raw = true;
+    __stdin_setup();
+    if (__stdin_mode === 1) { try { process.stdin.setRawMode(true); } catch (e) {} }
+}
+function __term_normal() {
+    __want_raw = false;
+    if (__stdin_mode === 1) { try { process.stdin.setRawMode(false); } catch (e) {} }
+}
 function __read_key() {
+    __stdin_setup();
+    if (__stdin_mode === 1) return __ttykeys.length > 0 ? __ttykeys.shift() : 0;
     const c = Buffer.alloc(1);
     try {
         const n = __fs.readSync(0, c, 0, 1);
@@ -91,9 +142,10 @@ function __read_key() {
     } catch (e) { return 0; }
 }
 function __key_ready() {
-    // non-blocking stdin is not available synchronously in Node — report
-    // ready only before EOF so piped-input programs still terminate cleanly
-    return __stdin_eof ? 0 : 0;
+    __stdin_setup();
+    if (__stdin_mode === 1) return __ttykeys.length > 0 ? 1 : 0;
+    // blocking fd (pipe/file): a readSync returns at the latest at EOF
+    return __stdin_eof ? 0 : 1;
 }
 function __sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
 function __ms_now() { return Date.now(); }
@@ -240,7 +292,8 @@ function __downsample() {
                 const v = __fb[(y * __VAA + sy) * __FB_W + x * __VAA + sx];
                 ur += (v >> 16) & 255; ug += (v >> 8) & 255; ub += v & 255;
             }
-            const dx = (x - cxn) / cxn, dy = (y - cyn) / cyn;
+            // match the C backend: no darkening on a 1-pixel-wide/tall canvas
+            const dx = __OUT_W > 1 ? (x - cxn) / cxn : 0, dy = __OUT_H > 1 ? (y - cyn) / cyn : 0;
             let f = 1.0 - (dx * dx + dy * dy) * 0.30;
             if (f < 0.0) f = 0.0; if (f > 1.0) f = 1.0;
             const r = Math.trunc(((ur + 2) >> 2) * f), g = Math.trunc(((ug + 2) >> 2) * f), b = Math.trunc(((ub + 2) >> 2) * f);
@@ -279,7 +332,19 @@ function __present() {
         __present_alt = true;
         __out("\x1b[?1049h\x1b[?25l\x1b[2J"); // clean slate, hide cursor
         if (typeof process !== "undefined" && process.on) {
-            process.on("exit", () => { if (__present_alt) process.stdout.write("\x1b[?25h\x1b[?1049l"); }); // always restored
+            const __restore_term = () => {
+                if (__present_alt) process.stdout.write("\x1b[?25h\x1b[?1049l");
+                if (__stdin_mode === 1 && __want_raw) { try { process.stdin.setRawMode(false); } catch (e) {} }
+            };
+            process.on("exit", __restore_term); // always restored
+            // Node does NOT run exit handlers on SIGINT/SIGTERM/SIGHUP —
+            // without these, Ctrl-C on a JS game left the terminal on the
+            // alt screen with the cursor hidden (SIGHUP also arrives when
+            // the parent `vulcan run` process is killed and the session
+            // leader exits)
+            process.on("SIGINT", () => { __restore_term(); process.exit(130); });
+            process.on("SIGTERM", () => { __restore_term(); process.exit(143); });
+            process.on("SIGHUP", () => { __restore_term(); process.exit(129); });
         }
     }
     if (cols !== __grid_w || rows !== __grid_h) { // terminal resized: full redraw
@@ -295,7 +360,10 @@ function __present() {
             const l = __sample(down, cx, cy * 2 + 1, cols, rows * 2);
             const fg = tc ? (((u >> 16) & 255) << 16 | ((u >> 8) & 255) << 8 | (u & 255)) : __quant256(u);
             const bg = tc ? (((l >> 16) & 255) << 16 | ((l >> 8) & 255) << 8 | (l & 255)) : __quant256(l);
-            const cell = (fg * 4294967296) + bg; // fg<<32|bg without 32-bit overflow
+            // fg,bg < 2^24 so fg*2^24+bg < 2^48 — exactly representable in a
+            // double (the old fg*2^32+bg lost precision for fg >= 2^21 and
+            // permanently skipped real cell updates in the shadow diff)
+            const cell = fg * 16777216 + bg;
             if (cell === __shadow[cy * cols + cx]) continue; // unchanged: skip — no flicker
             __shadow[cy * cols + cx] = cell;
             if (cx !== lastx + 1 || cy !== lasty) out += "\x1b[" + (cy + 1) + ";" + (cx + 1) + "H";
@@ -320,16 +388,24 @@ function __truecolor() {
 }
 let __tc_mode = -1;
 function __quant256(c) {
-    // nearest xterm-256 entry: 6x6x6 cube vs 24-step gray ramp
+    // nearest xterm-256 entry: 6x6x6 cube vs 24-step gray ramp. The cube
+    // rounds each axis independently (exact within the cube); the gray ramp
+    // is checked against the neighbouring steps too, so the picked entry is
+    // the true nearest of both ramps
     const r = (c >> 16) & 255, g = (c >> 8) & 255, b = c & 255;
     const qr = Math.trunc((r * 5 + 127) / 255), qg = Math.trunc((g * 5 + 127) / 255), qb = Math.trunc((b * 5 + 127) / 255);
     const cr = qr * 51, cg = qg * 51, cb = qb * 51;
+    const dc = (r - cr) * (r - cr) + (g - cg) * (g - cg) + (b - cb) * (b - cb);
     const gray = Math.trunc((r + g + b + 2) / 3);
     let qy = Math.trunc((gray - 8 + 5) / 10); if (qy < 0) qy = 0; if (qy > 23) qy = 23;
-    const gv = 8 + qy * 10;
-    const dc = (r - cr) * (r - cr) + (g - cg) * (g - cg) + (b - cb) * (b - cb);
-    const dg = (r - gv) * (r - gv) + (g - gv) * (g - gv) + (b - gv) * (b - gv);
-    return dg < dc ? 232 + qy : 16 + qr * 36 + qg * 6 + qb;
+    let best = 1e18, besty = qy;
+    for (let y = qy - 1; y <= qy + 1; y++) {
+        if (y < 0 || y > 23) continue;
+        const gv = 8 + y * 10;
+        const dg = (r - gv) * (r - gv) + (g - gv) * (g - gv) + (b - gv) * (b - gv);
+        if (dg < best) { best = dg; besty = y; }
+    }
+    return best < dc ? 232 + besty : 16 + qr * 36 + qg * 6 + qb;
 }
 function __sample(down, px, py, pw, ph) {
     // exact box filter from the logical canvas to the terminal pixel grid;
@@ -1709,7 +1785,8 @@ impl JsGen {
             "key_ready" => ("__key_ready()".into(), Ty::I64),
             "read_key" => ("__read_key()".into(), Ty::I64),
             "clear_screen" => ("(__clear_screen(), undefined)".into(), Ty::Void),
-            "term_raw" | "term_normal" => ("undefined".into(), Ty::Void),
+            "term_raw" => ("__term_raw()".into(), Ty::Void),
+            "term_normal" => ("__term_normal()".into(), Ty::Void),
             "ms_now" => ("__ms_now()".into(), Ty::I64),
             "rand_int" => {
                 if args.len() != 2 { panic!("vulcan: rand_int(lo, hi) takes 2 args"); }

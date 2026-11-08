@@ -135,9 +135,10 @@ static void vset_color(int64_t fg, int64_t bg){ if(fg<0&&bg<0){ printf("\033[0m"
 static int64_t vscreen_w(void){ struct winsize w; if(ioctl(STDOUT_FILENO,TIOCGWINSZ,&w)==0&&w.ws_col) return (int64_t)w.ws_col; return 80; }
 static int64_t vscreen_h(void){ struct winsize w; if(ioctl(STDOUT_FILENO,TIOCGWINSZ,&w)==0&&w.ws_row) return (int64_t)w.ws_row; return 24; }
 static void vcursor_visible(int64_t v){ printf(v? "\033[?25h" : "\033[?25l"); }
-static struct termios vulcan_torig; static int vulcan_traw = 0;
+static struct termios vulcan_torig; static int vulcan_traw = 0, vulcan_traw_atexit = 0;
 static unsigned char vheld[256];
-static void term_raw(void){ if(tcgetattr(STDIN_FILENO,&vulcan_torig)==0){ struct termios t=vulcan_torig; t.c_lflag&=~(ICANON|ECHO); t.c_cc[VMIN]=0; t.c_cc[VTIME]=0; tcsetattr(STDIN_FILENO,TCSANOW,&t); vulcan_traw=1; } }
+static void term_normal(void);
+static void term_raw(void){ if(tcgetattr(STDIN_FILENO,&vulcan_torig)==0){ struct termios t=vulcan_torig; t.c_lflag&=~(ICANON|ECHO); t.c_cc[VMIN]=0; t.c_cc[VTIME]=0; tcsetattr(STDIN_FILENO,TCSANOW,&t); vulcan_traw=1; if(!vulcan_traw_atexit){ vulcan_traw_atexit=1; atexit(term_normal); } } }
 static void term_normal(void){ if(vulcan_traw){ tcsetattr(STDIN_FILENO,TCSAFLUSH,&vulcan_torig); vulcan_traw=0; } }
 static int vulcan_stdin_eof = 0;
 static int64_t key_ready(void){ if(vulcan_stdin_eof) return 0; fd_set s; FD_ZERO(&s); FD_SET(STDIN_FILENO,&s); struct timeval tv={0,0}; return select(STDIN_FILENO+1,&s,NULL,NULL,&tv)>0; }
@@ -152,12 +153,17 @@ static int VFB_W = 512, VFB_H = 288, VOUT_W = 256, VOUT_H = 144;
 static int32_t *vfb = NULL;
 static double *vzbuf = NULL;
 static int32_t *vdown = NULL;
+static void* vmalloc(size_t n){
+    void* p = malloc(n);
+    if(!p){ fprintf(stderr,"vulcan: out of memory (%zu bytes)\n",n); exit(1); }
+    return p;
+}
 static void vfb_alloc(void){
     if(vfb) return;
     size_t n = (size_t)VFB_W * (size_t)VFB_H;
-    vfb = (int32_t*)malloc(n * sizeof(int32_t));
-    vzbuf = (double*)malloc(n * sizeof(double));
-    vdown = (int32_t*)malloc((size_t)VOUT_W * (size_t)VOUT_H * sizeof(int32_t));
+    vfb = (int32_t*)vmalloc(n * sizeof(int32_t));
+    vzbuf = (double*)vmalloc(n * sizeof(double));
+    vdown = (int32_t*)vmalloc((size_t)VOUT_W * (size_t)VOUT_H * sizeof(int32_t));
     for(size_t i=0;i<n;i++){ vfb[i]=0; vzbuf[i]=1e30; }
 }
 static void vcanvas_resize(int64_t w, int64_t h){
@@ -270,7 +276,7 @@ static int vgrid_w = 0, vgrid_h = 0;
 static uint64_t *vshadow = NULL; // last-presented cells, packed (fg<<32)|bg
 static char *vob = NULL; static size_t vob_len = 0, vob_cap = 0;
 static void vob_reset(void){ vob_len = 0; }
-static void vob_put(const char* s, size_t n){ if(vob_len+n>vob_cap){ vob_cap=(vob_len+n)*2+64; vob=(char*)realloc(vob,vob_cap); } memcpy(vob+vob_len,s,n); vob_len+=n; }
+static void vob_put(const char* s, size_t n){ if(vob_len+n>vob_cap){ vob_cap=(vob_len+n)*2+64; char* nv=(char*)realloc(vob,vob_cap); if(!nv){ fprintf(stderr,"vulcan: out of memory\n"); exit(1); } vob=nv; } memcpy(vob+vob_len,s,n); vob_len+=n; }
 static void vob_str(const char* s){ vob_put(s,strlen(s)); }
 static void vob_fmt3(const char* f, int a, int b, int c){ char t[48]; vob_put(t,(size_t)snprintf(t,sizeof t,f,a,b,c)); }
 static int vtruecolor(void){
@@ -283,14 +289,18 @@ static int vtruecolor(void){
     return mode;
 }
 static int vquant256(int r, int g, int b){
-    // nearest xterm-256 entry: 6x6x6 cube vs 24-step gray ramp
+    // nearest xterm-256 entry: 6x6x6 cube vs 24-step gray ramp. The cube
+    // rounds each axis independently (exact within the cube); the gray ramp
+    // checks the neighbouring steps too, so the result is the true nearest
     int qr=(r*5+127)/255, qg=(g*5+127)/255, qb=(b*5+127)/255;
     int cr=qr*51, cg=qg*51, cb=qb*51;
-    int gray=(r+g+b+2)/3, qy=(gray-8+5)/10; if(qy<0)qy=0; if(qy>23)qy=23;
-    int gv=8+qy*10;
     long dc=(long)(r-cr)*(r-cr)+(long)(g-cg)*(g-cg)+(long)(b-cb)*(b-cb);
-    long dg=(long)(r-gv)*(r-gv)+(long)(g-gv)*(g-gv)+(long)(b-gv)*(b-gv);
-    return dg<dc ? 232+qy : 16+qr*36+qg*6+qb;
+    int gray=(r+g+b+2)/3, qy=(gray-8+5)/10; if(qy<0)qy=0; if(qy>23)qy=23;
+    long dg=1<<30; int best=qy;
+    for(int y=qy-1;y<=qy+1;y++){ if(y<0||y>23) continue; int gv=8+y*10;
+        long d=(long)(r-gv)*(r-gv)+(long)(g-gv)*(g-gv)+(long)(b-gv)*(b-gv);
+        if(d<dg){ dg=d; best=y; } }
+    return dg<dc ? 232+best : 16+qr*36+qg*6+qb;
 }
 static void vsample(int px, int py, int pw, int ph, int* r, int* g, int* b){
     // exact box filter from the logical canvas to the terminal pixel grid;
