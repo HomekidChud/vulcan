@@ -35,13 +35,14 @@ static musl binary that runs on Termux, and the installer wires PATH through
 
 ## What's new
 
-The current release is **1.16** (see `vulcan --version`): **the networked
-language**. TCP sockets (`net_listen`/`net_connect`/`net_send`/`net_recv`
-and friends) with identical semantics on all three backends, a pure-Vulcan
-HTTP/1.1 client (`lib/http.vulcan`), a Discord-style chat app that proves
-the whole stack (`examples/discord.vulcan` + `scripts/e2e-discord.sh`), and
-name-shadowing hardening so a user `fn sys()` can never break the Python or
-JS runtimes. The compiler still lives in `self/vulc.vulcan` and
+The current release is **1.17** (see `vulcan --version`): **zero hardcoded
+UI**. The web/APK shells draw no chrome of their own — no header, no hint
+bar, no default touch controls, no status bar. Programs build their own
+interface at runtime with `ui_button`/`ui_joystick`/`ui_html`/`ui_css`/
+`ui_title` (all backends; no-ops where there is no shell), a custom
+`shell.html` next to the `.vulcan` file becomes the entire app page, and
+the APK build honors the program's own `AndroidManifest.xml` and
+`icon.png`. The compiler still lives in `self/vulc.vulcan` and
 `vulcan bootstrap` still proves the fixpoint. The full per-version history
 lives in [CHANGELOG.md](CHANGELOG.md).
 
@@ -228,14 +229,40 @@ The canvas defaults to 256x144 but is fully dynamic: call `canvas_resize(w, h)` 
 | `is_touch()` | true when running on a touch device (web bundle) |
 | `touch_count()` | number of fingers currently on the screen |
 | `touch_x(i)`, `touch_y(i)` | finger `i` position in logical canvas coords (0-255, 0-143) |
-| `touch_custom()` | hide the default touch UI — the game draws its own controls |
+| `ui_clear()` | remove every on-screen element the program built |
+| `ui_button(label, key, x, y, size)` | hold-to-press button at x,y % of the viewport; sends `key` down/up |
+| `ui_joystick(x, y, size, up, down, left, right)` | virtual stick; edges press the four key codes |
+| `ui_html(html)` | inject arbitrary HTML into the UI layer — no limits |
+| `ui_css(css)` | inject a stylesheet — restyle the whole shell |
+| `ui_title(text)` | set the app/tab title |
 
 **Touch input (web/mobile).** Every touch point is forwarded to the game in
 logical canvas coordinates, so a game can lay out any control scheme it
 wants (joysticks, wheels, gesture pads) and hit-test with `touch_x` /
-`touch_y`. Calling `touch_custom()` hides the default joystick + FIRE/JUMP
-overlay and gives the game the whole screen. Right-side drag still steers
-the camera.
+`touch_y`. Any drag also streams `mouse_dx` / `mouse_dy`.
+
+**Your UI, your rules — zero hardcoded chrome.** The web/APK shell draws
+nothing but the program's own terminal output and canvas: no header bar, no
+hint text, no default buttons, no status bar. Whatever appears on screen is
+there because the program built it:
+
+```vulcan
+if is_touch() {
+    ui_joystick(16.0, 76.0, 96.0, 119, 115, 97, 100)   // WASD
+    ui_button("FIRE", 102, 82.0, 80.0, 74.0)          // 'f'
+}
+ui_css("body { background: #101020 }")
+ui_title("my game")
+```
+
+`ui_html` / `ui_css` are deliberately unrestricted — the program can build
+any interface it wants. `touch_custom()` still works (it now just clears
+the UI layer). For total freedom, drop a `shell.html` (or
+`<name>.shell.html`) next to your `.vulcan` file: it becomes the entire app
+page — the toolchain injects the compiled program at `__WORKER_JSON__` and
+substitutes `__TITLE__` if present. The APK build also picks up
+`AndroidManifest.xml` and `icon.png` from the program's folder, so
+orientation, permissions and the launcher icon are yours too.
 
 **3D meshes and character rigs** (`import engine`): `mesh_box(hx, hy, hz,
 color)` builds a box with independent half-extents; `mesh_draw_rot(m, cam,

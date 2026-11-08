@@ -552,6 +552,13 @@ def _touch_x(i): return -1.0
 def _touch_y(i): return -1.0
 def _is_touch(): return False
 def _touch_custom(): pass
+# program-controlled UI: meaningful in web/APK shells; no-ops elsewhere
+def _ui_clear(): pass
+def _ui_html(h): pass
+def _ui_css(c): pass
+def _ui_title(t): pass
+def _ui_button(label, key, x, y, size): pass
+def _ui_joystick(x, y, size, up, down, left, right): pass
 "#;
 
 pub fn generate_py(program: &[Item]) -> String {
@@ -2123,6 +2130,35 @@ impl PyGen {
             }
             "is_touch" => ("_is_touch()".into(), Ty::Bool),
             "touch_custom" => ("(_touch_custom(), None)".into(), Ty::Void),
+            "ui_clear" => ("(_ui_clear(), None)".into(), Ty::Void),
+            "ui_html" | "ui_css" | "ui_title" => {
+                if args.len() != 1 { panic!("vulcan: {} takes 1 arg", callee); }
+                let (s, st) = self.gen_expr(&args[0]);
+                let s = if st == Ty::Str { s } else { self.fmt_val(&s, &st) };
+                (format!("(_ui_{}({s}), None)", callee.strip_prefix("ui_").unwrap()), Ty::Void)
+            }
+            "ui_button" => {
+                if args.len() != 5 { panic!("vulcan: ui_button(label, key, x, y, size) takes 5 args"); }
+                let (l, lt) = self.gen_expr(&args[0]);
+                let l = if lt == Ty::Str { l } else { self.fmt_val(&l, &lt) };
+                let (k, kt) = self.gen_expr(&args[1]); let k = self.cast(&k, &kt, &Ty::I64);
+                let (x, xt) = self.gen_expr(&args[2]); let x = self.cast(&x, &xt, &Ty::F64);
+                let (y, yt) = self.gen_expr(&args[3]); let y = self.cast(&y, &yt, &Ty::F64);
+                let (s, st2) = self.gen_expr(&args[4]); let s = self.cast(&s, &st2, &Ty::F64);
+                (format!("(_ui_button({l}, {k}, {x}, {y}, {s}), None)"), Ty::Void)
+            }
+            "ui_joystick" => {
+                if args.len() != 7 { panic!("vulcan: ui_joystick(x, y, size, up, down, left, right) takes 7 args"); }
+                let (x, xt) = self.gen_expr(&args[0]); let x = self.cast(&x, &xt, &Ty::F64);
+                let (y, yt) = self.gen_expr(&args[1]); let y = self.cast(&y, &yt, &Ty::F64);
+                let (s, st2) = self.gen_expr(&args[2]); let s = self.cast(&s, &st2, &Ty::F64);
+                let mut ks = vec![];
+                for a in &args[3..7] {
+                    let (k, kt) = self.gen_expr(a);
+                    ks.push(self.cast(&k, &kt, &Ty::I64));
+                }
+                (format!("(_ui_joystick({x}, {y}, {s}, {}, {}, {}, {}), None)", ks[0], ks[1], ks[2], ks[3]), Ty::Void)
+            }
             "key_down" => {
                 if args.len() != 1 { panic!("vulcan: key_down(code) takes 1 arg"); }
                 let (c, t) = self.gen_expr(&args[0]);

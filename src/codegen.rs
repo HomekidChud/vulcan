@@ -511,6 +511,14 @@ static double vtouch_x(int64_t i){ (void)i; return -1.0; }
 static double vtouch_y(int64_t i){ (void)i; return -1.0; }
 static int8_t vis_touch(void){ return 0; }
 static void vtouch_custom(void){ }
+// program-controlled UI: meaningful in web/APK shells; a native binary has no
+// shell chrome to restyle, so these are no-ops that keep programs portable.
+static void vui_clear(void){ }
+static void vui_html(const char* s){ (void)s; }
+static void vui_css(const char* s){ (void)s; }
+static void vui_title(const char* s){ (void)s; }
+static void vui_button(const char* l, int64_t k, double x, double y, double s){ (void)l; (void)k; (void)x; (void)y; (void)s; }
+static void vui_joystick(double x, double y, double s, int64_t u, int64_t d, int64_t l, int64_t r){ (void)x; (void)y; (void)s; (void)u; (void)d; (void)l; (void)r; }
 "#;
 
 pub fn generate(program: &[Item]) -> String {
@@ -2726,6 +2734,34 @@ impl Codegen {
             }
             "is_touch" => ("(vis_touch() != 0)".into(), Ty::Bool),
             "touch_custom" => ("(vtouch_custom(), (void)0)".into(), Ty::Void),
+            "ui_clear" => ("(vui_clear(), (void)0)".into(), Ty::Void),
+            "ui_html" | "ui_css" | "ui_title" => {
+                if args.len() != 1 { panic!("vulcan: {} takes 1 arg", callee); }
+                let (s, st) = self.gen_expr(&args[0]);
+                if st != Ty::Str { panic!("vulcan: {} needs a string", callee); }
+                (format!("(vui_{}({s}), (void)0)", callee.strip_prefix("ui_").unwrap()), Ty::Void)
+            }
+            "ui_button" => {
+                if args.len() != 5 { panic!("vulcan: ui_button(label, key, x, y, size) takes 5 args"); }
+                let (l, lt) = self.gen_expr(&args[0]); if lt != Ty::Str { panic!("vulcan: ui_button label must be a string"); }
+                let (k, kt) = self.gen_expr(&args[1]); let k = self.cast(&k, &kt, &Ty::I64);
+                let (x, xt) = self.gen_expr(&args[2]); let x = self.cast(&x, &xt, &Ty::F64);
+                let (y, yt) = self.gen_expr(&args[3]); let y = self.cast(&y, &yt, &Ty::F64);
+                let (s, st2) = self.gen_expr(&args[4]); let s = self.cast(&s, &st2, &Ty::F64);
+                (format!("(vui_button({l}, {k}, {x}, {y}, {s}), (void)0)"), Ty::Void)
+            }
+            "ui_joystick" => {
+                if args.len() != 7 { panic!("vulcan: ui_joystick(x, y, size, up, down, left, right) takes 7 args"); }
+                let (x, xt) = self.gen_expr(&args[0]); let x = self.cast(&x, &xt, &Ty::F64);
+                let (y, yt) = self.gen_expr(&args[1]); let y = self.cast(&y, &yt, &Ty::F64);
+                let (s, st2) = self.gen_expr(&args[2]); let s = self.cast(&s, &st2, &Ty::F64);
+                let mut ks = vec![];
+                for a in &args[3..7] {
+                    let (k, kt) = self.gen_expr(a);
+                    ks.push(self.cast(&k, &kt, &Ty::I64));
+                }
+                (format!("(vui_joystick({x}, {y}, {s}, {}, {}, {}, {}), (void)0)", ks[0], ks[1], ks[2], ks[3]), Ty::Void)
+            }
             "key_down" => {
                 if args.len() != 1 { panic!("vulcan: key_down(code) takes 1 arg"); }
                 let (c, t) = self.gen_expr(&args[0]);

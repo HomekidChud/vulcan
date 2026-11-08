@@ -629,6 +629,17 @@ function __touch_custom() {
     // tell the hosting page to hide the default touch UI so the game can draw its own
     if (typeof postMessage === "function") { try { postMessage({ touchui: 0 }); } catch (e) {} }
 }
+// ---- program-controlled UI (web/APK shells): the program builds its own
+// on-screen interface at runtime — buttons, joysticks, any HTML/CSS. The
+// shell ships NO hardcoded chrome: whatever appears on screen is here because
+// the program asked for it. ui_html/ui_css are deliberately unrestricted.
+function __ui_send(m) { if (typeof postMessage === "function") { try { postMessage({ ui: m }); } catch (e) {} } }
+function __ui_clear() { __ui_send({ clear: 1 }); }
+function __ui_html(h) { __ui_send({ html: String(h) }); }
+function __ui_css(c) { __ui_send({ css: String(c) }); }
+function __ui_title(t) { __ui_send({ title: String(t) }); }
+function __ui_button(label, key, x, y, size) { __ui_send({ button: { label: String(label), key: key | 0, x: +x, y: +y, size: +size } }); }
+function __ui_joystick(x, y, size, up, down, left, right) { __ui_send({ joy: { x: +x, y: +y, size: +size, up: up | 0, down: down | 0, left: left | 0, right: right | 0 } }); }
 // ---- FFI: `extern` functions resolve through the host __ffi table ----
 // Embedders/IDE plugins can extend it by defining globalThis.__vulcan_ffi
 // (an object of name -> function) before the compiled program runs.
@@ -2229,6 +2240,39 @@ impl JsGen {
             }
             "is_touch" => ("__is_touch()".into(), Ty::Bool),
             "touch_custom" => ("(__touch_custom(), undefined)".into(), Ty::Void),
+            "ui_clear" => ("(__ui_clear(), undefined)".into(), Ty::Void),
+            "ui_html" | "ui_css" | "ui_title" => {
+                if args.len() != 1 { panic!("vulcan: {} takes 1 arg", callee); }
+                let (s, st) = self.gen_expr(&args[0]);
+                let s = if st == Ty::Str { s } else { self.fmt_val(&s, &st) };
+                (format!("(__ui_{}({s}), undefined)", callee.strip_prefix("ui_").unwrap()), Ty::Void)
+            }
+            "ui_button" => {
+                // ui_button(label, key, x, y, size) — hold-to-press button at
+                // x,y (percent of viewport), size in px; sends `key` down/up.
+                if args.len() != 5 { panic!("vulcan: ui_button(label, key, x, y, size) takes 5 args"); }
+                let (l, lt) = self.gen_expr(&args[0]);
+                let l = if lt == Ty::Str { l } else { self.fmt_val(&l, &lt) };
+                let (k, kt) = self.gen_expr(&args[1]); let k = self.cast(&k, &kt, &Ty::I64);
+                let (x, xt) = self.gen_expr(&args[2]); let x = self.cast(&x, &xt, &Ty::F64);
+                let (y, yt) = self.gen_expr(&args[3]); let y = self.cast(&y, &yt, &Ty::F64);
+                let (s, st2) = self.gen_expr(&args[4]); let s = self.cast(&s, &st2, &Ty::F64);
+                (format!("(__ui_button({l}, {k}, {x}, {y}, {s}), undefined)"), Ty::Void)
+            }
+            "ui_joystick" => {
+                // ui_joystick(x, y, size, up, down, left, right) — virtual stick at
+                // x,y (percent of viewport); edges press the four key codes.
+                if args.len() != 7 { panic!("vulcan: ui_joystick(x, y, size, up, down, left, right) takes 7 args"); }
+                let (x, xt) = self.gen_expr(&args[0]); let x = self.cast(&x, &xt, &Ty::F64);
+                let (y, yt) = self.gen_expr(&args[1]); let y = self.cast(&y, &yt, &Ty::F64);
+                let (s, st2) = self.gen_expr(&args[2]); let s = self.cast(&s, &st2, &Ty::F64);
+                let mut ks = vec![];
+                for a in &args[3..7] {
+                    let (k, kt) = self.gen_expr(a);
+                    ks.push(self.cast(&k, &kt, &Ty::I64));
+                }
+                (format!("(__ui_joystick({x}, {y}, {s}, {}, {}, {}, {}), undefined)", ks[0], ks[1], ks[2], ks[3]), Ty::Void)
+            }
             "key_down" => {
                 if args.len() != 1 { panic!("vulcan: key_down(code) takes 1 arg"); }
                 let (c, t) = self.gen_expr(&args[0]);

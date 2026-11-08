@@ -30,7 +30,20 @@ pub fn apk(entry: &str) {
     for (n, c) in webfiles {
         files.push((format!("assets/{n}"), c));
     }
-    files.push(("AndroidManifest.xml".into(), APK_MANIFEST.replace("__PKG__", &pkg_id).replace("__NAME__", &name)));
+    // freedom: the program's folder can override any part of the APK.
+    //   AndroidManifest.xml — full manifest control (orientation, name, perms)
+    //   icon.png            — the launcher icon
+    // Same placeholders as the defaults (__PKG__/__NAME__) are substituted.
+    let entry_dir = std::path::Path::new(entry)
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let manifest = match std::fs::read_to_string(entry_dir.join("AndroidManifest.xml")) {
+        Ok(m) => { println!("using custom AndroidManifest.xml"); m }
+        Err(_) => APK_MANIFEST.to_string(),
+    };
+    files.push(("AndroidManifest.xml".into(), manifest.replace("__PKG__", &pkg_id).replace("__NAME__", &name)));
     files.push(("src/com/vulcan/app/MainActivity.java".into(), APK_MAIN_ACTIVITY.to_string()));
     files.push(("res/values/strings.xml".into(), APK_STRINGS.replace("__NAME__", &name)));
     files.push(("build.sh".into(), APK_BUILD_SH.replace("__NAME__", &name)));
@@ -44,9 +57,14 @@ pub fn apk(entry: &str) {
         }
         std::fs::write(&path, content).unwrap();
     }
-    // launcher icon (embedded 192x192 PNG)
+    // launcher icon: the program's own icon.png if it ships one, else the
+    // toolchain's embedded default
     let _ = std::fs::create_dir_all(format!("{dir}/res/mipmap-xxhdpi"));
-    std::fs::write(format!("{dir}/res/mipmap-xxhdpi/ic_launcher.png"), include_bytes!("apk_icon.png")).unwrap();
+    let icon: Vec<u8> = match std::fs::read(entry_dir.join("icon.png")) {
+        Ok(i) => { println!("using custom icon.png"); i }
+        Err(_) => include_bytes!("apk_icon.png").to_vec(),
+    };
+    std::fs::write(format!("{dir}/res/mipmap-xxhdpi/ic_launcher.png"), icon).unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -337,14 +355,53 @@ fn apk_bundle(stem: &str, js: &str) -> (String, Vec<(String, String)>) {
         None => js.to_string(),
     };
     let worker_src = WORKER_SHIM.to_string() + "\n" + &body + "\n" + WORKER_MAIN + "\n})();\n";
-    let html = HTML_TEMPLATE
-        .replace("__TITLE__", &file_stem(stem))
-        .replace("__WORKER_JSON__", &json_escape(&worker_src))
-        .replace(
-            "const worker = new Worker(URL.createObjectURL(new Blob([WORKER_SRC], {type: \"application/javascript\"})));",
-            APK_WORKER_SWAP,
-        );
+    let mut html = shell_html(stem, &worker_src);
+    html = html.replace(
+        "const worker = new Worker(URL.createObjectURL(new Blob([WORKER_SRC], {type: \"application/javascript\"})));",
+        APK_WORKER_SWAP,
+    );
+    if html.contains("new Worker(URL.createObjectURL") {
+        eprintln!("vulcan: warning: custom shell must create the worker with the standard line\n  const worker = new Worker(URL.createObjectURL(new Blob([WORKER_SRC], {{type: \"application/javascript\"}})));\nor the Android NetBridge (real TCP sockets) will not reach the program");
+    }
     (format!("package-{}-apk", file_stem(stem)), vec![("index.html".into(), html)])
+}
+
+/// The page the program runs in. Freedom by default: if the program's folder
+/// ships a custom shell (`<name>.shell.html` or `shell.html` next to the
+/// .vulcan file), it IS the app — the toolchain only injects the compiled
+/// program at __WORKER_JSON__ (and __TITLE__ if the marker is present).
+/// Otherwise the built-in neutral shell is used: it draws NO chrome — every
+/// header, button and pixel of styling the user sees comes from the program
+/// itself via the ui_* builtins.
+fn shell_html(stem: &str, worker_src: &str) -> String {
+    let title = file_stem(stem);
+    let escaped = json_escape(worker_src);
+    match custom_shell(stem) {
+        Some((path, tpl)) => {
+            println!("using custom shell: {path}");
+            tpl.replace("__TITLE__", &title).replace("__WORKER_JSON__", &escaped)
+        }
+        None => HTML_TEMPLATE.replace("__TITLE__", &title).replace("__WORKER_JSON__", &escaped),
+    }
+}
+
+fn custom_shell(stem: &str) -> Option<(String, String)> {
+    let dir = std::path::Path::new(stem)
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let cands = vec![format!("{stem}.shell.html"), dir.join("shell.html").to_string_lossy().into_owned()];
+    for c in cands {
+        if let Ok(s) = std::fs::read_to_string(&c) {
+            if !s.contains("__WORKER_JSON__") {
+                eprintln!("vulcan: custom shell `{c}` must contain __WORKER_JSON__ where the compiled program is injected");
+                std::process::exit(1);
+            }
+            return Some((c, s));
+        }
+    }
+    None
 }
 
 const APK_WORKER_SWAP: &str = r#"class __VulcanMainThread {
@@ -762,9 +819,7 @@ fn web_bundle(stem: &str, js: &str) -> (String, Vec<(String, String)>) {
     // rebound __out/__key_ready. The shim sets __VULCAN_DEFER_BOOT so the
     // IIFE only HANDS OVER the boot fn instead of running main() immediately.
     let worker_src = WORKER_SHIM.to_string() + "\n" + &body + "\n" + WORKER_MAIN + "\n})();\n";
-    let html = HTML_TEMPLATE
-        .replace("__TITLE__", &file_stem(stem))
-        .replace("__WORKER_JSON__", &json_escape(&worker_src));
+    let html = shell_html(stem, &worker_src);
     let dir = format!("package-{}-web", file_stem(stem));
     (dir, vec![("index.html".into(), html)])
 }
@@ -972,7 +1027,7 @@ const HTML_TEMPLATE: &str = r##"<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>__TITLE__ — Vulcan app</title>
+<title>__TITLE__</title>
 <style>
     :root { color-scheme: dark; }
     * { box-sizing: border-box; }
@@ -981,12 +1036,6 @@ const HTML_TEMPLATE: &str = r##"<!DOCTYPE html>
         background: #0c0d10; color: #d6d8de;
         font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
     }
-    header {
-        padding: 10px 16px; font-size: 13px; color: #8b8f9a;
-        border-bottom: 1px solid #23252c; display: flex; justify-content: space-between;
-    }
-    header b { color: #cdd1d9; }
-    header a { color: #8b8f9a; }
     main { flex: 1; display: flex; align-items: flex-start; justify-content: center; padding: 12px; }
     #term {
         background: #101116; border: 1px solid #23252c; border-radius: 8px;
@@ -998,40 +1047,17 @@ const HTML_TEMPLATE: &str = r##"<!DOCTYPE html>
         width: min(720px, 100%); image-rendering: pixelated; image-rendering: crisp-edges;
         touch-action: none;
     }
-    #touchui { display: none; }
-    .tbtn {
-        position: fixed; bottom: 24px; width: 74px; height: 74px; border-radius: 50%;
-        background: rgba(120, 130, 150, 0.35); border: 2px solid rgba(200, 210, 230, 0.5);
-        color: #e8edf2; font-size: 13px; font-weight: bold; text-align: center;
-        line-height: 70px; user-select: none; -webkit-user-select: none; z-index: 10;
-    }
-    #firebtn { right: 20px; }
-    #jumpbtn { right: 108px; bottom: 110px; width: 60px; height: 60px; line-height: 56px; }
-    .sbtn {
-        position: fixed; top: 12px; right: 12px; width: 52px; height: 34px; border-radius: 8px;
-        background: rgba(120, 130, 150, 0.35); border: 2px solid rgba(200, 210, 230, 0.5);
-        color: #e8edf2; font-size: 12px; font-weight: bold; text-align: center;
-        line-height: 30px; user-select: none; -webkit-user-select: none; z-index: 10;
-    }
-    #joy {
-        position: fixed; bottom: 20px; left: 20px; width: 96px; height: 96px;
-        border-radius: 50%; background: rgba(120, 130, 150, 0.18);
-        border: 2px solid rgba(200, 210, 230, 0.35); z-index: 10;
-        pointer-events: none;
-    }
-    #knob {
-        position: absolute; left: 26px; top: 26px; width: 44px; height: 44px;
-        border-radius: 50%; background: rgba(200, 210, 230, 0.45);
-        pointer-events: none;
-    }
-    #status { padding: 8px 16px; font-size: 12px; color: #6c707a; border-top: 1px solid #23252c; }
+    /* the program-built UI layer: ui_button()/ui_joystick()/ui_html() elements
+       land here. The shell itself draws NO chrome — no header, no hint bar,
+       no default touch controls. Every control on screen exists because the
+       program created it (and ui_css() can restyle all of it). */
+    #vulcan-ui { position: fixed; inset: 0; pointer-events: none; z-index: 10; }
+    #vulcan-ui > * { pointer-events: auto; }
 </style>
 </head>
 <body>
-<header><span><b>__TITLE__</b> — built with <a href="https://github.com/HomekidChud/vulcan">Vulcan</a></span><span>WASD move · F fire · R restart · drag to look</span></header>
 <main><canvas id="vscreen" width="512" height="288"></canvas><div id="term"><pre id="screen"></pre></div></main>
-<div id="touchui"><div id="joy"><div id="knob"></div></div><div class="tbtn" id="firebtn">FIRE</div><div class="tbtn" id="jumpbtn">JUMP</div><div class="sbtn" id="rstbtn">RST</div></div>
-<div id="status">running…</div>
+<div id="vulcan-ui"></div>
 <script>
 "use strict";
 // ---- tiny ANSI terminal (80x24) ----
@@ -1148,7 +1174,6 @@ const WORKER_SRC = "__WORKER_JSON__";
 const worker = new Worker(URL.createObjectURL(new Blob([WORKER_SRC], {type: "application/javascript"})));
 // in-memory file storage (the app's file_write/file_read work per session)
 const savedFs = {};
-let customTouch = false; // set true when the game calls touch_custom()
 worker.onmessage = (e) => {
     const d = e.data || {};
     if (d.out !== undefined) { term.feed(d.out); term.render(); }
@@ -1175,15 +1200,102 @@ worker.onmessage = (e) => {
     }
     if (d.fswrite) { savedFs[d.fswrite.path] = d.fswrite.contents; }
     if (d.touchui === 0) {
-        // the game drew its own touch controls — hide the default UI and give
-        // it the whole screen (raw touch points are forwarded either way)
-        customTouch = true;
-        const tui = document.getElementById("touchui");
-        if (tui) tui.style.display = "none";
+        // legacy alias of ui_clear(): the game drew its own controls
+        uiLayer.innerHTML = "";
     }
-    if (d.exit !== undefined) { document.getElementById("status").textContent = "program exited with code " + d.exit; worker.terminate(); }
-    if (d.error) { document.getElementById("status").textContent = "error: " + d.error; }
+    if (d.ui) applyUI(d.ui);
+    if (d.exit !== undefined) {
+        term.feed("\\n[exited code " + d.exit + "]\\n"); term.render();
+        worker.terminate();
+    }
+    if (d.error) { term.feed("\\nerror: " + d.error + "\\n"); term.render(); }
 };
+// ---- program-built UI ----
+// The shell draws NO chrome of its own. This layer exists only for whatever
+// the program puts in it: ui_button(), ui_joystick(), or raw ui_html().
+// ui_css() can restyle anything — including the terminal and canvas below.
+const uiLayer = document.getElementById("vulcan-ui");
+function applyUI(u) {
+    if (u.clear) uiLayer.innerHTML = "";
+    if (u.html !== undefined) uiLayer.innerHTML = u.html;
+    if (u.css) {
+        const st = document.createElement("style");
+        st.textContent = u.css;
+        document.head.appendChild(st);
+    }
+    if (u.title) document.title = u.title;
+    if (u.button) makeButton(u.button);
+    if (u.joy) makeJoy(u.joy);
+}
+function uiPos(el, x, y, size) {
+    el.style.left = "calc(" + x + "% - " + (size / 2) + "px)";
+    el.style.top = "calc(" + y + "% - " + (size / 2) + "px)";
+}
+function makeButton(b) {
+    const el = document.createElement("div");
+    el.textContent = b.label;
+    el.style.cssText =
+        "position:fixed;z-index:10;border-radius:50%;touch-action:none;" +
+        "background:rgba(120,130,150,0.35);border:2px solid rgba(200,210,230,0.5);" +
+        "color:#e8edf2;font:700 13px ui-monospace,Menlo,Consolas,monospace;" +
+        "display:flex;align-items:center;justify-content:center;" +
+        "user-select:none;-webkit-user-select:none;";
+    el.style.width = b.size + "px"; el.style.height = b.size + "px";
+    uiPos(el, b.x, b.y, b.size);
+    const dn = (e) => { e.preventDefault(); worker.postMessage({ keys: [b.key] }); };
+    const up = (e) => { e.preventDefault(); worker.postMessage({ keysup: [b.key] }); };
+    el.addEventListener("touchstart", dn, { passive: false });
+    el.addEventListener("touchend", up, { passive: false });
+    el.addEventListener("touchcancel", () => worker.postMessage({ keysup: [b.key] }));
+    el.addEventListener("mousedown", dn);
+    el.addEventListener("mouseup", up);
+    uiLayer.appendChild(el);
+}
+function makeJoy(j) {
+    const base = document.createElement("div");
+    const knob = document.createElement("div");
+    base.style.cssText =
+        "position:fixed;z-index:10;border-radius:50%;touch-action:none;" +
+        "background:rgba(120,130,150,0.18);border:2px solid rgba(200,210,230,0.35);";
+    base.style.width = j.size + "px"; base.style.height = j.size + "px";
+    uiPos(base, j.x, j.y, j.size);
+    const ksz = Math.round(j.size * 0.46), off = Math.round((j.size - ksz) / 2);
+    knob.style.cssText =
+        "position:absolute;border-radius:50%;background:rgba(200,210,230,0.45);" +
+        "pointer-events:none;left:" + off + "px;top:" + off + "px;";
+    knob.style.width = ksz + "px"; knob.style.height = ksz + "px";
+    base.appendChild(knob);
+    const thr = j.size * 0.18, travel = (j.size - ksz) / 2;
+    let held = [];
+    function setKeys(dx, dy) {
+        const want = [];
+        if (dy < -thr) want.push(j.up);
+        if (dy > thr) want.push(j.down);
+        if (dx < -thr) want.push(j.left);
+        if (dx > thr) want.push(j.right);
+        for (const k of want) if (!held.includes(k)) worker.postMessage({ keys: [k] });
+        for (const k of held) if (!want.includes(k)) worker.postMessage({ keysup: [k] });
+        held = want;
+        knob.style.transform = "translate(" + Math.max(-travel, Math.min(travel, dx)) + "px," +
+            Math.max(-travel, Math.min(travel, dy)) + "px)";
+    }
+    let id = null, x0 = 0, y0 = 0;
+    base.addEventListener("touchstart", (e) => {
+        e.preventDefault();
+        const t = e.changedTouches[0];
+        id = t.identifier; x0 = t.clientX; y0 = t.clientY;
+    }, { passive: false });
+    base.addEventListener("touchmove", (e) => {
+        e.preventDefault();
+        for (const t of e.changedTouches) if (t.identifier === id) setKeys(t.clientX - x0, t.clientY - y0);
+    }, { passive: false });
+    const end = (e) => {
+        for (const t of e.changedTouches) if (t.identifier === id) { id = null; setKeys(0, 0); }
+    };
+    base.addEventListener("touchend", end);
+    base.addEventListener("touchcancel", end);
+    uiLayer.appendChild(base);
+}
 // key codes are normalized to LOWERCASE character codes so they match the
 // engine's KEY_* constants everywhere (web, IDE, native terminal).
 const KEYMAP = { Enter: 13, Backspace: 127, Escape: 27, Tab: 9, ArrowUp: 119, ArrowDown: 115, ArrowLeft: 97, ArrowRight: 100 };
@@ -1209,16 +1321,12 @@ document.addEventListener("mousemove", (e) => {
 });
 // touch input: raw touch points are ALWAYS forwarded to the game in logical
 // canvas coords via touch_count()/touch_x()/touch_y(). The logical size is
-// whatever the game set with canvas_resize() (default 256x144).
-// A game that wants full control calls touch_custom() — the default UI then
-// disappears and every touch belongs to the game (right-side drag = look).
-// Without touch_custom() the default joystick + FIRE/JUMP/RST UI stays on.
+// whatever the game set with canvas_resize() (default 256x144). Any drag also
+// streams mouse deltas (mouse_dx/mouse_dy) so it works as a look control.
+// On-screen controls are NOT provided by the shell — the program builds its
+// own with ui_joystick()/ui_button() (or ui_html()/ui_css(), no limits).
 let logW = 256, logH = 144;
 const isTouch = "ontouchstart" in window || navigator.maxTouchPoints > 0;
-const touchUI = document.getElementById("touchui");
-if (isTouch) touchUI.style.display = "block";
-const K = { w: 119, a: 97, s: 115, d: 100, f: 102, space: 32 }; // lowercase codes, same as engine KEY_*
-let joyId = null, joyX0 = 0, joyY0 = 0, joyKeys = [];
 let lookId = null, lookX = 0, lookY = 0;
 function sendTouches(e) {
     const r = vscreen.getBoundingClientRect();
@@ -1231,38 +1339,16 @@ function sendTouches(e) {
     }
     worker.postMessage({ touches: pts });
 }
-function joyUpdate(dx, dy) {
-    const want = [];
-    if (dy < -18) want.push(K.w);
-    if (dy > 18) want.push(K.s);
-    if (dx < -18) want.push(K.a);
-    if (dx > 18) want.push(K.d);
-    for (const k of want) if (!joyKeys.includes(k)) worker.postMessage({ keys: [k] });
-    for (const k of joyKeys) if (!want.includes(k)) worker.postMessage({ keysup: [k] });
-    joyKeys = want;
-    const knob = document.getElementById("knob");
-    knob.style.transform = "translate(" + Math.max(-34, Math.min(34, dx)) + "px," + Math.max(-34, Math.min(34, dy)) + "px)";
-}
 vscreen.addEventListener("touchstart", (e) => {
     e.preventDefault();
     for (const t of e.changedTouches) {
-        const r = vscreen.getBoundingClientRect();
-        if (!customTouch && t.clientX - r.left < r.width * 0.45 && joyId === null) {
-            joyId = t.identifier; joyX0 = t.clientX; joyY0 = t.clientY;
-            const joy = document.getElementById("joy");
-            joy.style.left = (t.clientX - 48) + "px";
-            joy.style.top = (t.clientY - 48) + "px";
-            joy.style.bottom = "auto";
-        } else if (lookId === null) {
-            lookId = t.identifier; lookX = t.clientX; lookY = t.clientY;
-        }
+        if (lookId === null) { lookId = t.identifier; lookX = t.clientX; lookY = t.clientY; }
     }
     sendTouches(e);
 }, { passive: false });
 vscreen.addEventListener("touchmove", (e) => {
     e.preventDefault();
     for (const t of e.changedTouches) {
-        if (t.identifier === joyId) joyUpdate(t.clientX - joyX0, t.clientY - joyY0);
         if (t.identifier === lookId) {
             worker.postMessage({ mouse: [t.clientX - lookX, t.clientY - lookY] });
             lookX = t.clientX; lookY = t.clientY;
@@ -1271,29 +1357,9 @@ vscreen.addEventListener("touchmove", (e) => {
     sendTouches(e);
 }, { passive: false });
 vscreen.addEventListener("touchend", (e) => {
-    for (const t of e.changedTouches) {
-        if (t.identifier === joyId) {
-            joyId = null; joyUpdate(0, 0);
-            const joy = document.getElementById("joy");
-            joy.style.left = "20px"; joy.style.top = "auto"; joy.style.bottom = "20px";
-        }
-        if (t.identifier === lookId) lookId = null;
-    }
+    for (const t of e.changedTouches) if (t.identifier === lookId) lookId = null;
     sendTouches(e);
 });
-function holdBtn(el, code) {
-    el.addEventListener("touchstart", (e) => { e.preventDefault(); worker.postMessage({ keys: [code] }); }, { passive: false });
-    el.addEventListener("touchend", (e) => { e.preventDefault(); worker.postMessage({ keysup: [code] }); }, { passive: false });
-    el.addEventListener("touchcancel", () => worker.postMessage({ keysup: [code] }));
-}
-holdBtn(document.getElementById("firebtn"), K.f);
-holdBtn(document.getElementById("jumpbtn"), K.space);
-// restart (R) — one-shot, safe to tap any time
-const rstBtn = document.getElementById("rstbtn");
-rstBtn.addEventListener("touchstart", (e) => {
-    e.preventDefault();
-    worker.postMessage({ keys: [114], keysup: [114] });
-}, { passive: false });
 worker.postMessage({ init: true, fs: savedFs, touch: isTouch });
 </script>
 </body>

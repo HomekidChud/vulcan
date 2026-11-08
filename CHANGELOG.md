@@ -3,6 +3,43 @@
 Per-version history, newest first. The version number lives in Cargo.toml
 (single source of truth, exposed by `vulcan --version`).
 
+## 1.17.0 — zero hardcoded UI: the program owns every pixel
+
+**The shells stop deciding what your app looks like.** The web/APK shell
+previously shipped a header bar ("name — built with Vulcan" + "WASD move ·
+F fire · R restart" hints), a default joystick + FIRE/JUMP/RST overlay, and
+a status bar. All of it is gone. The default shell now renders exactly two
+things: the program's terminal output and its canvas. Everything else on
+screen is there because the program put it there.
+
+### New builtins (all backends; no-ops where there is no shell)
+
+- `ui_button(label, key, x, y, size)` — hold-to-press button at x,y
+  (percent of viewport), size in px; sends `key` down/up like a keyboard.
+- `ui_joystick(x, y, size, up, down, left, right)` — virtual stick; its
+  edges press the four key codes.
+- `ui_html(html)` — inject arbitrary HTML into the UI layer. No limits.
+- `ui_css(css)` — inject a stylesheet; restyle the entire shell.
+- `ui_title(text)` — set the app/tab title.
+- `ui_clear()` — remove every on-screen element the program built.
+- `touch_custom()` still works — it now just clears the UI layer.
+
+### Custom shells and APK overrides
+
+- `shell.html` (or `<name>.shell.html`) next to the `.vulcan` file IS the
+  app page for `vulcan package --platform web` and `vulcan apk`: the
+  toolchain injects the compiled program at `__WORKER_JSON__` and
+  substitutes `__TITLE__` if present.
+- `vulcan apk` also picks up the program's own `AndroidManifest.xml`
+  (orientation, permissions, name — `__PKG__`/`__NAME__` substituted) and
+  `icon.png` (launcher icon).
+- Exit/errors now print into the terminal instead of a status bar.
+
+### Examples
+
+- `examples/cubefield.vulcan` builds its own mobile controls
+  (`ui_joystick` + `ui_button`) instead of relying on the old defaults.
+
 ## 1.16.1 — Android APKs get real networking
 
 **The APK pipeline learns TCP.** `vulcan apk` now ships apps whose

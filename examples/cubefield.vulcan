@@ -37,6 +37,14 @@ fn main() -> void {
     term_raw()
     defer { term_normal() }
 
+    // mobile: the shell ships NO controls — the game builds its own.
+    // joystick maps to WASD, the button is SPACE (restart), positions are
+    // percentages of the viewport
+    if is_touch() {
+        ui_joystick(16.0, 76.0, 96.0, 119, 115, 97, 100)
+        ui_button("GO", 32, 84.0, 82.0, 74.0)
+    }
+
     // native terminal pixels: 1 canvas pixel = 1 terminal half-block pixel
     let cols = screen_width()
     let rows = screen_height()
@@ -92,8 +100,8 @@ fn main() -> void {
             cam.yaw = cam.yaw + mdx * 0.006
             cam.pitch = cam.pitch - mdy * 0.006
         }
-        // touch steering (mobile bundles): left half joystick already maps
-        // to WASD; any touch also looks toward the finger
+        // touch steering (mobile bundles): the ui_joystick() we built sends
+        // WASD; any touch on the canvas also looks toward the finger
         if is_touch() && touch_count() > 0 {
             let tx = touch_x(0)
             if tx > canvas_width() as f64 / 2.0 {
