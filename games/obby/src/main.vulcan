@@ -1,0 +1,723 @@
+// Vulcan Obby — a Roblox-style obstacle course
+import "util.vulcan"
+import "shaders.vulcan"
+
+// Vulcan Obby — a Roblox-style obstacle course written 100% in Vulcan (web3d platform).
+//
+// Classic obby ingredients: a blocky avatar in third person, floating platforms, lava,
+// moving platforms you ride, a spinning kill bar, checkpoints that save your progress,
+// coins, a timer with a saved best time, and touch controls for phones.
+//
+// Controls: WASD move, Space jump (hold to hop), Shift sprint, R respawn, Esc menu.
+// On touch: on-screen arrows + JUMP button.
+
+// ---------------- palette (16x16 flat colour atlas, same scheme as the Arcade) ----------------
+const TUV = 0.0615
+
+fn pal() -> [i64] {
+    return [0xf4f4f4, 0xe84a4a, 0xff9a2e, 0xffd93d, 0x48c95a, 0x32d2e6, 0x3a6df0, 0x9b5de5,
+            0xff6fb5, 0x3a3f4b, 0x9aa3b2, 0x8a5a36, 0xe8d49a, 0x1f7a3a, 0x16224a, 0x0c0f18,
+            0x6ee7a0, 0xa8e6ff, 0xffe9a8, 0xc9c2ff]
+}
+const T_WHITE = 0
+const T_RED = 1
+const T_ORANGE = 2
+const T_YELLOW = 3
+const T_GREEN = 4
+const T_CYAN = 5
+const T_BLUE = 6
+const T_PURPLE = 7
+const T_PINK = 8
+const T_DARK = 9
+const T_GREY = 10
+const T_BROWN = 11
+const T_SAND = 12
+const T_FOREST = 13
+const T_NAVY = 14
+const T_BLACK = 15
+const T_MINT = 16
+const T_ICE = 17
+const T_CREAM = 18
+const T_LILAC = 19
+
+fn col_r(c: i64) -> i64 { return (c / 65536) % 256 }
+fn col_g(c: i64) -> i64 { return (c / 256) % 256 }
+fn col_b(c: i64) -> i64 { return c % 256 }
+
+fn make_atlas() -> [i64] {
+    let a: [i64] = []
+    for i in 0 .. 262144 { a.push(255) }
+    let p = pal()
+    for t in 0 .. p.len() {
+        let tx = t % 16
+        let ty = t / 16
+        for y in 0 .. 16 {
+            for x in 0 .. 16 {
+                let idx = ((ty * 16 + y) * 256 + tx * 16 + x) * 4
+                a[idx] = col_r(p[t])
+                a[idx + 1] = col_g(p[t])
+                a[idx + 2] = col_b(p[t])
+                a[idx + 3] = 255
+            }
+        }
+    }
+    return a
+}
+
+fn tu(t: i64) -> f64 { return (t % 16) / 16.0 + 0.0008 }
+fn tv(t: i64) -> f64 { return (t / 16) / 16.0 + 0.0008 }
+
+fn pv(v: [f64], x: f64, y: f64, z: f64, nx: f64, ny: f64, nz: f64, u: f64, t: f64, ao: f64, mat: f64) {
+    v.push(x)
+    v.push(y)
+    v.push(z)
+    v.push(nx)
+    v.push(ny)
+    v.push(nz)
+    v.push(u)
+    v.push(t)
+    v.push(1.0)
+    v.push(0.0)
+    v.push(ao)
+    v.push(mat)
+}
+
+// axis aligned box, centre + full size, one tile; mat 0 solid, 4 glow
+fn add_box(v: [f64], cx: f64, cy: f64, cz: f64, w: f64, h: f64, d: f64, tile: i64, mat: f64) {
+    let x0 = cx - w / 2.0
+    let x1 = cx + w / 2.0
+    let y0 = cy - h / 2.0
+    let y1 = cy + h / 2.0
+    let z0 = cz - d / 2.0
+    let z1 = cz + d / 2.0
+    let xs = [x0, x1, x1, x0, x0, x1, x1, x0]
+    let ys = [y0, y0, y1, y1, y0, y0, y1, y1]
+    let zs = [z0, z0, z0, z0, z1, z1, z1, z1]
+    let faces = [1, 2, 6, 5,  4, 7, 3, 0,  3, 7, 6, 2,  0, 1, 5, 4,  5, 6, 7, 4,  0, 3, 2, 1]
+    let nrm = [1.0, 0.0, 0.0,  -1.0, 0.0, 0.0,  0.0, 1.0, 0.0,  0.0, -1.0, 0.0,  0.0, 0.0, 1.0,  0.0, 0.0, -1.0]
+    let shade = [0.8, 0.8, 1.0, 0.5, 0.88, 0.88]
+    let u = tu(tile)
+    let t = tv(tile)
+    for f in 0 .. 6 {
+        let a = faces[f * 4]
+        let b = faces[f * 4 + 1]
+        let c = faces[f * 4 + 2]
+        let e = faces[f * 4 + 3]
+        let ao = shade[f]
+        let nx = nrm[f * 3]
+        let ny = nrm[f * 3 + 1]
+        let nz = nrm[f * 3 + 2]
+        pv(v, xs[a], ys[a], zs[a], nx, ny, nz, u, t + TUV, ao, mat)
+        pv(v, xs[b], ys[b], zs[b], nx, ny, nz, u + TUV, t + TUV, ao, mat)
+        pv(v, xs[c], ys[c], zs[c], nx, ny, nz, u + TUV, t, ao, mat)
+        pv(v, xs[a], ys[a], zs[a], nx, ny, nz, u, t + TUV, ao, mat)
+        pv(v, xs[c], ys[c], zs[c], nx, ny, nz, u + TUV, t, ao, mat)
+        pv(v, xs[e], ys[e], zs[e], nx, ny, nz, u, t, ao, mat)
+    }
+}
+
+// box mesh whose centre is the world position we will pass to gfx_mesh_at
+fn mesh_box(id: i64, cx: f64, cy: f64, cz: f64, w: f64, h: f64, d: f64, tile: i64, mat: f64) {
+    let v: [f64] = []
+    add_box(v, cx, cy, cz, w, h, d, tile, mat)
+    gfx_mesh_set(id, 0, v)
+}
+
+fn hide(id: i64) { gfx_mesh_at(id, 0.0, -900.0, 0.0) }
+
+// ---------------- HUD helpers ----------------
+fn sw_() -> f64 { return gfx_size_w() }
+fn sh_() -> f64 { return gfx_size_h() }
+
+fn ctext(cx: f64, y: f64, size: f64, r: f64, gg: f64, b: f64, a: f64, s: string) {
+    hud_text(cx - hud_text_w(size, s) / 2.0, y, size, r, gg, b, a, s)
+}
+
+fn hit_rect(x: f64, y: f64, w: f64, h: f64) -> bool {
+    let mx = gfx_mouse_x()
+    let my = gfx_mouse_y()
+    return mx >= x && mx <= x + w && my >= y && my <= y + h
+}
+
+fn button(x: f64, y: f64, w: f64, h: f64, label: string) -> bool {
+    let over = hit_rect(x, y, w, h)
+    let a = 0.62
+    if over { a = 0.88 }
+    hud_rect(x, y, w, h, 0.05, 0.06, 0.1, a)
+    let bc = 0.28
+    if over { bc = 0.75 }
+    hud_rect(x, y, w, 2.0, bc, bc * 1.1, bc * 1.5, 1.0)
+    hud_rect(x, y + h - 2.0, w, 2.0, bc * 0.5, bc * 0.55, bc * 0.75, 1.0)
+    ctext(x + w / 2.0, y + h / 2.0 - 7.0, 14.0, 0.95, 0.97, 1.0, 1.0, label)
+    return over && gfx_click(0) > 0
+}
+
+fn clampf(x: f64, lo: f64, hi: f64) -> f64 {
+    if x < lo { return lo }
+    if x > hi { return hi }
+    return x
+}
+fn floori(x: f64) -> i64 {
+    let f = floor(x)
+    return f as i64
+}
+fn lerp(a: f64, b: f64, t: f64) -> f64 { return a + (b - a) * t }
+
+// format seconds as M:SS.d
+fn fmt_time(t: f64) -> string {
+    let total = floori(t * 10.0)
+    let deci = total % 10
+    let secs = total / 10
+    let m = secs / 60
+    let s = secs % 60
+    let ss = f"{s}"
+    if s < 10 { ss = "0" + f"{s}" }
+    return f"{m}" + ":" + ss + "." + f"{deci}"
+}
+
+// persistent best time (milliseconds, 0 = none yet)
+fn best_get() -> i64 {
+    let s = file_read("user/obby_best")
+    if s.len() == 0 { return 0 }
+    return to_int(s)
+}
+fn best_set(ms: i64) {
+    if best_get() == 0 || ms < best_get() { host_store("user/obby_best", f"{ms}") }
+}
+
+// ---------------- course data ----------------
+// kinds: 0 solid, 1 lava, 2 checkpoint, 3 finish, 4 mover
+struct Course {
+    cx: [f64], cy: [f64], cz: [f64],     // base centre
+    lx: [f64], ly: [f64], lz: [f64],     // live centre (movers)
+    hw: [f64], hh: [f64], hd: [f64],     // half extents
+    kind: [i64], mid: [i64],
+    m_axis: [i64], m_amp: [f64], m_spd: [f64], m_ph: [f64],   // mover params
+    n: i64
+}
+
+struct Spinner {
+    cx: f64, cy: f64, cz: f64, half: f64, spd: f64, ph: f64, mid: i64, top: f64, bot: f64
+}
+
+struct Coin {
+    x: f64, y: f64, z: f64, mid: i64, got: bool
+}
+
+struct Player {
+    x: f64, y: f64, z: f64,          // y = feet
+    vx: f64, vy: f64, vz: f64,
+    yaw: f64,
+    grounded: bool, ground: i64,
+    spx: f64, spy: f64, spz: f64,    // spawn point
+    cp: i64, deaths: i64, coins: i64,
+    flash: f64, t: f64, win_t: f64
+}
+
+const PHW = 0.38   // player half width (x)
+const PHD = 0.30   // player half depth (z)
+const PHH = 1.75   // player height
+const GRAV = 32.0
+const JUMP_V = 11.6
+const WALK = 6.2
+const SPRINT = 9.4
+
+fn course_new() -> Course {
+    let c = Course {
+        cx: [], cy: [], cz: [], lx: [], ly: [], lz: [],
+        hw: [], hh: [], hd: [], kind: [], mid: [],
+        m_axis: [], m_amp: [], m_spd: [], m_ph: [],
+        n: 0
+    }
+    return c
+}
+
+// add a static or moving collider + its mesh
+fn c_add(c: Course, id: i64, cx: f64, cy: f64, cz: f64, w: f64, h: f64, d: f64,
+         tile: i64, kind: i64, axis: i64, amp: f64, spd: f64, ph: f64) {
+    c.cx.push(cx)
+    c.cy.push(cy)
+    c.cz.push(cz)
+    c.lx.push(cx)
+    c.ly.push(cy)
+    c.lz.push(cz)
+    c.hw.push(w / 2.0)
+    c.hh.push(h / 2.0)
+    c.hd.push(d / 2.0)
+    c.kind.push(kind)
+    c.mid.push(id)
+    c.m_axis.push(axis)
+    c.m_amp.push(amp)
+    c.m_spd.push(spd)
+    c.m_ph.push(ph)
+    c.n += 1
+    let mat = 0.0
+    if kind == 3 { mat = 4.0 }
+    if kind == 2 { mat = 4.0 }
+    mesh_box(id, 0.0, 0.0, 0.0, w, h, d, tile, mat)
+    gfx_mesh_at(id, cx, cy, cz)
+}
+
+// convenience wrappers
+fn solid(c: Course, id: i64, cx: f64, top: f64, cz: f64, w: f64, h: f64, d: f64, tile: i64) {
+    c_add(c, id, cx, top - h / 2.0, cz, w, h, d, tile, 0, -1, 0.0, 0.0, 0.0)
+}
+fn lava(c: Course, id: i64, cx: f64, top: f64, cz: f64, w: f64, d: f64) {
+    c_add(c, id, cx, top - 0.5, cz, w, 1.0, d, T_RED, 1, -1, 0.0, 0.0, 0.0)
+}
+fn checkp(c: Course, id: i64, cx: f64, top: f64, cz: f64, num: i64) {
+    c_add(c, id, cx, top - 0.5, cz, 3.2, 1.0, 3.2, T_MINT, 2, -1, 0.0, 0.0, 0.0)
+    // beacon: floating glowing cube with the stage number colour
+    mesh_box(id + 40, 0.0, 0.0, 0.0, 0.8, 0.8, 0.8, T_WHITE, 4.0)
+}
+fn finish_pad(c: Course, id: i64, cx: f64, top: f64, cz: f64) {
+    c_add(c, id, cx, top - 0.5, cz, 5.0, 1.0, 5.0, T_YELLOW, 3, -1, 0.0, 0.0, 0.0)
+}
+fn mover(c: Course, id: i64, cx: f64, top: f64, cz: f64, w: f64, d: f64, axis: i64, amp: f64, spd: f64, ph: f64) {
+    c_add(c, id, cx, top - 0.3, cz, w, 0.6, d, T_CYAN, 4, axis, amp, spd, ph)
+}
+
+// ---------------- build the course ----------------
+fn build_course(c: Course) {
+    // stage 0: spawn platform
+    solid(c, 110, 0.0, 1.0, 0.0, 9.0, 1.0, 9.0, T_GREY)
+    checkp(c, 120, 0.0, 1.0, 2.6, 0)
+    // simple gap jumps
+    solid(c, 111, 0.0, 1.0, -7.5, 3.2, 1.0, 3.2, T_SAND)
+    solid(c, 112, 1.6, 1.3, -13.5, 3.0, 1.0, 3.0, T_SAND)
+    solid(c, 113, -1.6, 1.7, -19.5, 3.0, 1.0, 3.0, T_SAND)
+    // checkpoint 1
+    solid(c, 114, 0.0, 1.0, -26.0, 5.0, 1.0, 5.0, T_GREY)
+    checkp(c, 121, 0.0, 1.0, -23.8, 1)
+    // lava hop: safe tiles over a lava pool
+    lava(c, 130, 0.0, 0.0, -35.0, 12.0, 16.0)
+    solid(c, 115, -2.2, 0.8, -30.0, 2.2, 0.8, 2.2, T_SAND)
+    solid(c, 116, 0.4, 0.8, -34.0, 2.2, 0.8, 2.2, T_SAND)
+    solid(c, 117, -1.2, 0.8, -38.0, 2.2, 0.8, 2.2, T_SAND)
+    solid(c, 118, 1.4, 0.8, -42.0, 2.2, 0.8, 2.2, T_SAND)
+    // checkpoint 2
+    solid(c, 119, 0.0, 1.0, -47.5, 5.0, 1.0, 5.0, T_GREY)
+    checkp(c, 122, 0.0, 1.0, -45.3, 2)
+    // moving platform ride across the gap (z axis)
+    mover(c, 200, 0.0, 1.0, -54.5, 3.0, 3.0, 2, 4.5, 0.9, 0.0)
+    solid(c, 131, 0.0, 1.0, -62.5, 4.5, 1.0, 4.5, T_GREY)
+    checkp(c, 123, 0.0, 1.0, -60.3, 3)
+    // spinner arena: big pad + rotating kill bar
+    solid(c, 132, 0.0, 1.0, -71.0, 8.0, 1.0, 8.0, T_GREY)
+    // elevator up (y axis)
+    mover(c, 201, 0.0, 1.0, -80.5, 3.2, 3.2, 1, 6.6, 1.0, 1.6)
+    // high ledge
+    solid(c, 133, 0.0, 7.5, -87.0, 5.0, 1.0, 5.0, T_GREY)
+    checkp(c, 124, 0.0, 7.5, -84.8, 4)
+    // narrow beams
+    solid(c, 134, 0.0, 7.5, -95.5, 1.1, 1.0, 8.0, T_SAND)
+    solid(c, 135, 1.7, 7.5, -103.5, 1.1, 1.0, 8.0, T_SAND)
+    solid(c, 136, 0.0, 7.5, -111.5, 1.1, 1.0, 8.0, T_SAND)
+    // checkpoint 5
+    solid(c, 137, 0.0, 7.5, -118.0, 5.0, 1.0, 5.0, T_GREY)
+    checkp(c, 125, 0.0, 7.5, -115.8, 5)
+    // rising parkour blocks
+    solid(c, 138, -1.8, 8.7, -124.0, 2.0, 1.0, 2.0, T_SAND)
+    solid(c, 139, 1.0, 9.9, -128.0, 2.0, 1.0, 2.0, T_SAND)
+    solid(c, 140, -1.0, 11.1, -132.0, 2.0, 1.0, 2.0, T_SAND)
+    // finish
+    finish_pad(c, 141, 0.5, 12.0, -138.5)
+}
+
+fn build_spinners(s: [Spinner]) {
+    s.push(Spinner { cx: 0.0, cy: 2.0, cz: -71.0, half: 3.4, spd: 2.1, ph: 0.0, mid: 300, top: 2.25, bot: 1.75 })
+    let v: [f64] = []
+    add_box(v, 0.0, 0.0, 0.0, 6.8, 0.5, 0.42, T_RED, 4.0)
+    add_box(v, 0.0, 0.0, 0.0, 0.9, 1.1, 0.9, T_DARK, 0.0)
+    gfx_mesh_set(300, 0, v)
+    gfx_mesh_at(300, 0.0, 2.0, -71.0)
+}
+
+fn build_coins(cs: [Coin]) {
+    let spots = [
+        [0.0, 2.4, -7.5], [1.6, 2.7, -13.5], [0.4, 2.2, -34.0], [1.4, 2.2, -42.0],
+        [0.0, 2.4, -54.5], [0.0, 2.4, -71.0], [0.0, 8.9, -95.5], [1.7, 8.9, -103.5],
+        [-1.0, 12.5, -132.0]
+    ]
+    for i in 0 .. spots.len() {
+        let id = 600 + i
+        mesh_box(id, 0.0, 0.0, 0.0, 0.55, 0.55, 0.55, T_YELLOW, 4.0)
+        gfx_mesh_at(id, spots[i][0], spots[i][1], spots[i][2])
+        cs.push(Coin { x: spots[i][0], y: spots[i][1], z: spots[i][2], mid: id, got: false })
+    }
+}
+
+// Roblox-style blocky avatar (classic noob colours), local origin at the feet
+fn build_avatar(id: i64) {
+    let v: [f64] = []
+    // legs (green)
+    add_box(v, -0.21, 0.4, 0.0, 0.34, 0.8, 0.36, T_GREEN, 0.0)
+    add_box(v, 0.21, 0.4, 0.0, 0.34, 0.8, 0.36, T_GREEN, 0.0)
+    // torso (blue)
+    add_box(v, 0.0, 1.15, 0.0, 0.9, 0.7, 0.42, T_BLUE, 0.0)
+    // arms (yellow), angled forward slightly is not possible per-box; keep straight
+    add_box(v, -0.63, 1.13, 0.0, 0.28, 0.66, 0.34, T_YELLOW, 0.0)
+    add_box(v, 0.63, 1.13, 0.0, 0.28, 0.66, 0.34, T_YELLOW, 0.0)
+    // head (yellow)
+    add_box(v, 0.0, 1.82, 0.0, 0.6, 0.55, 0.55, T_YELLOW, 0.0)
+    // face (black eyes + smile) on the -z side
+    add_box(v, -0.14, 1.88, -0.29, 0.11, 0.13, 0.03, T_BLACK, 0.0)
+    add_box(v, 0.14, 1.88, -0.29, 0.11, 0.13, 0.03, T_BLACK, 0.0)
+    add_box(v, 0.0, 1.7, -0.29, 0.26, 0.05, 0.03, T_BLACK, 0.0)
+    gfx_mesh_set(id, 0, v)
+}
+
+// ---------------- theme ----------------
+fn theme_sky() {
+    gfx_uniform("uSunDir", [0.45, 0.8, 0.35])
+    gfx_uniform("uSunColor", [2.3, 2.15, 1.9])
+    gfx_uniform("uSkyTop", [0.25, 0.5, 0.95])
+    gfx_uniform("uSkyHorizon", [0.75, 0.88, 1.0])
+    gfx_uniform("uAmbient", [0.62, 0.72, 0.92])
+    gfx_uniform("uFog", [0.011])
+    gfx_uniform("uDay", [1.0])
+}
+
+// ---------------- player physics ----------------
+fn overlaps(c: Course, i: i64, px: f64, py: f64, pz: f64) -> bool {
+    let ax0 = px - PHW
+    let ax1 = px + PHW
+    let ay0 = py
+    let ay1 = py + PHH
+    let az0 = pz - PHD
+    let az1 = pz + PHD
+    return ax1 > c.lx[i] - c.hw[i] && ax0 < c.lx[i] + c.hw[i] &&
+           ay1 > c.ly[i] - c.hh[i] && ay0 < c.ly[i] + c.hh[i] &&
+           az1 > c.lz[i] - c.hd[i] && az0 < c.lz[i] + c.hd[i]
+}
+
+fn kill_player(p: Player) {
+    p.deaths += 1
+    p.flash = 1.0
+    snd(5, 0.7)
+    respawn(p)
+}
+
+fn respawn(p: Player) {
+    p.x = p.spx
+    p.y = p.spy
+    p.z = p.spz
+    p.vx = 0.0
+    p.vy = 0.0
+    p.vz = 0.0
+    p.grounded = true
+    p.ground = -1
+}
+
+// ---------------- frame: play mode. returns 0 play, 1 menu, 2 win screen entry ----------------
+fn play_frame(c: Course, s: [Spinner], cs: [Coin], p: Player, dt: f64) -> i64 {
+    p.t += dt
+    if gfx_key_pressed(27) { return 1 }
+    if gfx_key_pressed(82) { kill_player(p) }
+
+    // ---- movers: compute live positions and deltas
+    for i in 0 .. c.n {
+        if c.kind[i] != 4 { continue }
+        let ox = c.lx[i]
+        let oy = c.ly[i]
+        let oz = c.lz[i]
+        let off = c.m_amp[i] * sin(p.t * c.m_spd[i] + c.m_ph[i])
+        if c.m_axis[i] == 0 { c.lx[i] = c.cx[i] + off }
+        if c.m_axis[i] == 1 { c.ly[i] = c.cy[i] + off }
+        if c.m_axis[i] == 2 { c.lz[i] = c.cz[i] + off }
+        gfx_mesh_at(c.mid[i], c.lx[i], c.ly[i], c.lz[i])
+        // carry the player if standing on this mover
+        if p.grounded && p.ground == i {
+            p.x += c.lx[i] - ox
+            p.y += c.ly[i] - oy
+            p.z += c.lz[i] - oz
+        }
+    }
+
+    // ---- input
+    let fwd = 0.0
+    let side = 0.0
+    let touch = gfx_touch()
+    if gfx_key(87) { fwd += 1.0 }
+    if gfx_key(83) { fwd -= 1.0 }
+    if gfx_key(68) { side += 1.0 }
+    if gfx_key(65) { side -= 1.0 }
+    if touch {
+        // on-screen controls (drawn later); held test via mouse/touch position
+        let W = sw_()
+        let H = sh_()
+        if hit_rect(14.0, H - 74.0, 54.0, 54.0) && gfx_mouse_held(0) { side -= 1.0 }
+        if hit_rect(78.0, H - 74.0, 54.0, 54.0) && gfx_mouse_held(0) { side += 1.0 }
+        if hit_rect(W - 86.0, H - 74.0, 70.0, 54.0) && gfx_mouse_held(0) { fwd += 1.0 }
+    }
+    let sprint = gfx_key(16) || gfx_key(17)
+    let speed = WALK
+    if sprint { speed = SPRINT }
+    // normalise diagonals
+    let mag = sqrt(fwd * fwd + side * side)
+    let mvx = 0.0
+    let mvz = 0.0
+    if mag > 0.01 {
+        mvx = side / mag * speed
+        mvz = -fwd / mag * speed
+        p.yaw = atan2(mvx, -mvz)
+    }
+
+    // jump: hold space to hop like Roblox
+    if p.grounded && gfx_key(32) {
+        p.vy = JUMP_V
+        p.grounded = false
+        p.ground = -1
+        snd(7, 0.25)
+    }
+
+    // ---- horizontal move + resolve (x then z)
+    p.x += mvx * dt
+    for i in 0 .. c.n {
+        if c.kind[i] == 1 { continue }
+        if overlaps(c, i, p.x, p.y, p.z) {
+            if p.x < c.lx[i] { p.x = c.lx[i] - c.hw[i] - PHW }
+            else { p.x = c.lx[i] + c.hw[i] + PHW }
+        }
+    }
+    p.z += mvz * dt
+    for i in 0 .. c.n {
+        if c.kind[i] == 1 { continue }
+        if overlaps(c, i, p.x, p.y, p.z) {
+            if p.z < c.lz[i] { p.z = c.lz[i] - c.hd[i] - PHD }
+            else { p.z = c.lz[i] + c.hd[i] + PHD }
+        }
+    }
+
+    // ---- vertical
+    p.vy -= GRAV * dt
+    let prev_y = p.y
+    p.y += p.vy * dt
+    p.grounded = false
+    p.ground = -1
+    for i in 0 .. c.n {
+        if c.kind[i] == 1 { continue }
+        if overlaps(c, i, p.x, p.y, p.z) {
+            if p.vy <= 0.0 && prev_y >= c.ly[i] + c.hh[i] - 0.25 {
+                // landed on top
+                p.y = c.ly[i] + c.hh[i]
+                p.vy = 0.0
+                p.grounded = true
+                p.ground = i
+                       if c.kind[i] == 2 {
+                    // checkpoint reached
+                    let num = c.mid[i] - 120
+                    if num > p.cp {
+                        p.cp = num
+                        p.spx = c.lx[i]
+                        p.spy = c.ly[i] + c.hh[i] + 0.05
+                        p.spz = c.lz[i]
+                        snd(4, 0.5)
+                    }
+                }
+                if c.kind[i] == 3 { return 2 }
+            } else if p.vy > 0.0 {
+                // bumped head
+                p.y = c.ly[i] - c.hh[i] - PHH
+                p.vy = 0.0
+            }
+        }
+    }
+
+    // ---- hazards: lava overlap, spinner bar, falling
+    for i in 0 .. c.n {
+        if c.kind[i] == 1 && overlaps(c, i, p.x, p.y, p.z) { kill_player(p) }
+    }
+    for k in 0 .. s.len() {
+        let dx = p.x - s[k].cx
+        let dz = p.z - s[k].cz
+        let dist = sqrt(dx * dx + dz * dz)
+        if dist < s[k].half + 0.4 && p.y < s[k].top && p.y + PHH > s[k].bot {
+            // rotating bar: kill only when the bar actually points at you
+            let ang = p.t * s[k].spd + s[k].ph
+            let bx = cos(ang)
+            let bz = sin(ang)
+            let along = dx * bx + dz * bz
+            let perp = -dx * bz + dz * bx
+            if abs(along) < s[k].half + 0.35 && abs(perp) < 0.75 { kill_player(p) }
+        }
+    }
+    if p.y < -30.0 { kill_player(p) }
+
+    // ---- coins
+    for i in 0 .. cs.len() {
+        if cs[i].got { continue }
+        if abs(cs[i].x - p.x) < 0.8 && abs(cs[i].z - p.z) < 0.8 && abs(cs[i].y - (p.y + 0.9)) < 1.4 {
+            cs[i].got = true
+            hide(cs[i].mid)
+            p.coins += 1
+            snd(6, 0.45)
+        }
+    }
+
+    // ---- place avatar + camera
+    plc_avatar(p)
+    let camx = lerp(gfx_mouse_x() * 0.0 + p.x * 0.6, p.x, 1.0)
+    gfx_camera(p.x * 0.6, p.y + 4.4, p.z + 8.2, 0.0, -0.26, 74.0)
+
+    // ---- HUD
+    draw_play_hud(p)
+
+    // death flash
+    if p.flash > 0.0 {
+        p.flash -= dt * 2.2
+        let W = sw_()
+        let H = sh_()
+        hud_rect(0.0, 0.0, W, H, 0.8, 0.05, 0.05, clampf(p.flash, 0.0, 0.6))
+    }
+    return 0
+}
+
+fn plc_avatar(p: Player) {
+    gfx_mesh_at(100, p.x, p.y, p.z)
+    gfx_mesh_yaw(100, p.yaw)
+}
+
+fn draw_play_hud(p: Player) {
+    let W = sw_()
+    let H = sh_()
+    hud_rect(0.0, 0.0, W, 30.0, 0.0, 0.0, 0.05, 0.45)
+    hud_text(10.0, 8.0, 12.0, 1.0, 1.0, 1.0, 1.0, "VULCAN OBBY")
+    ctext(W / 2.0, 8.0, 12.0, 1.0, 0.9, 0.4, 1.0, fmt_time(p.t) + "   stage " + f"{p.cp}" + "/5   coins " + f"{p.coins}" + "   deaths " + f"{p.deaths}")
+    // touch controls
+    if gfx_touch() {
+        let bs = 0.35
+        touch_button(14.0, H - 74.0, 54.0, 54.0, "<")
+        touch_button(78.0, H - 74.0, 54.0, 54.0, ">")
+        touch_button(W - 86.0, H - 74.0, 70.0, 54.0, "JUMP")
+    }
+    if p.t < 4.0 {
+        let a = clampf(4.0 - p.t, 0.0, 1.0)
+        ctext(W / 2.0, 46.0, 13.0, 1.0, 1.0, 1.0, a, "WASD move, Space jump, Shift sprint, R respawn")
+    }
+}
+
+fn touch_button(x: f64, y: f64, w: f64, h: f64, label: string) {
+    let held = hit_rect(x, y, w, h) && gfx_mouse_held(0)
+    let a = 0.4
+    if held { a = 0.85 }
+    hud_rect(x, y, w, h, 0.05, 0.06, 0.1, a)
+    ctext(x + w / 2.0, y + h / 2.0 - 7.0, 13.0, 0.95, 0.97, 1.0, 1.0, label)
+}
+
+// ---------------- win screen ----------------
+fn win_frame(p: Player, dt: f64) -> i64 {
+    let W = sw_()
+    let H = sh_()
+    // keep the world rendering behind
+    plc_avatar(p)
+    gfx_camera(p.x * 0.6, p.y + 4.4, p.z + 8.2, 0.0, -0.26, 74.0)
+    hud_rect(0.0, 0.0, W, H, 0.0, 0.0, 0.05, 0.55)
+    ctext(W / 2.0, H / 2.0 - 108.0, 28.0, 1.0, 0.85, 0.3, 1.0, "YOU BEAT THE OBBY")
+    ctext(W / 2.0, H / 2.0 - 64.0, 15.0, 0.95, 0.97, 1.0, 1.0, "time " + fmt_time(p.win_t) + "   deaths " + f"{p.deaths}" + "   coins " + f"{p.coins}")
+    let best = best_get()
+    let note = "no best time yet"
+    if best > 0 { note = "best " + fmt_time(best / 1000.0) }
+    ctext(W / 2.0, H / 2.0 - 40.0, 12.0, 0.7, 0.85, 1.0, 1.0, note)
+    let r = 0
+    if button(W / 2.0 - 150.0, H / 2.0 + 4.0, 140.0, 44.0, "Again") { r = 1 }
+    if button(W / 2.0 + 10.0, H / 2.0 + 4.0, 140.0, 44.0, "Menu") { r = 2 }
+    if gfx_key_pressed(13) { r = 1 }
+    if gfx_key_pressed(27) { r = 2 }
+    return r
+}
+
+// ---------------- menu ----------------
+fn menu_frame(t: f64) -> i64 {
+    let W = sw_()
+    let H = sh_()
+    // avatar on a pedestal, slowly turning
+    gfx_mesh_at(100, 0.0, 1.05, -3.0)
+    gfx_mesh_yaw(100, t * 0.7)
+    gfx_camera(0.0, 3.1, 4.6, 0.0, -0.14, 70.0)
+    ctext(W / 2.0, 30.0, 30.0, 1.0, 0.85, 0.3, 1.0, "VULCAN OBBY")
+    ctext(W / 2.0, 68.0, 12.0, 0.9, 0.95, 1.0, 1.0, "a Roblox-style obstacle course, written 100% in Vulcan")
+    let bw = min(W * 0.5, 240.0)
+    let pick = 0
+    if button(W / 2.0 - bw / 2.0, H * 0.42, bw, 48.0, "PLAY") { pick = 1 }
+    ctext(W / 2.0, H * 0.42 + 64.0, 11.0, 0.75, 0.85, 1.0, 1.0, "WASD move   Space jump   Shift sprint   R respawn")
+    ctext(W / 2.0, H * 0.42 + 84.0, 11.0, 0.75, 0.85, 1.0, 1.0, "touch devices get on-screen buttons")
+    let best = best_get()
+    if best > 0 { ctext(W / 2.0, H * 0.42 + 110.0, 11.0, 1.0, 0.9, 0.4, 1.0, "best time " + fmt_time(best / 1000.0)) }
+    return pick
+}
+
+// ---------------- game ----------------
+fn reset_run(c: Course, cs: [Coin], p: Player) {
+    p.cp = 0
+    p.deaths = 0
+    p.coins = 0
+    p.t = 0.0
+    p.win_t = 0.0
+    p.flash = 0.0
+    p.spx = 0.0
+    p.spy = 1.05
+    p.spz = 0.0
+    for i in 0 .. cs.len() {
+        cs[i].got = false
+        gfx_mesh_at(cs[i].mid, cs[i].x, cs[i].y, cs[i].z)
+    }
+    // reset movers to base positions so the run always starts the same
+    for i in 0 .. c.n {
+        c.lx[i] = c.cx[i]
+        c.ly[i] = c.cy[i]
+        c.lz[i] = c.cz[i]
+    }
+    respawn(p)
+}
+
+fn main() {
+    gfx_open("Vulcan Obby")
+    gfx_texture(256, 256, make_atlas())
+    let err = apply_shader_file("shaders/obby.vshader")
+    if err.len() > 0 { print(err) }
+    gfx_chrome(true)
+    gfx_set_lock(false)
+    theme_sky()
+
+    build_avatar(100)
+    let c = course_new()
+    build_course(c)
+    let s: [Spinner] = []
+    build_spinners(s)
+    let cs: [Coin] = []
+    build_coins(cs)
+
+    let p = Player {
+        x: 0.0, y: 1.05, z: 0.0, vx: 0.0, vy: 0.0, vz: 0.0, yaw: 0.0,
+        grounded: true, ground: -1,
+        spx: 0.0, spy: 1.05, spz: 0.0, cp: 0, deaths: 0, coins: 0,
+        flash: 0.0, t: 0.0, win_t: 0.0
+    }
+
+    let mode = 0   // 0 menu, 1 play, 2 win
+    let mt = 0.0
+    loop {
+        let dt = gfx_frame()
+        if dt > 0.05 { dt = 0.05 }
+        mt += dt
+        if mode == 0 {
+            let pick = menu_frame(mt)
+            if pick == 1 { reset_run(c, cs, p) mode = 1 }
+        } elif mode == 1 {
+            let r = play_frame(c, s, cs, p, dt)
+            if r == 1 { mode = 0 }
+            if r == 2 {
+                p.win_t = p.t
+                best_set(floori(p.t * 1000.0))
+                snd(4, 0.6)
+                snd(6, 0.6)
+                mode = 2
+            }
+        } else {
+            let r = win_frame(p, dt)
+            if r == 1 { reset_run(c, cs, p) mode = 1 }
+            if r == 2 { mode = 0 }
+        }
+    }
+}
