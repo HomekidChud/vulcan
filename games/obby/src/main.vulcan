@@ -412,7 +412,8 @@ fn respawn(p: Player) {
 // ---------------- frame: play mode. returns 0 play, 1 menu, 2 win screen entry ----------------
 fn play_frame(c: Course, s: [Spinner], cs: [Coin], p: Player, dt: f64) -> i64 {
     p.t += dt
-    if gfx_key_pressed(27) { return 1 }
+    // touch devices: Menu button (and Esc/Q) returns to the menu
+    if gfx_key_pressed(27) || gfx_key_pressed(81) { return 1 }
     if gfx_key_pressed(82) { kill_player(p) }
 
     // ---- movers: compute live positions and deltas
@@ -434,22 +435,15 @@ fn play_frame(c: Course, s: [Spinner], cs: [Coin], p: Player, dt: f64) -> i64 {
         }
     }
 
-    // ---- input
+    // ---- input. On touch devices the host provides the virtual stick (it feeds
+    // the same WASD key codes) and the JUMP / Menu buttons (Space / Q) — the
+    // game just reads keys, it draws no controls of its own.
     let fwd = 0.0
     let side = 0.0
-    let touch = gfx_touch()
     if gfx_key(87) { fwd += 1.0 }
     if gfx_key(83) { fwd -= 1.0 }
     if gfx_key(68) { side += 1.0 }
     if gfx_key(65) { side -= 1.0 }
-    if touch {
-        // on-screen controls (drawn later); held test via mouse/touch position
-        let W = sw_()
-        let H = sh_()
-        if hit_rect(14.0, H - 74.0, 54.0, 54.0) && gfx_mouse_held(0) { side -= 1.0 }
-        if hit_rect(78.0, H - 74.0, 54.0, 54.0) && gfx_mouse_held(0) { side += 1.0 }
-        if hit_rect(W - 86.0, H - 74.0, 70.0, 54.0) && gfx_mouse_held(0) { fwd += 1.0 }
-    }
     let sprint = gfx_key(16) || gfx_key(17)
     let speed = WALK
     if sprint { speed = SPRINT }
@@ -584,25 +578,10 @@ fn draw_play_hud(p: Player) {
     hud_rect(0.0, 0.0, W, 30.0, 0.0, 0.0, 0.05, 0.45)
     hud_text(10.0, 8.0, 12.0, 1.0, 1.0, 1.0, 1.0, "VULCAN OBBY")
     ctext(W / 2.0, 8.0, 12.0, 1.0, 0.9, 0.4, 1.0, fmt_time(p.t) + "   stage " + f"{p.cp}" + "/5   coins " + f"{p.coins}" + "   deaths " + f"{p.deaths}")
-    // touch controls
-    if gfx_touch() {
-        let bs = 0.35
-        touch_button(14.0, H - 74.0, 54.0, 54.0, "<")
-        touch_button(78.0, H - 74.0, 54.0, 54.0, ">")
-        touch_button(W - 86.0, H - 74.0, 70.0, 54.0, "JUMP")
-    }
     if p.t < 4.0 {
         let a = clampf(4.0 - p.t, 0.0, 1.0)
         ctext(W / 2.0, 46.0, 13.0, 1.0, 1.0, 1.0, a, "WASD move, Space jump, Shift sprint, R respawn")
     }
-}
-
-fn touch_button(x: f64, y: f64, w: f64, h: f64, label: string) {
-    let held = hit_rect(x, y, w, h) && gfx_mouse_held(0)
-    let a = 0.4
-    if held { a = 0.85 }
-    hud_rect(x, y, w, h, 0.05, 0.06, 0.1, a)
-    ctext(x + w / 2.0, y + h / 2.0 - 7.0, 13.0, 0.95, 0.97, 1.0, 1.0, label)
 }
 
 // ---------------- win screen ----------------
@@ -677,6 +656,8 @@ fn main() {
     let err = apply_shader_file("shaders/obby.vshader")
     if err.len() > 0 { print(err) }
     gfx_chrome(true)
+    // menus keep the lock off (touch taps the buttons); gameplay locks on touch
+    // devices so the host's virtual stick + JUMP/Menu buttons take over
     gfx_set_lock(false)
     theme_sky()
 
@@ -703,10 +684,10 @@ fn main() {
         mt += dt
         if mode == 0 {
             let pick = menu_frame(mt)
-            if pick == 1 { reset_run(c, cs, p) mode = 1 }
+            if pick == 1 { reset_run(c, cs, p) mode = 1 gfx_set_lock(gfx_touch()) }
         } elif mode == 1 {
             let r = play_frame(c, s, cs, p, dt)
-            if r == 1 { mode = 0 }
+            if r == 1 { mode = 0 gfx_set_lock(false) }
             if r == 2 {
                 p.win_t = p.t
                 best_set(floori(p.t * 1000.0))
@@ -716,8 +697,8 @@ fn main() {
             }
         } else {
             let r = win_frame(p, dt)
-            if r == 1 { reset_run(c, cs, p) mode = 1 }
-            if r == 2 { mode = 0 }
+            if r == 1 { reset_run(c, cs, p) mode = 1 gfx_set_lock(gfx_touch()) }
+            if r == 2 { mode = 0 gfx_set_lock(false) }
         }
     }
 }

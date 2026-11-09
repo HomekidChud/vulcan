@@ -681,6 +681,19 @@ uniform sampler2D uPass0; uniform sampler2D uPass1; uniform sampler2D uPass2; un
     next:  { id: "tb-next",  w: 42, h: 42, a: "hr", name: ">" },
     stick: { id: "stickhint", w: 100, h: 100, a: "bl", x: 90, y: 90, name: "move" },
   };
+  // game.json "touch_buttons": which of the standard buttons this game uses
+  // (["jump", "menu", ...] — key names of TB). Buttons not listed are removed from
+  // the layout and the customize editor; the stick and look pad are always there.
+  if (Array.isArray(GAME.touch_buttons)) {
+    const keep = new Set(GAME.touch_buttons.map(String));
+    for (const k of Object.keys(TB)) {
+      if (!keep.has(k)) {
+        const el = $(TB[k].id);
+        if (el) el.remove();
+        delete TB[k];
+      }
+    }
+  }
   const clampN = (v, a, b) => Math.max(a, Math.min(b, v));
   function insets() {
     let p = $("sa-probe");

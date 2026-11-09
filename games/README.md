@@ -29,6 +29,7 @@ injects it and the host merges it over its defaults:
 | `help` | **replaces the whole help tab set** (name → HTML). `"help": false` removes the help system entirely |
 | `first_help` | tab auto-opened on first run (tab name, or `false` to never auto-open) |
 | `touch` | touch-control default overrides — same keys the Options > Customize touch controls editor saves (size, opacity, sens, lefty, float, sprint, labels, hints) |
+| `touch_buttons` | which of the standard touch buttons this game uses, e.g. `["jump", "menu"]` — anything not listed is removed from the layout and the editor; the stick and look pad are always there |
 
 Where the packager looks for it: the `--assets` dir, the entry file's dir, and
 its parent — first hit wins. JSON with `//` comments is accepted.

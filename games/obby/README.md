@@ -37,7 +37,9 @@ best time persists on the device.
 | R | respawn |
 | Esc | menu |
 
-Touch devices get on-screen arrow and JUMP buttons automatically.
+Touch devices get the host's virtual stick plus JUMP and Menu buttons — the
+game reads the same key codes the keyboard uses and draws no controls of its
+own.
 
 The game ships a `game.json` — its help tabs, first-run help, title and touch
 defaults are its own, not the host's Vulcancraft-flavoured defaults (see
