@@ -215,6 +215,17 @@ def _substring(s, a, b):
 def _to_int(s):
     try: return int(s)
     except Exception: return 0
+def _is_prime(n):
+    if n < 2: return False
+    if n < 4: return True
+    if n % 2 == 0: return False
+    if n % 3 == 0: return False
+    i = 5
+    while i * i <= n:
+        if n % i == 0: return False
+        if n % (i + 2) == 0: return False
+        i += 6
+    return True
 def _char_at(s, i):
     if i < 0 or i >= len(s): return -1
     return ord(s[i])
@@ -881,7 +892,7 @@ impl PyGen {
             self.locals.last_mut().unwrap().insert(pname.clone(), (pty.clone(), py_name(pname)));
             params.push(py_name(pname));
         }
-        let def_name = if in_class { py_name(&m.name) } else { method_py_name(sname, &m.name) };
+        let def_name = if in_class { format!("m_{}", py_name(&m.name)) } else { method_py_name(sname, &m.name) };
         self.indent = if in_class { 1 } else { 0 };
         let pad = if in_class { "    " } else { "" };
         let _ = writeln!(self.body, "\n{pad}def {}({}):", def_name, params.join(", "));
@@ -1442,6 +1453,82 @@ impl PyGen {
         for p in &params {
             if let Some(m) = self.locals.last_mut() { m.insert(p.clone(), (elem.clone(), p.clone())); }
         }
+        // multi-statement closure bodies can't be lambdas in Python — emit
+        // an inline for-loop building the result and return the temp var
+        if let Expr::Block { stmts, value } = &body {
+            let saved = self.indent;
+            let code = match name {
+                "map" => {
+                    let res = self.fresh("m");
+                    self.line(&format!("{res} = []"));
+                    self.line(&format!("for {} in {recv_c}:", params[0]));
+                    self.indent += 1;
+                    for st in stmts { self.gen_stmt(st); }
+                    let (vc, vt) = self.gen_expr(value);
+                    self.line(&format!("{res}.append({vc})"));
+                    self.indent = saved;
+                    (res, Ty::Array(Box::new(vt)))
+                }
+                "filter" => {
+                    let res = self.fresh("f");
+                    self.line(&format!("{res} = []"));
+                    self.line(&format!("for {} in {recv_c}:", params[0]));
+                    self.indent += 1;
+                    for st in stmts { self.gen_stmt(st); }
+                    let (vc, vt) = self.gen_expr(value);
+                    if vt != Ty::Bool { panic!("vulcan: filter closure must return bool"); }
+                    self.line(&format!("if {vc}:"));
+                    self.line(&format!("    {res}.append({})", params[0]));
+                    self.indent = saved;
+                    (res, self.norm(recv_ty).clone())
+                }
+                "reduce" => {
+                    let (init_c, init_ty) = self.gen_expr(&extra.clone().unwrap());
+                    let acc = self.fresh("acc");
+                    self.line(&format!("{acc} = {init_c}"));
+                    // the accumulator parameter resolves to the temp var
+                    if let Some(m) = self.locals.last_mut() { m.insert(params[0].clone(), (init_ty.clone(), acc.clone())); }
+                    self.line(&format!("for {} in {recv_c}:", params[1]));
+                    self.indent += 1;
+                    for st in stmts { self.gen_stmt(st); }
+                    let (vc, vt) = self.gen_expr(value);
+                    if vt != init_ty { panic!("vulcan: reduce closure must return the same type as the initial value"); }
+                    self.line(&format!("{acc} = {vc}"));
+                    self.indent = saved;
+                    (acc, init_ty)
+                }
+                "any" | "all" => {
+                    let found = self.fresh("found");
+                    self.line(&format!("{found} = {}", if name == "any" { "False" } else { "True" }));
+                    self.line(&format!("for {} in {recv_c}:", params[0]));
+                    self.indent += 1;
+                    for st in stmts { self.gen_stmt(st); }
+                    let (vc, vt) = self.gen_expr(value);
+                    if vt != Ty::Bool { panic!("vulcan: {name} closure must return bool"); }
+                    if name == "any" {
+                        self.line(&format!("if {vc}:"));
+                        self.line(&format!("    {found} = True"));
+                    } else {
+                        self.line(&format!("if not ({vc}):"));
+                        self.line(&format!("    {found} = False"));
+                    }
+                    self.indent = saved;
+                    (found, Ty::Bool)
+                }
+                "for_each" => {
+                    self.line(&format!("for {} in {recv_c}:", params[0]));
+                    self.indent += 1;
+                    for st in stmts { self.gen_stmt(st); }
+                    let (vc, _) = self.gen_expr(value);
+                    self.line(&format!("{vc}"));
+                    self.indent = saved;
+                    (String::from("None"), Ty::Void)
+                }
+                _ => panic!("vulcan: unknown iterator method {name}"),
+            };
+            self.locals.pop();
+            return code;
+        }
         let (body_c, body_ty) = self.gen_expr(&body);
         self.locals.pop();
         let lambda = if name == "reduce" {
@@ -1486,6 +1573,9 @@ impl PyGen {
             Expr::Char(c) => (c.to_string(), Ty::I64),
             Expr::Closure { params, .. } => {
                 panic!("vulcan: closures are only supported as iterator arguments (map/filter/reduce/any/all/for_each), got |{}| …", params.join(", "))
+            }
+            Expr::Block { .. } => {
+                panic!("vulcan: closure blocks are only supported as iterator arguments (map/filter/reduce/any/all/for_each)")
             }
             Expr::Ident(name) => {
                 if let Some((t, cvar)) = self.lookup(name) {
@@ -1624,9 +1714,9 @@ impl PyGen {
                                 // stick); non-variable receivers become a temp
                                 // copy first (deep: value semantics).
                                 if matches!(&**recv, Expr::Ident(_)) || matches!(&**recv, Expr::Addr { .. }) {
-                                    return (format!("{recv_c}.{}({})", py_name(name), call_args.join(", ")), m.ret.clone());
+                                    return (format!("{recv_c}.m_{}({})", py_name(name), call_args.join(", ")), m.ret.clone());
                                 } else {
-                                    return (format!("_sclone({recv_c}).{}({})", py_name(name), call_args.join(", ")), m.ret.clone());
+                                    return (format!("_sclone({recv_c}).m_{}({})", py_name(name), call_args.join(", ")), m.ret.clone());
                                 }
                             } else {
                                 return (format!("{}({})", method_py_name(sname, name), call_args.join(", ")), m.ret.clone());
@@ -1912,6 +2002,12 @@ impl PyGen {
                 let (c, t) = self.gen_expr(&args[0]);
                 if t != Ty::Str { panic!("vulcan: to_int needs a string"); }
                 (format!("_to_int({c})"), Ty::I64)
+            }
+            "is_prime" => {
+                if args.len() != 1 { panic!("vulcan: is_prime takes 1 arg"); }
+                let (c, t) = self.gen_expr(&args[0]);
+                let c = self.cast(&c, &t, &Ty::I64);
+                (format!("_is_prime({c})"), Ty::Bool)
             }
             "char_at" => {
                 if args.len() != 2 { panic!("vulcan: char_at(s, i) takes 2 args"); }

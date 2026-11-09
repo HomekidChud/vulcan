@@ -32,6 +32,7 @@ function __g6(x) { // mimic C %.6g
 function __vpanic(msg) { process.stderr.write("vulcan: " + msg + "\n"); process.exit(1); }
 function __idiv(a, b) { if (b === 0) __vpanic("division by zero"); return Math.trunc(a / b); }
 function __imod(a, b) { if (b === 0) __vpanic("modulo by zero"); return ((a) % (b)); }
+function __is_prime(n) { if (n < 2) return false; if (n < 4) return true; if (n % 2 === 0) return false; if (n % 3 === 0) return false; for (let i = 5; i * i <= n; i += 6) { if (n % i === 0) return false; if (n % (i + 2) === 0) return false; } return true; }
 function __fdiv(a, b) { if (b === 0) __vpanic("division by zero"); return a / b; }
 // small-int wraps: truncate toward zero, then wrap to the target width
 function __to_i8(x) { return (Math.trunc(x) << 24 >> 24); }
@@ -1524,8 +1525,101 @@ impl JsGen {
         for p in &params {
             if let Some(m) = self.locals.last_mut() { m.insert(p.clone(), (elem.clone(), p.clone())); }
         }
-        let (body_c, body_ty) = self.gen_expr(&body);
+        // capture the body: either a plain expression, or a multi-statement
+        // block (statements captured as JS code, value as an expression)
+        let (stmts_code, body_c, body_ty) = match &body {
+            Expr::Block { stmts, value } => {
+                let start = self.body.len();
+                let saved = self.indent;
+                self.indent = 0;
+                for st in stmts { self.gen_stmt(st); }
+                let (vc, vt) = self.gen_expr(value);
+                let mut code = self.body[start..].to_string();
+                self.body.truncate(start);
+                self.indent = saved;
+                // keep any helper lines the value expression emitted
+                let vstart = self.body.len();
+                let _ = vstart;
+                (code, vc, vt)
+            }
+            _ => {
+                let (c, t) = self.gen_expr(&body);
+                (String::new(), c, t)
+            }
+        };
         self.locals.pop();
+        let needs_async = body_c.contains("await") || stmts_code.contains("await");
+        let is_block = !stmts_code.is_empty() || matches!(&body, Expr::Block { .. });
+        // Bodies containing `await` (method calls, input(), sleep()) cannot
+        // run inside a plain arrow — Array.map would produce a Promise array.
+        // Emit an async IIFE loop instead and await it.
+        if needs_async {
+            let ps = params.join(", ");
+            let stmts = &stmts_code;
+            let code = match name {
+                "map" => format!(
+                    "(await (async () => {{ const __r = []; for (const {ps} of {recv_c}) {{ {stmts} __r.push({body_c}); }} return __r; }})())"),
+                "filter" => format!(
+                    "(await (async () => {{ const __r = []; for (const {ps} of {recv_c}) {{ {stmts} if ({body_c}) __r.push({ps}); }} return __r; }})())"),
+                "reduce" => {
+                    let (init_c, init_ty) = self.gen_expr(&extra.clone().unwrap());
+                    if body_ty != init_ty { panic!("vulcan: reduce closure must return the same type as the initial value"); }
+                    format!(
+                        "(await (async () => {{ let __a = {init_c}; for (const {ps} of {recv_c}) {{ {stmts} __a = {body_c}; }} return __a; }})())")
+                }
+                "any" => format!(
+                    "(await (async () => {{ for (const {ps} of {recv_c}) {{ {stmts} if ({body_c}) return true; }} return false; }})())"),
+                "all" => format!(
+                    "(await (async () => {{ for (const {ps} of {recv_c}) {{ {stmts} if (!({body_c})) return false; }} return true; }})())"),
+                "for_each" => format!(
+                    "(await (async () => {{ for (const {ps} of {recv_c}) {{ {stmts} {body_c}; }} }})())"),
+                _ => panic!("vulcan: unknown iterator method {name}"),
+            };
+            let ty = match name {
+                "map" => Ty::Array(Box::new(body_ty.clone())),
+                "filter" => self.norm(recv_ty).clone(),
+                "reduce" => {
+                    let (init_c, init_ty) = self.gen_expr(&extra.clone().unwrap());
+                    let _ = init_c;
+                    init_ty
+                }
+                "any" | "all" => Ty::Bool,
+                "for_each" => Ty::Void,
+                _ => unreachable!(),
+            };
+            return (code, ty);
+        }
+        if is_block {
+            // multi-statement closure without await: a plain arrow with a
+            // block body — statements run per element, value is returned
+            let ps = params.join(", ");
+            let code = format!("({ps}) => {{ {stmts_code} return {body_c}; }}");
+            let code = match name {
+                "map" => format!("({recv_c}.map({code}))"),
+                "filter" => {
+                    if body_ty != Ty::Bool { panic!("vulcan: filter closure must return bool"); }
+                    format!("({recv_c}.filter({code}))")
+                }
+                "reduce" => {
+                    let (init_c, init_ty) = self.gen_expr(&extra.clone().unwrap());
+                    if body_ty != init_ty { panic!("vulcan: reduce closure must return the same type as the initial value"); }
+                    format!("({recv_c}.reduce({code}, {init_c}))")
+                }
+                "any" => format!("({recv_c}.some({code}))"),
+                "all" => format!("({recv_c}.every({code}))"),
+                "for_each" => format!("({recv_c}.forEach({code}))"),
+                _ => panic!("vulcan: unknown iterator method {name}"),
+            };
+            let ty = match name {
+                "map" => Ty::Array(Box::new(body_ty.clone())),
+                "filter" => self.norm(recv_ty).clone(),
+                "reduce" => self.gen_expr(&extra.clone().unwrap()).1,
+                "any" | "all" => Ty::Bool,
+                "for_each" => Ty::Void,
+                _ => unreachable!(),
+            };
+            return (code, ty);
+        }
         match name {
             "map" => {
                 let res_ty = Ty::Array(Box::new(body_ty.clone()));
@@ -1564,6 +1658,9 @@ impl JsGen {
             Expr::Char(c) => (c.to_string(), Ty::I64),
             Expr::Closure { params, .. } => {
                 panic!("vulcan: closures are only supported as iterator arguments (map/filter/reduce/any/all/for_each), got |{}| …", params.join(", "))
+            }
+            Expr::Block { .. } => {
+                panic!("vulcan: closure blocks are only supported as iterator arguments (map/filter/reduce/any/all/for_each)")
             }
             Expr::Ident(name) => {
                 if let Some((t, cvar)) = self.lookup(name) {
@@ -2007,6 +2104,12 @@ impl JsGen {
             "clock" => ("__clock()".into(), Ty::F64),
             "rand" => ("__rand()".into(), Ty::I64),
             "input" => ("(await __input())".into(), Ty::Str),
+            "is_prime" => {
+                if args.len() != 1 { panic!("vulcan: is_prime takes 1 arg"); }
+                let (c, t) = self.gen_expr(&args[0]);
+                let c = self.cast(&c, &t, &Ty::I64);
+                (format!("__is_prime({c})"), Ty::Bool)
+            }
             "to_int" => {
                 if args.len() != 1 { panic!("vulcan: to_int(s) takes 1 arg"); }
                 let (c, t) = self.gen_expr(&args[0]);

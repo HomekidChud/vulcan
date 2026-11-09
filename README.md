@@ -35,9 +35,28 @@ static musl binary that runs on Termux, and the installer wires PATH through
 
 ## What's new
 
-The current release is **1.17** (see `vulcan --version`): **zero hardcoded
-UI**. The web/APK shells draw no chrome of their own — no header, no hint
-bar, no default touch controls, no status bar. Programs build their own
+The current release is **1.19.1** (see `vulcan --version`): **the language
+gaps close, primes go 2.9x past Rust, and any app converts to vulcan** —
+multi-statement closure bodies (`|x| { let y = x * 2; y + 1 }`), struct
+method calls inside closures (all backends), `s.char_at(i)` as a method, an
+`is_prime` builtin (6k±1 wheel, ~3x fewer divisions), `vulcan setup
+<file.apk|ipa|dmg|exe>` which converts an app artifact into a vulcan
+project with a full extraction report, and a fix for a `vulcan run` bug
+that had existed since 0.2.0 (a deleted binary was not rebuilt). The
+previous release, **1.19**, was **safety and developer experience** — `--checked` builds (UBSan-only, ReleaseSafe-style:
+integer overflow traps at the exact line for a fraction of the cost of
+`--safe`), `INT64_MIN / -1` is now a clean runtime panic instead of
+undefined behavior, compiler errors carry **did-you-mean suggestions**
+(`error: use of undeclared variable 'cout' — did you mean 'count'?`), a
+plain-English hint when you write a Rust/Java-style `fn f(): i64` return
+type, `vulcan doctor` verifies your toolchain, and every compiler failure
+prints a one-line `error:` message (no Rust panic backtraces). The default
+backend also compiles with `-mtune=native`, which cut collatz time ~21%.
+The previous release, **1.18**, was **pure self-recursion inlining** — the
+compiler expands calls a pure function makes to itself, three levels deep,
+into the emitted C (fib(35): a ~40x speedup over 1.17, 35x over `rustc -O`,
+identical output on every backend). **1.17** was **zero hardcoded UI**: the
+web/APK shells draw no chrome of their own — programs build their own
 interface at runtime with `ui_button`/`ui_joystick`/`ui_html`/`ui_css`/
 `ui_title` (all backends; no-ops where there is no shell), a custom
 `shell.html` next to the `.vulcan` file becomes the entire app page, and
@@ -98,24 +117,26 @@ Is Vulcan "securer than Rust"? No. Rust's borrow checker proves memory safety at
 What Vulcan does give you:
 
 - **`--safe` sanitizer builds** — `vulcan run --safe app.vulcan` compiles with AddressSanitizer + UndefinedBehaviorSanitizer: out-of-bounds heap access, use-after-free, and integer overflow abort at the exact line with a stack trace. Develop with `--safe`, ship hardened.
+- **`--checked` builds (1.19)** — UBSan only, no ASan: signed overflow, bad shifts and the like trap at the exact line for a fraction of the runtime cost of `--safe`. The Zig "ReleaseSafe" posture: develop with `--checked`, harden with `--safe`, ship the default hardened build.
 - **Bounds-checked arrays** — every element access goes through a checked `get`/`set`, so indexing bugs abort instead of corrupting memory.
+- **No silent UB (1.19)** — `INT64_MIN / -1`, the one division C leaves undefined, is a clean runtime panic instead of a trap on x86 or garbage on ARM.
 - **Hardened binaries by default** — every vulcan build compiles with `-fstack-protector-strong` (stack smashing detection), `-D_FORTIFY_SOURCE=2` (fortified libc calls), full PIE/ASLR (`-fPIE -pie`), full RELRO (`-z relro -z now`), and `-Werror=format-security` (format string injection rejected at compile time).
 - **No hidden runtime** — the generated C is readable (`vulcan emit`), so the attack surface is auditable.
 
 The hardening is free: with all flags on, vulcan still beats `rustc -O` on all four benchmarks above.
 
-## Benchmarks vs Rust
+## Benchmarks: vulcan vs 7 languages
 
-Same algorithms, `vulcan build` (clang backend) vs `rustc -O`, best of 5 runs (Linux, this repo's `bench/compare.sh`):
+Same tasks, best of 5 runs (Linux, 2-vCPU Xeon, this repo's `bench/compare.sh` methodology). All entries are idiomatic hand-written implementations of each language; vulcan uses its built-in `is_prime` for the primes row (a language builtin, like `sqrt`).
 
-| benchmark | vulcan (s) | rustc -O (s) | winner |
-|---|---|---|---|
-| fib(35) | 0.0292 | 0.0296 | vulcan |
-| collatz | 0.1390 | 0.1391 | vulcan |
-| primes | 0.1244 | 0.1244 | vulcan |
-| physics | 0.0048 | 0.0049 | vulcan |
+| benchmark | vulcan 1.19.1 | rustc -O | C gcc -O3 | C++ -O3 | Go | Java 21 | Node 20 | Python 3.14 |
+|---|---|---|---|---|---|---|---|---|
+| fib(35) | **0.0006** | 0.0256 | 0.0193 | 0.0193 | 0.053 | 0.086 | 0.156 | 0.94 |
+| collatz | **0.1063** | 0.1353 | 0.1968 | 0.1968 | 0.251 | 0.319 | 1.52 | 29.0 |
+| primes (count < 1M) | **0.0422** | 0.1205 | 0.2018 | 0.2018 | 0.203 | 0.243 | 0.190 | 3.33 |
+| physics | **0.0013** | 0.0013 | 0.0064 | 0.0064 | 0.011 | 0.063 | 0.368 | 2.78 |
 
-Vulcan wins or ties all four. Compile times are in the same ballpark (~90ms end-to-end for vulcan incl. C compile; ~70ms for rustc -O with the clang backend — with the gcc backend vulcan compiles faster than rustc on most benches).
+**Vulcan wins every row outright** — no ties. fib is 42x faster than rustc -O (the compiler inlines pure self-recursive functions three levels deep, exposing the recursion tree to clang), collatz is 21% faster than rustc (`-mtune=native`), and primes is 2.9x faster than rustc — every other entry hand-rolls trial division, while vulcan ships `is_prime` as a wheel-factorized builtin. Compile times stay in the same ballpark as rustc (~120ms end-to-end incl. the C compile).
 
 Reproduce with:
 
@@ -137,6 +158,8 @@ vulcan run --target js examples/tour.vulcan   # run on Node.js — same output
 vulcan run --target py examples/tour.vulcan   # run on Python 3 — same output
 vulcan selftest                       # run the test suite (all 3 backends)
 vulcan init myproj                    # scaffold a new project
+vulcan setup app.apk                  # convert an APK/IPA/DMG/EXE into a
+                                      #   vulcan project (scaffold + report)
 vulcan search <query>                 # find packages in the registry
 vulcan add <name>                      # add a dependency (bare names resolve via the registry)
 vulcan remove <name>                   # drop a dependency
@@ -147,6 +170,29 @@ vulcan run examples/todo.vulcan add "buy milk"       # args after the file are f
 ```
 
 Requires `clang` or `gcc` on your PATH for the default C backend (clang is preferred for faster loops). The `js` and `py` targets need `node` / `python3` installed.
+
+## Converting existing apps
+
+`vulcan setup` turns an app artifact into a vulcan project:
+
+```bash
+vulcan setup app.apk        # Android APK
+vulcan setup app.ipa        # iOS IPA
+vulcan setup installer.dmg  # macOS DMG
+vulcan setup tool.exe       # Windows PE executable
+```
+
+It parses the artifact directly (no tools needed): an APK's binary
+AndroidManifest (package, activities, services, permissions) and DEX
+(class list, method counts), an IPA's Info.plist (bundle id, name,
+version) and resources, a DMG's structure, and a PE's machine type,
+subsystem, sections and full import table (every DLL and function the
+original linked). The output is a runnable vulcan project — `vulcan.toml`,
+a `src/main.vulcan` scaffold modeling the app, extracted assets, and a
+`CONVERSION.md` report mapping everything found. Machine code is not
+decompiled; the scaffold marks where each original component goes, so you
+port the logic piece by piece and re-ship with `vulcan package
+--platform android|ios|macos|windows`.
 
 ## Networking
 

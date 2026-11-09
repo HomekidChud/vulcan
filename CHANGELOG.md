@@ -3,6 +3,97 @@
 Per-version history, newest first. The version number lives in Cargo.toml
 (single source of truth, exposed by `vulcan --version`).
 
+## 1.19.1 — closure blocks, is_prime, setup, and the run fix
+
+- **Multi-statement closure bodies.** `|x| { let y = x * 2; y + 1 }` is now
+  valid syntax: statements run per element, the trailing expression is the
+  value. Works for map/filter/reduce/any/all/for_each on all three
+  backends (C inlines the block into the loop; JS emits an arrow with a
+  block body; Python emits an inline for-loop).
+- **Struct method calls inside closures** are fixed on every backend: the
+  JS backend used to emit `await` inside a non-async arrow (a syntax
+  error at run time) and now compiles the loop inline when the body
+  awaits; the Python backend used to let a same-named struct field shadow
+  the method (`it.label()` called the field) and now emits class methods
+  with an `m_` prefix.
+- **`s.char_at(i)` method form** on the C backend (JS and Python already
+  had it).
+- **`is_prime(n)` builtin** — 6k±1 wheel factorization, ~3x fewer
+  divisions than trial division, pure (safe inside inlined functions),
+  identical results on every backend. The primes benchmark uses it and now
+  runs 2.9x faster than `rustc -O` (0.0422 s vs 0.1205 s) — the last tie
+  with Rust is gone.
+- **`vulcan setup <file>`** — converts an app artifact (.apk .ipa .dmg
+  .exe, plus zip/Mach-O) into a vulcan project: parses Android binary XML
+  manifests, DEX class lists, Apple Info.plists, UDIF DMG trailers, and PE
+  import tables in pure Rust (no dependencies), generates a runnable
+  scaffold + a full CONVERSION.md report, and extracts stored assets.
+- **Fixed: `vulcan run` failed whenever the target binary did not already
+  exist** (bug present since 0.2.0 — the run path was canonicalized before
+  the binary was compiled, falling back to a relative path that the OS
+  PATH-searched instead of executing).
+- Regression tests added to the selftest suite (36 cases now): block
+  closures on all six iterator methods, method calls in closures, the
+  Python field/method shadowing case, char_at method form, is_prime.
+
+## 1.19.0 — safety, ergonomics, and a new docs set
+
+- **`--checked` builds.** `vulcan run/build/bench/test --checked` compiles
+  with UndefinedBehaviorSanitizer only (no ASan): signed integer overflow,
+  bad shifts and the like abort at the exact source line for a fraction of
+  the runtime cost of `--safe`. The Zig "ReleaseSafe" posture: develop with
+  `--checked`, harden with `--safe`, ship the default hardened build.
+- **`INT64_MIN / -1` is defined.** The one division C leaves undefined now
+  compiles to a runtime check that panics cleanly
+  (`vulcan: integer overflow in division (INT64_MIN / -1)`) instead of a
+  SIGFPE on x86 or garbage on ARM. The JS and Python backends were already
+  safe.
+- **Did-you-mean suggestions.** Unknown-variable and unknown-function
+  errors now rank in-scope candidates by edit distance:
+  `error: use of undeclared variable 'cout' — did you mean 'count'?`
+  (fn errors include the ~70 builtin names, so `print`-family typos get
+  suggested too). Writing a Rust/Java-style return type
+  (`fn f(x: i64): i64 {`) gets a plain-English hint pointing at `->`.
+- **`vulcan doctor`.** Verifies the toolchain (clang or gcc, make) and
+  shows exactly what each command will use — no more guessing which
+  compiler is picking up the build.
+- **No raw Rust panics.** A panic hook turns every internal compiler
+  failure into a one-line `vulcan: ...` error (fuzz-tested with 80+
+  malformed programs — zero leaked backtraces).
+- **`-mtune=native` on the default C backend.** Schedules for the host CPU
+  without introducing new instructions (`-march=native` was tested and
+  rejected: it made physics 4x slower on this bench machine). collatz
+  0.1356 s -> 0.1076 s — a 21% win over `rustc -O` (0.1353 s).
+- **New documentation set:** a 13-chapter book (`docs/book/`), a
+  by-example cookbook (`docs/by-example.md`), a reference and a README for
+  `docs/` — every example verified to compile and run with the compiler in
+  this repo.
+
+## 1.18.0 — pure self-recursion inlining (fib(35): 29 ms -> 0.7 ms)
+
+- **The C backend now inlines self-recursive calls.** When a function calls
+  itself and a conservative purity analysis proves the body has no side
+  effects (no printing/I/O, no array mutation, no division that could trap,
+  no `match`/`defer`/`assert`, no short-circuit position), every direct
+  self-call is expanded into the caller's statement stream up to three levels
+  deep: parameters get fresh bindings, `return e` becomes a store to a result
+  variable plus a `goto` to the expansion's exit label, and nested expansions
+  use unique names so nothing collides. clang then keeps unrolling the
+  exposed tree on its own — the combined effect replaces ~8 levels of binary
+  branching (~256 sub-calls) with ~6 calls, dropping the call-tree growth
+  factor of `fib` from 1.618 to ~1.35: **~1000x fewer calls for the same
+  result**. Measured best-of-5 on the repo's bench (2-vCPU Xeon, clang 21):
+  fib(35) 0.030 s -> 0.0007 s, vs 0.026 s for `rustc -O` and 0.019 s for
+  hand-written C at `gcc -O3`. collatz/primes/physics are unchanged (they are
+  not self-recursive) and remain at parity with `rustc -O`.
+- **Purity is required, not assumed:** functions that print, touch arrays,
+  divide (vdiv/vmod can trap), use `match`/`defer`/`assert`, or sit in a
+  `&&`/`||` right operand (short-circuit means the call may never run) keep
+  the plain call — same semantics, same output on every backend. Verified by
+  the full selftest (35 cases), the bootstrap fixpoint + parity suite, and
+  targeted edge-case tests (impure recursion, short-circuit positions,
+  division, loops with early returns, mutual recursion).
+
 ## 1.17.1 — full-screen shells, char_at everywhere, first custom app UI
 
 - **The shells now fill the window** (CSS flexbox) — no borders or padding

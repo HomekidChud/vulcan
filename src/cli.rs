@@ -1040,9 +1040,10 @@ fn main() -> void {
     print("clamp:", clamp(5, 0, 3), clamp(-1, 0, 3), clamp(2.5, 0.0, 2.0))
     print("lerp:", lerp(0.0, 10.0, 0.25), lerp(10.0, 20.0, 0.5))
     print("sign:", sign(-3), sign(0), sign(7), sign(-2.5), sign(0.0), sign(3.5))
+    print("is_prime:", is_prime(1), is_prime(2), is_prime(9), is_prime(25), is_prime(97), is_prime(7919))
 }
 "#,
-        expected: "clamp: 3 0 2\nlerp: 2.5 15\nsign: -1 0 1 -1 0 1\n",
+        expected: "clamp: 3 0 2\nlerp: 2.5 15\nsign: -1 0 1 -1 0 1\nis_prime: false true false false true true\n",
     },
     Case {
         name: "closures / iterator methods (all backends)",
@@ -1071,6 +1072,41 @@ fn main() -> void {
 }
 "#,
         expected: "map: 2 4 6 8 10 12\nfilter: 2 4 6\nreduce: 21\nany: true all: true\nfor_each: 1 2 3 4 5 6\nstrings: ADA,GRACE,LINUS\nfmt: <1><2><3><4><5><6>\nchained: 3 6\n",
+    },
+    Case {
+        // regression: three gaps fixed in 1.19.1 — method calls inside
+        // closures (JS emitted `await` in a non-async arrow; Python field
+        // names shadowed same-named methods), multi-statement closure bodies
+        // (|x| { let …; value }), and char_at as a method (s.char_at(i)).
+        name: "block closures + method calls in closures + char_at method (all backends)",
+        src: r#"
+struct Box { v: i64, label: string }
+impl Box {
+    fn scaled(self, k: i64) -> i64 { return self.v * k }
+    fn label(self) -> string { return self.label }
+}
+fn main() -> void {
+    let boxes = [Box { v: 1, label: "one" }, Box { v: 5, label: "five" }]
+    let r = boxes.map(|b| b.scaled(3))
+    let labels = boxes.map(|b| b.label())
+    print("methods:", r[0], r[1], labels[0], labels[1])
+    let xs: [i64] = [1, 2, 3, 4]
+    let m = xs.map(|x| { let y = x * 2; y + 1 })
+    let f = xs.filter(|x| { let t = x % 2; t == 0 })
+    let s = xs.reduce(0, |acc, x| { let a = acc + x; a })
+    let any = xs.any(|x| { let d = x * 10; d > 30 })
+    let all = xs.all(|x| { let d = x * 10; d > 5 })
+    let seen: [i64] = []
+    xs.for_each(|x| { let z = x + 100; seen.push(z) })
+    print("map:", m.map(|x| f"{x}").join(" "))
+    print("filter:", f.map(|x| f"{x}").join(" "))
+    print("reduce:", s, "any:", any, "all:", all)
+    print("for_each:", seen.map(|x| f"{x}").join(" "))
+    let t = "vulcan"
+    print("char_at:", t.char_at(0), t.char_at(5), t.len())
+}
+"#,
+        expected: "methods: 3 15 one five\nmap: 3 5 7 9\nfilter: 2 4\nreduce: 10 any: true all: true\nfor_each: 101 102 103 104\nchar_at: 118 110 6\n",
     },
     Case {
         name: "networking: TCP sockets (all backends)",
