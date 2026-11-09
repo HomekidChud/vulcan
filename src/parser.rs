@@ -160,6 +160,9 @@ pub enum Expr {
     // closure literal |params| expr — inlined by the iterator methods
     // (map/filter/reduce/any/all/for_each); captures enclosing locals
     Closure { params: Vec<String>, body: Box<Expr> },
+    // multi-statement closure body: |x| { let y = …; value } — the last
+    // expression is the closure's value. Only produced inside closures.
+    Block { stmts: Vec<Stmt>, value: Box<Expr> },
 }
 
 pub struct Parser {
@@ -773,7 +776,26 @@ impl Parser {
                     }
                     self.expect(Tok::Pipe, "| after closure parameters");
                 }
-                let body = self.parse_expr();
+                let body = if self.peek() == &Tok::LBrace {
+                    // multi-statement closure: |x| { stmts…; value }
+                    self.next(); // {
+                    let mut stmts = Vec::new();
+                    while !self.eat(&Tok::RBrace) {
+                        if self.peek() == &Tok::EOF {
+                            self.err("unterminated closure block — missing `}`".to_string());
+                        }
+                        stmts.push(self.parse_stmt());
+                    }
+                    // the last statement must be the value expression
+                    let last = stmts.pop();
+                    match last {
+                        Some(Stmt::Expr(v)) =>
+                            Expr::Block { stmts, value: Box::new(v) },
+                        _ => self.err("closure block must end with an expression (its value), e.g. |x| { let y = x * 2; y + 1 }".to_string()),
+                    }
+                } else {
+                    self.parse_expr()
+                };
                 Expr::Closure { params, body: Box::new(body) }
             }
             Tok::Amp => {

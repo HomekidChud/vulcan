@@ -119,6 +119,7 @@ static void vbool_remove(VecBool* v, int64_t i){ if(i<0||i>=v->len){ fprintf(std
 static void vbool_insert(VecBool* v, int64_t i, int8_t x){ if(i<0||i>v->len){ fprintf(stderr,"vulcan: index out of bounds\n"); exit(1);} if(v->len==v->cap){ v->cap*=2; v->data=realloc(v->data,v->cap*sizeof(int8_t)); } memmove(v->data+i+1, v->data+i, (size_t)(v->len-i)*sizeof(int8_t)); v->data[i]=x; v->len++; }
 static void vstr_remove(VecStr* v, int64_t i){ if(i<0||i>=v->len){ fprintf(stderr,"vulcan: index out of bounds\n"); exit(1);} memmove(v->data+i, v->data+i+1, (size_t)(v->len-i-1)*sizeof(char*)); v->len--; }
 static void vstr_insert(VecStr* v, int64_t i, char* x){ if(i<0||i>v->len){ fprintf(stderr,"vulcan: index out of bounds\n"); exit(1);} if(v->len==v->cap){ v->cap*=2; v->data=realloc(v->data,v->cap*sizeof(char*)); } memmove(v->data+i+1, v->data+i, (size_t)(v->len-i)*sizeof(char*)); v->data[i]=x; v->len++; }
+static int8_t vis_prime(int64_t n){ if(n<2) return 0; if(n<4) return 1; if(n%2==0) return 0; if(n%3==0) return 0; for(int64_t i=5;i*i<=n;i+=6){ if(n%i==0) return 0; if(n%(i+2)==0) return 0; } return 1; }
 static int64_t vchat(const char* s, int64_t i){ size_t n=strlen(s); if(i<0||(size_t)i>=n) return -1; return (int64_t)(unsigned char)s[i]; }
 static char* vchr(int64_t c){ char* r=(char*)malloc(2); r[0]=(char)(c&0xff); r[1]=0; return r; }
 // ---- files (whole-file read/write) and CLI args ----
@@ -999,7 +1000,7 @@ fn safe_c_name(name: &str) -> String {
 const PURE_BUILTINS: &[&str] = &[
     "abs", "min", "max", "sqrt", "floor", "ceil", "round", "pow",
     "sin", "cos", "tan", "atan", "atan2", "exp", "log",
-    "clamp", "lerp", "sign",
+    "clamp", "lerp", "sign", "is_prime",
 ];
 
 fn pure_expr(e: &Expr, pure: &std::collections::HashSet<String>) -> bool {
@@ -1084,7 +1085,7 @@ impl Codegen {
             "abs", "arg", "arg_count", "atan2", "canvas_height", "canvas_resize", "canvas_width",
             "char_at", "chr", "clamp", "clear", "clear_screen", "clock", "cursor_visible",
             "draw_circle", "draw_line", "draw_rect", "draw_text", "draw_tri", "exit",
-            "file_exists", "file_read", "file_write", "input", "is_touch", "key_down",
+            "file_exists", "file_read", "file_write", "input", "is_prime", "is_touch", "key_down",
             "key_ready", "lerp", "min", "max", "mouse_down", "mouse_dx", "mouse_dy",
             "mouse_x", "mouse_y", "ms_now", "net_accept", "net_alive", "net_close",
             "net_connect", "net_listen", "net_peer", "net_port", "net_ready", "net_recv",
@@ -2114,6 +2115,16 @@ impl Codegen {
 
     fn gen_expr(&mut self, e: &Expr) -> (String, Ty) { self.gen_expr_hint(e, None) }
 
+    // multi-statement closure body: run the statements in a fresh scope,
+    // then evaluate the value expression. Used by the iterator inliner.
+    fn gen_block_body(&mut self, stmts: &[Stmt], value: &Expr) -> (String, Ty) {
+        self.locals.push(HashMap::new());
+        for st in stmts { self.gen_stmt(st); }
+        let (c, t) = self.gen_expr(value);
+        self.locals.pop();
+        (c, t)
+    }
+
     // `hint` carries the expected type from the statement context (let
     // annotation / function return type) so bare constructions like
     // `Option.None` can pick the right instantiation
@@ -2245,6 +2256,7 @@ impl Codegen {
             Expr::Closure { params, body } => {
                 panic!("vulcan: closures are only supported as iterator arguments (map/filter/reduce/any/all/for_each), got |{}| …", params.join(", "))
             }
+            Expr::Block { stmts, value } => self.gen_block_body(stmts, value),
             Expr::Try(inner) => {
                 // `expr?` — propagate None/Err, yield the payload
                 let (c, t) = self.gen_expr(inner);
@@ -2351,6 +2363,14 @@ impl Codegen {
                         Ty::Array(_) => (format!("({recv_c}.len)"), Ty::I64),
                         Ty::Str => (format!("((int64_t)strlen({recv_c}))"), Ty::I64),
                         _ => panic!("vulcan: .len() on {recv_ty:?}"),
+                    },
+                    "char_at" => {
+                        // method form: s.char_at(i) — same code as the builtin call
+                        if recv_ty != Ty::Str { panic!("vulcan: char_at is a string method"); }
+                        if args.len() != 1 { panic!("vulcan: char_at takes 1 arg (index)"); }
+                        let (i, it) = self.gen_expr(&args[0]);
+                        if it != Ty::I64 { panic!("vulcan: char_at needs an i64 index"); }
+                        (format!("vchat({recv_c}, {i})"), Ty::I64)
                     },
                     "push" => {
                         if args.len() != 1 { panic!("vulcan: push takes 1 arg"); }
@@ -2654,6 +2674,12 @@ impl Codegen {
                 let (c, t) = self.gen_expr(&args[0]);
                 if t != Ty::Str { panic!("vulcan: to_int needs a string"); }
                 (format!("vstr_to_int({c})"), Ty::I64)
+            }
+            "is_prime" => {
+                if args.len() != 1 { panic!("vulcan: is_prime takes 1 arg"); }
+                let (c, t) = self.gen_expr(&args[0]);
+                let c = self.cast(&c, &t, &Ty::I64);
+                (format!("vis_prime({c})"), Ty::Bool)
             }
             "char_at" => {
                 if args.len() != 2 { panic!("vulcan: char_at(s, i) takes 2 args"); }

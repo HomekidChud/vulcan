@@ -137,7 +137,7 @@ true
 - Copying is shallow: if a struct has an array field, both copies share the array's elements.
 - Nested arrays of structs **as struct fields** (`struct W { grid: [[Cell]] }`) are not supported yet — a clear compile error. Grids of scalars and local `[[T]]` variables work.
 - Structs don't compare with `==`; compare fields, or use an enum if you need identity.
-- Calling a struct method inside a closure (`items.map(|it| it.label())`) is not reliable across backends yet — the JS backend miscompiles it. Use a `for` loop or field access.
+- Calling a struct method inside a closure (`items.map(|it| it.label())`) works on every backend (fixed in 1.19.1).
 
 ## See also
 

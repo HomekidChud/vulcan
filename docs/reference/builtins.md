@@ -6,7 +6,8 @@ The functions available in every Vulcan program without an import.
 
 ```
 print(values...)                to_string(v)  to_int(s)  to_float(s)
-char_at(s, i)                   len(arr_or_string)
+char_at(s, i)                   is_prime(n)
+len(arr_or_string)
 arg_count()  arg(i)
 file_read(path)  file_write(path, data)  file_exists(path)
 exit(code)  sleep_ms(ms)  clock()  ms_now()  input()
@@ -49,7 +50,27 @@ fn main() {
 66
 ```
 
-`char_at(s, i)` returns the character code at index `i`.
+`char_at(s, i)` returns the character code at index `i`. It also works as a method: `s.char_at(i)`.
+
+### Primes
+
+```vulcan
+fn main() {
+    print(is_prime(2), is_prime(97), is_prime(100))
+    let n = 0
+    for i in 2 .. 1000 {
+        if is_prime(i) { n++ }
+    }
+    print("primes below 1000:", n)
+}
+```
+
+```
+true true false
+primes below 1000: 168
+```
+
+`is_prime(n)` uses 6k±1 wheel factorization — about 3x fewer divisions than naive trial division, identical results. It is pure (safe inside inlined functions) and works on every backend.
 
 ### Command-line arguments
 
@@ -144,7 +165,7 @@ Networking (`net_listen`, `net_connect`, `net_send`, ...), terminal games (`key_
 ## Edge cases
 
 - `to_int` never fails — it returns `0` on garbage.
-- `char_at` is a builtin, not a string method — `s.char_at(0)` does not compile.
+- `char_at` works both ways: `char_at(s, 0)` and `s.char_at(0)`.
 - `assert` aborts the program; it's for tests and invariants, not input validation.
 - Division and modulo by zero abort with `vulcan: division by zero` — that's a language rule, not a builtin.
 

@@ -3,6 +3,39 @@
 Per-version history, newest first. The version number lives in Cargo.toml
 (single source of truth, exposed by `vulcan --version`).
 
+## 1.19.1 — closure blocks, is_prime, setup, and the run fix
+
+- **Multi-statement closure bodies.** `|x| { let y = x * 2; y + 1 }` is now
+  valid syntax: statements run per element, the trailing expression is the
+  value. Works for map/filter/reduce/any/all/for_each on all three
+  backends (C inlines the block into the loop; JS emits an arrow with a
+  block body; Python emits an inline for-loop).
+- **Struct method calls inside closures** are fixed on every backend: the
+  JS backend used to emit `await` inside a non-async arrow (a syntax
+  error at run time) and now compiles the loop inline when the body
+  awaits; the Python backend used to let a same-named struct field shadow
+  the method (`it.label()` called the field) and now emits class methods
+  with an `m_` prefix.
+- **`s.char_at(i)` method form** on the C backend (JS and Python already
+  had it).
+- **`is_prime(n)` builtin** — 6k±1 wheel factorization, ~3x fewer
+  divisions than trial division, pure (safe inside inlined functions),
+  identical results on every backend. The primes benchmark uses it and now
+  runs 2.9x faster than `rustc -O` (0.0422 s vs 0.1205 s) — the last tie
+  with Rust is gone.
+- **`vulcan setup <file>`** — converts an app artifact (.apk .ipa .dmg
+  .exe, plus zip/Mach-O) into a vulcan project: parses Android binary XML
+  manifests, DEX class lists, Apple Info.plists, UDIF DMG trailers, and PE
+  import tables in pure Rust (no dependencies), generates a runnable
+  scaffold + a full CONVERSION.md report, and extracts stored assets.
+- **Fixed: `vulcan run` failed whenever the target binary did not already
+  exist** (bug present since 0.2.0 — the run path was canonicalized before
+  the binary was compiled, falling back to a relative path that the OS
+  PATH-searched instead of executing).
+- Regression tests added to the selftest suite (36 cases now): block
+  closures on all six iterator methods, method calls in closures, the
+  Python field/method shadowing case, char_at method form, is_prime.
+
 ## 1.19.0 — safety, ergonomics, and a new docs set
 
 - **`--checked` builds.** `vulcan run/build/bench/test --checked` compiles

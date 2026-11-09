@@ -101,9 +101,9 @@ item 1 | item 2 | item 3
 
 (`lib/strbuf.vulcan` formalizes this pattern if you want a name for it.)
 
-## Closures are single expressions
+## Closures are expressions — or small blocks
 
-`|x| x * factor` — one expression, captures outer variables, works everywhere. Multi-statement closure bodies are not part of the language. When a closure gets too clever, write a named function; forward references are allowed, so order doesn't matter.
+`|x| x * factor` — one expression, captures outer variables, works everywhere. Need a step first? Block bodies work too: `|x| { let y = x + 1; y }` — statements run per element, the trailing expression is the value. When a closure gets too clever, write a named function; forward references are allowed, so order doesn't matter.
 
 Also: don't call struct methods inside closures (`items.map(|it| it.label())`) — a known backend gap. Use field access or a `for` loop.
 

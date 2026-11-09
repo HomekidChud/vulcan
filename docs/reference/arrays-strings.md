@@ -141,7 +141,7 @@ todo: buy milk
 - `find` returns the first index of the substring, or `-1`.
 - `split(sep)` returns an array; `join(sep)` is the array method that glues them back.
 - `replace(old, new)` is a literal (non-regex) replacement; an empty `old` is a no-op.
-- `char_at(s, i)` is a builtin (not a method) and returns the character code.
+- `char_at(s, i)` is a builtin and also works as a method — `s.char_at(i)` — and returns the character code.
 - `+` concatenates; f-strings interpolate any expression.
 - String comparison with `==` and `!=` works.
 

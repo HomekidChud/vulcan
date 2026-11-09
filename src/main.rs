@@ -14,6 +14,7 @@ mod pkg;
 mod package;
 mod ide;
 mod selfhost;
+mod setup;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -53,6 +54,10 @@ the runtime cost of --safe. C backend only.
 
   vulcan doctor               verify your toolchain (clang or gcc,
                                make) and show what each command will use
+  vulcan setup <file>         convert an app artifact (.apk .ipa .dmg .exe
+                               or zip) into a Vulcan project: extracts the
+                               identity, components, classes and imports,
+                               generates a runnable scaffold + report
 
 USAGE (project — when a vulcan.toml is present):
   vulcan init <name>          scaffold a new project
@@ -145,6 +150,17 @@ fn main() {
     }
     if cmd == "doctor" {
         doctor();
+        return;
+    }
+    if cmd == "setup" {
+        let file = match args.get(2) {
+            Some(f) => f.clone(),
+            None => {
+                eprintln!("usage: vulcan setup <file.apk|ipa|dmg|exe|zip> — convert an app artifact to a Vulcan project");
+                std::process::exit(1);
+            }
+        };
+        setup::setup(&file);
         return;
     }
     if cmd == "self" {
@@ -391,8 +407,11 @@ fn main() {
         }
     };
 
-    // exec'ing a relative path like "main.vbin" would search PATH — make it absolute
-    let run_path = std::fs::canonicalize(&bin_path).unwrap_or_else(|_| PathBuf::from(&bin_path));
+    // exec'ing a relative path like "main.vbin" would search PATH — make it
+    // absolute. The binary may not exist yet (first run), so canonicalize can
+    // fail: fall back to cwd-joined, which is correct once compile_c has run.
+    let run_path = std::fs::canonicalize(&bin_path)
+        .unwrap_or_else(|_| std::env::current_dir().unwrap_or_default().join(&bin_path));
 
     match cmd.as_str() {
         "emit" => print!("{c_src}"),

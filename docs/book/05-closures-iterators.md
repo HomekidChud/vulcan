@@ -108,7 +108,7 @@ true true
 
 ## Limits to know about
 
-- Closure bodies are **single expressions**. `|x| { let y = x + 1; return y }` is not valid syntax — write `|x| x + 1`, or use a named function.
-- Calling a struct **method** inside a closure (`items.map(|it| it.label())`) is not reliable across backends yet — the JS backend miscompiles it. Use field access or a `for` loop instead. This is a known gap.
+- Closure bodies are **expressions or blocks**. A block body ends with the value expression: `|x| { let y = x + 1; y }` (the last statement is the closure's value). `return` is not used inside closures.
+- Multi-statement blocks can't contain `return`, `break` or `continue` — the value is the trailing expression.
 
 Where to go next: [Chapter 6: Errors](06-errors.md) — `Option`, `Result`, and the `?` operator.

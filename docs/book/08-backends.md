@@ -112,7 +112,7 @@ Vulcan removes most portability traps for you — integer division truncates the
 
 1. **Pass arrays in, get arrays back, reassign.** Arrays passed as function parameters are copied — `items = add_item(items, ...)` is the pattern that works everywhere.
 2. **Copy-in, copy-out for big state.** The physics engine's `w = world_step(w, dt)` is the canonical example: the function takes the world, returns the new world, the caller reassigns.
-3. **Avoid struct method calls inside closures** — a known backend gap (the JS backend miscompiles them today).
+3. **Struct method calls inside closures** are supported on every backend (fixed in 1.19.1 — the JS backend used to emit invalid `await` inside a non-async arrow; it now compiles the loop inline).
 4. **Don't depend on float formatting beyond 6 significant digits** — `print` and f-strings show 6 significant digits on every backend, which is what makes `1.0 / 3.0` print `0.333333` everywhere.
 5. **The environment differs.** `file_write` works natively but is in-memory in the web bundle; `net_*` needs real sockets. Same API, different environment — test on the target you ship to.
 

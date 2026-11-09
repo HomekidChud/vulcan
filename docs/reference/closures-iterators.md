@@ -97,15 +97,15 @@ true true
 
 ## Semantics
 
-- Closure bodies are **single expressions** — `|x| x * factor`, `|acc, x| acc + x`.
+- Closure bodies are a **single expression** or a **block ending in the value expression** — `|x| x * factor`, `|acc, x| acc + x`, `|x| { let y = x + 1; y }`.
 - Closures **capture** outer variables by value at call time.
 - The iterator methods **return new arrays** (`map`, `filter`) or a value (`reduce`, `any`, `all`); they never mutate the original.
 - They work on every backend with identical results — this is enforced by the selftest suite.
 
 ## Edge cases
 
-- Multi-statement closure bodies (`|x| { let y = x + 1; return y }`) are a **syntax error**. Write a single expression, or use a named function / `for` loop.
-- Calling a struct **method** inside a closure (`items.map(|it| it.label())`) miscompiles on the JS backend today — a known gap. Use field access (`|it| it.text`) or a loop.
+- Block bodies (`|x| { let y = x + 1; y }`) run their statements per element; the trailing expression is the value. `return`/`break`/`continue` are not allowed inside a closure block.
+- Calling a struct **method** inside a closure (`items.map(|it| it.label())`) works on every backend (fixed in 1.19.1).
 - `reduce` on an empty array returns the initial value.
 
 ## See also

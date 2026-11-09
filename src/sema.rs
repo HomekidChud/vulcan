@@ -228,6 +228,15 @@ fn walk_expr(e: &Expr, out: &mut Vec<Ty>) {
         // closures are inlined by the iterator methods; they are walked for
         // diagnostics but never evaluated standalone
         Expr::Closure { body, .. } => walk_expr(body, out),
+        Expr::Block { stmts, value } => {
+            for st in stmts {
+                if let Stmt::Expr(e) = st { walk_expr(e, out); }
+                // let/if/… initializers are walked by their own arms via
+                // walk_stmt when reachable; here we only need expression types
+                if let Stmt::Let { init, .. } = st { walk_expr(init, out); }
+            }
+            walk_expr(value, out);
+        }
         Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bool(_) | Expr::Char(_) | Expr::Ident(_) => {}
     }
 }
