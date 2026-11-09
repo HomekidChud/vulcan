@@ -4,7 +4,7 @@
 //  - mobile:  Capacitor project wrapping the web bundle (iOS/Android)
 //  - android: a ready-to-build native Android project (WebView) and, when the SDK is found, a signed .apk
 //  - linux/windows/macos: native C cross-build scripts
-pub fn package(entry: &str, platform: &str, assets: Option<&str>, name: Option<&str>, fast: Option<bool>) {
+pub fn package(entry: &str, platform: &str, assets: Option<&str>, name: Option<&str>, fast: Option<bool>, icon: Option<&str>) {
     // 3D games default to unchecked array access (no per-access bounds test); `--checked` restores it
     let fast = fast.unwrap_or(matches!(platform, "web3d" | "android"));
     crate::codegen_js::set_unchecked(fast);
@@ -19,7 +19,7 @@ pub fn package(entry: &str, platform: &str, assets: Option<&str>, name: Option<&
         "web3d" => web3d_bundle(stem, &js, assets),
         "desktop" => desktop_bundle(stem, &js, is3d, assets),
         "mobile" => mobile_bundle(stem, &js, is3d, assets),
-        "android" => android_bundle(stem, &js, assets),
+        "android" => android_bundle(stem, &js, assets, icon),
         "linux" | "windows" | "macos" => {
             let c_src = crate::codegen::generate(&program);
             native_bundle(stem, platform, &c_src)
@@ -37,7 +37,12 @@ pub fn package(entry: &str, platform: &str, assets: Option<&str>, name: Option<&
     for (name, content) in files {
         let path = format!("{dir}/{name}");
         if let Some(parent) = std::path::Path::new(&path).parent() { let _ = std::fs::create_dir_all(parent); }
-        std::fs::write(&path, content).unwrap();
+        if content == "__VULCAN_BINARY_ICON__" {
+            // raw byte copy for binary assets (custom launcher icons)
+            if let Some(src) = icon { let _ = std::fs::copy(src, &path); }
+        } else {
+            std::fs::write(&path, content).unwrap();
+        }
         if name == "build.sh" {
             #[cfg(unix)]
             {
@@ -69,6 +74,13 @@ fn web_bundle(stem: &str, js: &str) -> (String, Vec<(String, String)>) {
 // web3d: WebGL2 game bundle. One self-contained index.html: the compiled program,
 // the host runtime (renderer, input, audio, 1v1 networking) and an embedded assets
 // folder (mods, modpacks, shader packs) readable through file_read/file_list.
+//
+// If the assets dir (or the folder holding the entry file) contains a `game.json`,
+// it is injected as window.VULCAN_GAME and the host merges it over its defaults:
+//   title      page title
+//   help       { "Tab name": html } replaces/adds help tabs; false removes the help system
+//   first_help tab to auto-open on first run (name, or false to never auto-open)
+//   touch      touch-control default overrides (same keys the Options editor saves)
 fn web3d_bundle(stem: &str, js: &str, assets: Option<&str>) -> (String, Vec<(String, String)>) {
     let mut map: Vec<(String, String)> = Vec::new();
     if let Some(root) = assets {
@@ -82,14 +94,86 @@ fn web3d_bundle(stem: &str, js: &str, assets: Option<&str>) -> (String, Vec<(Str
     }
     json.push('}');
     let json = json.replace("</", "<\\/");
+    // game.json (kept out of the embedded assets map): host chrome overrides
+    let mut game_cfg = String::new();
+    let mut title = file_stem(stem).to_string();
+    let entry_dir = match stem.rfind('/') { Some(i) => &stem[..i], None => "." };
+    let cands = [
+        assets.map(|a| format!("{a}/game.json")),
+        Some(format!("{entry_dir}/game.json")),
+        Some(format!("{entry_dir}/../game.json")),
+    ];
+    for cand in cands {
+        let Some(path) = cand else { continue };
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            if let Some(v) = json5_or_json(&text) {
+                game_cfg = v;
+                if let Some(t) = cfg_str(&text, "title") { title = t; }
+            }
+            break;
+        }
+    }
     let host = include_str!("../runtime/web3d_host.js").replace("</script", "<\\/script");
+    let host = if game_cfg.is_empty() { host } else {
+        format!("window.VULCAN_GAME = {game_cfg};\n{host}")
+    };
     let prog = js.replace("</script", "<\\/script");
     let html = include_str!("../runtime/web3d.html")
-        .replace("__TITLE__", &file_stem(stem))
+        .replace("__TITLE__", &title)
         .replace("__ASSETS_JSON__", &json)
         .replace("__HOST_JS__", &host)
         .replace("__PROGRAM_JS__", &prog);
     (format!("package-{}-web3d", file_stem(stem)), vec![("index.html".into(), html)])
+}
+
+// minimal validation: accept the text if it parses as a JSON object (comments allowed)
+fn json5_or_json(text: &str) -> Option<String> {
+    let t = text.trim();
+    if !t.starts_with('{') { return None; }
+    // crude JSON5 support: strip // and /* */ comments, then try serde-less parse via std
+    let mut cleaned = String::new();
+    let mut in_str = false;
+    let bytes: Vec<char> = t.chars().collect();
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if in_str {
+            cleaned.push(c);
+            if c == '\\' && i + 1 < bytes.len() { cleaned.push(bytes[i + 1]); i += 2; continue; }
+            if c == '"' { in_str = false; }
+        } else {
+            if c == '"' { in_str = true; cleaned.push(c); }
+            else if c == '/' && i + 1 < bytes.len() && bytes[i + 1] == '/' {
+                while i < bytes.len() && bytes[i] != '\n' { i += 1; }
+                continue;
+            } else if c == '/' && i + 1 < bytes.len() && bytes[i + 1] == '*' {
+                i += 2;
+                while i + 1 < bytes.len() && !(bytes[i] == '*' && bytes[i + 1] == '/') { i += 1; }
+                i += 2;
+                continue;
+            } else { cleaned.push(c); }
+        }
+        i += 1;
+    }
+    // std has no JSON parser; accept if it survived stripping and still looks like an object
+    if cleaned.trim().starts_with('{') && cleaned.trim().ends_with('}') { Some(cleaned.trim().to_string()) } else { None }
+}
+
+// pull a top-level "key": "value" string out of a JSON-ish config (for title)
+fn cfg_str(text: &str, key: &str) -> Option<String> {
+    let pat = format!("\"{key}\"");
+    let i = text.find(&pat)?;
+    let rest = text[i + pat.len()..].trim_start();
+    let rest = rest.strip_prefix(':')?.trim_start();
+    if !rest.starts_with('"') { return None; }
+    let mut out = String::new();
+    let mut chars = rest[1..].chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            if let Some(n) = chars.next() { out.push(n); }
+        } else if c == '"' { break; } else { out.push(c); }
+    }
+    if out.is_empty() { None } else { Some(out) }
 }
 
 fn collect_assets(root: &std::path::Path, dir: &std::path::Path, out: &mut Vec<(String, String)>) {
@@ -521,7 +605,7 @@ Notarization for distribution outside the App Store:
 // A tiny native shell: one Activity with a full-screen WebView that loads the bundled
 // page from assets. No Gradle: build.sh calls aapt2 / javac / d8 / apksigner directly,
 // which takes a few seconds.
-fn android_bundle(stem: &str, js: &str, assets: Option<&str>) -> (String, Vec<(String, String)>) {
+fn android_bundle(stem: &str, js: &str, assets: Option<&str>, icon: Option<&str>) -> (String, Vec<(String, String)>) {
     let name = file_stem(stem);
     let is3d = js.contains("gfx_open(") || js.contains("__host.gfx_open") || js.contains("H.gfx_open");
     let (_d, webfiles) = if is3d { web3d_bundle(stem, js, assets) } else { web_bundle(stem, js) };
@@ -534,7 +618,19 @@ fn android_bundle(stem: &str, js: &str, assets: Option<&str>) -> (String, Vec<(S
     for (n, c) in webfiles { files.push((format!("assets/{n}"), c)); }
     files.push(("AndroidManifest.xml".into(), fill(ANDROID_MANIFEST)));
     files.push((format!("src/{}/MainActivity.java", pkg.replace('.', "/")), fill(ANDROID_ACTIVITY)));
-    files.push(("res/drawable/ic_launcher.xml".into(), ANDROID_ICON.into()));
+    // launcher icon: the game's own file (png or android vector xml) via --icon,
+    // otherwise the built-in default. Same manifest reference either way.
+    // Binary files (png) can't ride the text file map — package() copies them raw.
+    let mut icon_files: Vec<(String, String)> = Vec::new();
+    match icon.filter(|p| std::path::Path::new(p).exists()) {
+        Some(p) => {
+            let ext = std::path::Path::new(p).extension()
+                .and_then(|e| e.to_str()).unwrap_or("png");
+            icon_files.push((format!("res/drawable/ic_launcher.{ext}"), "__VULCAN_BINARY_ICON__".into()));
+        }
+        None => icon_files.push(("res/drawable/ic_launcher.xml".into(), ANDROID_ICON.into())),
+    }
+    for (n, c) in icon_files { files.push((n, c)); }
     files.push(("build.sh".into(), fill(ANDROID_BUILD)));
     files.push(("README.md".into(), fill(ANDROID_README)));
     (format!("package-{name}-android"), files)

@@ -6,6 +6,12 @@
 (function () {
   const H = {};
   globalThis.__VULCAN_HOST__ = H;
+
+  // ------------------------------------------------------------------ game config
+  // window.VULCAN_GAME is injected by `vulcan package` from the game's game.json
+  // (assets dir). Everything the host hardcodes by default — help tabs, first-run
+  // help, touch layout defaults — can be replaced per game; nothing is forced.
+  const GAME = (typeof window !== "undefined" && window.VULCAN_GAME) || {};
   const $ = (id) => document.getElementById(id);
 
   // ------------------------------------------------------------------ virtual files
@@ -661,8 +667,8 @@ uniform sampler2D uPass0; uniform sampler2D uPass1; uniform sampler2D uPass2; un
   let touchEl = null, stickEl = null, knobEl = null, menuArm = 0;
   const tpt = new Map();                 // pointerId -> {role, ...}
   const TS_DEF = { size: 1, opacity: 0.8, sens: 1, lefty: false, float: true, sprint: true, labels: true, hints: true };
-  let TS = Object.assign({}, TS_DEF, { pos: {} });
-  try { const o = JSON.parse(localStorage.getItem("vctouch") || "{}"); TS = Object.assign({}, TS_DEF, o, { pos: (o && o.pos) || {} }); } catch (e) { /* storage blocked */ }
+  let TS = Object.assign({}, TS_DEF, GAME.touch || {}, { pos: {} });
+  try { const o = JSON.parse(localStorage.getItem("vctouch") || "{}"); TS = Object.assign({}, TS_DEF, GAME.touch || {}, o, { pos: (o && o.pos) || {} }); } catch (e) { /* storage blocked */ }
   function saveTS() { try { localStorage.setItem("vctouch", JSON.stringify(TS)); } catch (e) { /* ignore */ } }
   const TB = {
     hit:   { id: "tb-hit",   w: 88, h: 88, a: "br", x: 64,  y: 68,  name: "HIT" },
@@ -1094,6 +1100,9 @@ uniform sampler2D uPass0; uniform sampler2D uPass1; uniform sampler2D uPass2; un
     const closeOpts = () => { if (opts) opts.classList.remove("open"); };
     if (optbtn) optbtn.onclick = (e) => { e.stopPropagation(); opts.classList.toggle("open"); };
     document.addEventListener("pointerdown", (e) => { if (opts && !e.target.closest("#barwrap")) closeOpts(); }, true);
+    // Default help tabs (used when the game ships no game.json help of its own).
+    // A game replaces any or all tabs via game.json: "help": { "Tab name": "<h4>..</h4>" },
+    // or removes the help system entirely with "help": false.
     const HELP = {
       "Quick start": `<h4>Quick start</h4><ul>
         <li>Pick a mode in the main menu: <b>Practice</b> (vs bot), <b>1v1 Online</b> (vs a friend) or <b>Sandbox</b>.</li>
@@ -1120,22 +1129,34 @@ uniform sampler2D uPass0; uniform sampler2D uPass1; uniform sampler2D uPass2; un
         <li>The friend picks <b>Join</b>, pastes the code, then copies their reply code back to the host. The host pastes it and presses Connect.</li>
         <li>Both players need the same modpack. Use Cancel on the waiting screen to go back.</li></ul>`,
     };
+    // game.json "help" replaces the tab set entirely (defaults stay for games
+    // that ship no game.json); false removes the whole help system
+    let helpOn = true;
+    let helpTabs = HELP;
+    if (GAME.help === false) helpOn = false;
+    else if (GAME.help && typeof GAME.help === "object") helpTabs = GAME.help;
+    if (helpOn && Object.keys(helpTabs).length === 0) helpOn = false;
     const helpEl = $("help"), tabsEl = $("help-tabs"), bodyEl = $("help-body");
+    // first tab to open: game.json "first_help" (tab name, or false to never auto-open)
+    const firstHelp = (GAME.first_help === undefined) ? (isTouch ? "Touch" : "Quick start") : GAME.first_help;
     function showTab(name) {
-      bodyEl.innerHTML = HELP[name];
+      bodyEl.innerHTML = helpTabs[name];
       for (const b of tabsEl.children) b.classList.toggle("on", b.textContent === name);
     }
-    if (helpEl) {
-      for (const name of Object.keys(HELP)) { const b = document.createElement("button"); b.textContent = name; b.onclick = () => showTab(name); tabsEl.appendChild(b); }
-      const openHelp = (tab) => { closeOpts(); showTab(tab || "Quick start"); helpEl.classList.add("open"); };
+    if (helpEl && helpOn) {
+      for (const name of Object.keys(helpTabs)) { const b = document.createElement("button"); b.textContent = name; b.onclick = () => showTab(name); tabsEl.appendChild(b); }
+      const openHelp = (tab) => { closeOpts(); showTab(tab || firstHelp); helpEl.classList.add("open"); };
       const closeHelp = () => { helpEl.classList.remove("open"); try { localStorage.setItem("vchelp", "1"); } catch (e) { /* ignore */ } };
-      $("helpbtn").onclick = () => openHelp(isTouch ? "Touch" : "Quick start");
+      $("helpbtn").onclick = () => openHelp(firstHelp);
       $("help-close").onclick = closeHelp;
       helpEl.addEventListener("pointerdown", (e) => { e.stopPropagation(); if (e.target === helpEl) closeHelp(); });
       window.addEventListener("keydown", (e) => { if (!helpEl.classList.contains("open")) return; e.stopImmediatePropagation(); if (e.key === "Escape") closeHelp(); }, true);
       window.addEventListener("keyup", (e) => { if (helpEl.classList.contains("open")) e.stopImmediatePropagation(); }, true);
       let seen = false; try { seen = !!localStorage.getItem("vchelp"); } catch (e) { /* ignore */ }
-      if (!seen) setTimeout(() => openHelp(isTouch ? "Touch" : "Quick start"), 600);
+      if (!seen && firstHelp !== false) setTimeout(() => openHelp(firstHelp), 600);
+    } else if (helpEl) {
+      helpEl.remove();
+      const hb = $("helpbtn"); if (hb) hb.parentElement.style.display = "none";
     }
     const cz = $("customizebtn"); if (cz) cz.onclick = () => { closeOpts(); startEdit(); };
     const qs = $("qualsel"); if (qs) { qs.value = quality; qs.onchange = () => applyQuality(qs.value); }

@@ -1,0 +1,10 @@
+{
+  "title": "Vulcan Obby",
+  "first_help": "How to play",
+  "help": {
+    "How to play": "<h4>How to play</h4><ul><li>Reach the <b>gold finish pad</b> at the end of the course.</li><li>Mint-green pads are <b>checkpoints</b> - fall or burn and you respawn at the last one.</li><li><b>Red</b> is lava. <b>Cyan</b> platforms move - ride them. The <b>spinning red bar</b> kills: jump over it as it passes.</li><li>Coins are optional bragging rights. The timer is not.</li></ul>",
+    "Keyboard and mouse": "<h4>Keyboard and mouse</h4><ul><li><kbd>W A S D</kbd> move, <kbd>Space</kbd> jump (hold to hop), <kbd>Shift</kbd> sprint.</li><li><kbd>R</kbd> respawn at the last checkpoint, <kbd>Esc</kbd> back to the menu.</li></ul>",
+    "Touch": "<h4>Touch</h4><ul><li>On-screen arrows move you, <b>JUMP</b> jumps.</li><li>Buttons can be moved and resized: Options > Customize touch controls.</li></ul>"
+  },
+  "touch": { "sprint": false }
+}

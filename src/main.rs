@@ -109,15 +109,16 @@ fn main() {
     }
     if cmd == "package" {
         let file = args.get(2).map(|s| s.as_str())
-            .unwrap_or_else(|| { eprintln!("usage: vulcan package <file.vulcan> --platform <web|web3d|android|desktop|mobile|linux|windows|macos> [--assets dir] [--name n] [--fast|--checked]"); std::process::exit(1); });
+            .unwrap_or_else(|| { eprintln!("usage: vulcan package <file.vulcan> --platform <web|web3d|android|desktop|mobile|linux|windows|macos> [--assets dir] [--name n] [--icon file.png] [--fast|--checked]"); std::process::exit(1); });
         if !Path::new(file).exists() {
             eprintln!("error: file not found: {file}");
             std::process::exit(1);
         }
         let assets = args.iter().position(|a| a == "--assets").and_then(|i| args.get(i + 1)).cloned();
         let name = args.iter().position(|a| a == "--name").and_then(|i| args.get(i + 1)).cloned();
+        let icon = args.iter().position(|a| a == "--icon").and_then(|i| args.get(i + 1)).cloned();
         let fast = if args.iter().any(|a| a == "--fast") { Some(true) } else if args.iter().any(|a| a == "--checked") { Some(false) } else { None };
-        package::package(file, &platform, assets.as_deref(), name.as_deref(), fast);
+        package::package(file, &platform, assets.as_deref(), name.as_deref(), fast, icon.as_deref());
         return;
     }
     if !matches!(cmd.as_str(), "run" | "build" | "emit" | "bench" | "test") {

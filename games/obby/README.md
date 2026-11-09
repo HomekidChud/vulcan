@@ -39,6 +39,10 @@ best time persists on the device.
 
 Touch devices get on-screen arrow and JUMP buttons automatically.
 
+The game ships a `game.json` — its help tabs, first-run help, title and touch
+defaults are its own, not the host's Vulcancraft-flavoured defaults (see
+`games/README.md`).
+
 ## How it's built
 
 Everything — the avatar mesh, the AABB physics (gravity, jumping, per-axis
